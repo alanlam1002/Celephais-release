@@ -4,7 +4,7 @@
 # kadath_add_exec() without re-including it.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CMakeExec.cmake)
 
-set(KADATH_APPS NS NS_nosym NS2d NS2d_xcts BH BH2d BHNS BNS BNS_nosym)
+set(KADATH_APPS NS NS_nosym NS2d NS2d_xcts BH BH2d BHNS BNS BNS_nosym Trumpet1d)
 # Non-app subdirectories that legitimately carry a CMakeLists.txt or sources.
 set(KADATH_APPS_EXCLUDED cmake shared submission_scripts)
 

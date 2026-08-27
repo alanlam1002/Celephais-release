@@ -91,6 +91,7 @@ namespace Kadath
         void find_other_dom(int, int, int&, int&) const override;
         Val_domain der_normal(const Val_domain&, int) const override;
         Val_domain der_partial_var(const Val_domain&, int) const override;
+        Val_domain der_r(const Val_domain&) const override;
         Val_domain div_r(const Val_domain&) const override;
         int nbr_unknowns(const Tensor&, int) const override;
         /**
@@ -241,6 +242,7 @@ namespace Kadath
         Val_domain der_normal(const Val_domain&, int) const override;
         double val_boundary(int, const Val_domain&, const Index&) const override;
         Val_domain der_partial_var(const Val_domain&, int) const override;
+        Val_domain der_r(const Val_domain&) const override;
 
         int nbr_unknowns(const Tensor&, int) const override;
         /**
@@ -390,6 +392,7 @@ namespace Kadath
         Val_domain der_normal(const Val_domain&, int) const override;
         double val_boundary(int, const Val_domain&, const Index&) const override;
         Val_domain der_partial_var(const Val_domain&, int) const override;
+        Val_domain der_r(const Val_domain&) const override;
         Val_domain mult_xm1(const Val_domain&) const override;
         Val_domain div_xm1(const Val_domain&) const override;
         Val_domain mult_x(const Val_domain&) const override;

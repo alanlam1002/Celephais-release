@@ -95,4 +95,17 @@ namespace Kadath
         }
         return -res / alpha;
     }
+    /* der_r: the radial derivative on a 1-D radial domain IS the derivative
+     * with respect to the absolute coordinate.  Domain::der_r throws by
+     * default, which made the equation-parser operators dr(), ddr() and srdr()
+     * unusable on every Space_oned-family space -- and there is no other scalar
+     * first-derivative operator in the string language (partial_X returns a
+     * rank-1 tensor).  Added for the trumpet 1-D solver; Domain::ddr is already
+     * der_r().der_r(), so ddr() starts working too and must agree with lap(),
+     * which reaches the same result through Domain::laplacian. */
+    Val_domain Domain_oned_inf::der_r(const Val_domain& so) const
+    {
+        return so.der_abs(1);
+    }
+
 } // namespace Kadath

@@ -33,6 +33,7 @@
 #include "For_Kadath/Space/space.hpp"
 
 #include "space/space_oned_trumpet.hpp"
+#include "src/table_io.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -49,105 +50,13 @@ using Kadath::Dim_array;
 using Kadath::Index;
 using Kadath::Scalar;
 using Kadath::Val_domain;
+using TrumpetIO::DomainSpec;
+using TrumpetIO::PointRow;
+using TrumpetIO::Table;
+using TrumpetIO::read_table;
 
 namespace
 {
-
-constexpr double kInf = std::numeric_limits<double>::infinity();
-
-struct DomainSpec
-{
-    std::string kind;      // "qcq" | "inf" | "ori"
-    double r_int = 0.0;
-    double r_ext = 0.0;
-    int nbr = 0;
-};
-
-struct PointRow
-{
-    int dom = 0;
-    int ipt = 0;
-    double r = 0.0, W = 0.0, Rr = 0.0, oor = 0.0;
-};
-
-struct Table
-{
-    std::string tag, mode;
-    double M = 1.0, W0 = 0.0;
-    std::vector<DomainSpec> doms;
-    std::vector<std::vector<PointRow>> pts;   // [domain][ipoint]
-};
-
-double parse_double(const std::string& s)
-{
-    if (s == "inf")
-        return kInf;
-    if (s == "-inf")
-        return -kInf;
-    return std::stod(s);
-}
-
-Table read_table(const std::string& path)
-{
-    std::ifstream fh(path);
-    if (!fh)
-        throw std::runtime_error("cannot open table: " + path);
-
-    Table t;
-    int ndom = -1;
-    std::string line;
-    while (std::getline(fh, line)) {
-        if (line.empty() || line[0] == '#')
-            continue;
-        std::istringstream is(line);
-        std::string key;
-        is >> key;
-        if (key == "version") {
-            int v;
-            is >> v;
-            if (v != 1)
-                throw std::runtime_error("unsupported table version");
-        } else if (key == "tag") {
-            is >> t.tag;
-        } else if (key == "mode") {
-            is >> t.mode;
-        } else if (key == "M") {
-            std::string v;
-            is >> v;
-            t.M = parse_double(v);
-        } else if (key == "W0") {
-            std::string v;
-            is >> v;
-            t.W0 = parse_double(v);
-        } else if (key == "ndom") {
-            is >> ndom;
-            t.doms.resize(ndom);
-            t.pts.resize(ndom);
-        } else if (key == "domain") {
-            int d;
-            std::string kind, ri, re;
-            int nbr;
-            is >> d >> kind >> ri >> re >> nbr;
-            t.doms.at(d) = DomainSpec{kind, parse_double(ri), parse_double(re), nbr};
-        } else if (key == "point") {
-            PointRow p;
-            std::string r, W, Rr, oor;
-            is >> p.dom >> p.ipt >> r >> W >> Rr >> oor;
-            p.r = parse_double(r);
-            p.W = parse_double(W);
-            p.Rr = parse_double(Rr);
-            p.oor = parse_double(oor);
-            t.pts.at(p.dom).push_back(p);
-        }
-    }
-    if (ndom < 0)
-        throw std::runtime_error("table has no ndom record");
-    for (int d = 0; d < ndom; d++)
-        if (static_cast<int>(t.pts[d].size()) != t.doms[d].nbr)
-            throw std::runtime_error("point count mismatch in domain "
-                                     + std::to_string(d));
-    return t;
-}
 
 /** Fill one Val_domain from a per-point accessor. */
 template <typename F>

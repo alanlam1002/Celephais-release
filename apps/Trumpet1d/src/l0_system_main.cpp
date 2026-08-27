@@ -92,6 +92,8 @@ int main(int argc, char** argv)
             std::string dn(pr.def);
             dn = dn.substr(0, dn.find(' '));
             double num = 0.0, den = 0.0;
+            int wd = -1, wi = -1;
+            std::vector<double> perdom(ndom, 0.0);
             for (int d = 0; d < ndom; d++) {
                 const Val_domain& V = syst.give_val_def_scalar_domain(dn.c_str(), d);
                 Index idx(m.space.get_domain(d)->get_nbr_points());
@@ -100,12 +102,23 @@ int main(int argc, char** argv)
                     const double a = rt.jet.at(pr.jet)[d][i];
                     if (!std::isfinite(a))
                         continue;
-                    num = std::max(num, std::fabs(V(idx) - a));
+                    const double e = std::fabs(V(idx) - a);
+                    perdom[d] = std::max(perdom[d], e);
+                    if (e > num) { num = e; wd = d; wi = i; }
                     den = std::max(den, std::fabs(a));
                 }
             }
             Trumpet::emit(std::string("A_spectral_deriv_rel_") + pr.jet,
                           num / std::max(den, 1e-300));
+            // WHERE the derivative error lives.  A global max cannot tell a
+            // narrow throat shell (where d/dr = (1/alpha) d/dx amplifies
+            // roundoff as (N/alpha)^2) from the compactified domain (whose
+            // outermost interior point stretches like N^2).  Playbook rule 5.
+            std::cout << "# locA " << pr.jet << " worst d" << wd << " ipt " << wi
+                      << " ; per-domain abs:";
+            for (int d = 0; d < ndom; d++)
+                std::cout << " d" << d << "=" << perdom[d];
+            std::cout << "  (den=" << den << ")\n";
         }
 
         double worst_all = 0.0;

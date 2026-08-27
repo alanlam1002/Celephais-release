@@ -166,6 +166,18 @@ inline CoefTable read_coefs(const std::string& path, const std::vector<DomainSpe
                 for (std::size_t q = 0; q < doms.size(); q++)
                     g[q].assign(doms[q].nbr, 0.0);
             }
+            if (d < 0 || d >= static_cast<int>(doms.size()) || i < 0
+                || i >= doms[d].nbr)
+                throw std::runtime_error(
+                    "coef table does not match the backbone: record (" + row + ","
+                    + jet + ") is at domain " + std::to_string(d) + " point "
+                    + std::to_string(i) + ", but the backbone has "
+                    + std::to_string(doms.size()) + " domains with "
+                    + (d >= 0 && d < static_cast<int>(doms.size())
+                           ? std::to_string(doms[d].nbr) + " points in that one"
+                           : std::string("no such domain"))
+                    + ".  The table is STALE -- regenerate it with "
+                      "scripts/l0_operators.py for this layout.");
             g.at(d).at(i) = parse_double(val);
         }
     }
@@ -223,19 +235,30 @@ inline RefTable read_ref(const std::string& path, const std::vector<DomainSpec>&
     return t;
 }
 
-/** bc <name> <kind> <field> <rhs_per_j2> <budget>, plus the excision geometry. */
+/**
+ * An inner boundary row.  SPEC v2 rows are GENERAL: a 6-vector on the r-jet
+ * (U, dr(U), Q, dr(Q), G, dr(G)), already normalised and with 1/(dW/dr) folded
+ * into the derivative slots by scripts/l0_bc_rows.py.  The older single-field
+ * kinds are kept because the --manufactured BVP still uses them.
+ *   bcrow <name> <c_U> <c_Up> <c_Q> <c_Qp> <c_G> <c_Gp> <rhs> <budget>
+ *   bc    <name> <kind> <field> <rhs_per_j2> <budget>
+ */
 struct BcRow
 {
-    std::string kind;    // "der1" (d/dr, a FIRST derivative) | "val"
-    std::string field;   // "U" | "Q" | "G" | "4U+Q+G"
-    double rhs = 0.0;    // per unit j2
-    double budget = 0.0; // the research session's own error budget
+    bool general = false;         // true  -> use coef[6]
+    double coef[6] = {0, 0, 0, 0, 0, 0};
+    std::string kind;             // "der1" (d/dr, a FIRST derivative) | "val"
+    std::string field;            // "U" | "Q" | "G" | "4U+Q+G"
+    double rhs = 0.0;             // per unit j2
+    double budget = 0.0;          // the research session's own error budget
 };
 
 struct BcTable
 {
     std::string tag;
+    int version = 1;
     double W0 = 0.0, r_in = 0.0, R_in = 0.0, dWdr = 0.0;
+    double verdict_target = 0.0, verdict_smear = 0.0;
     std::map<std::string, BcRow> row;
 };
 
@@ -253,9 +276,22 @@ inline BcTable read_bc(const std::string& path)
         std::string key;
         is >> key;
         if (key == "version") {
-            int v; is >> v;
-            if (v != 1)
+            is >> t.version;
+            if (t.version != 1 && t.version != 2)
                 throw std::runtime_error("unsupported bc table version");
+        } else if (key == "verdict_target" || key == "verdict_smear") {
+            std::string v; is >> v;
+            (key == "verdict_target" ? t.verdict_target : t.verdict_smear) =
+                parse_double(v);
+        } else if (key == "bcrow") {
+            std::string nm, x;
+            BcRow r;
+            r.general = true;
+            is >> nm;
+            for (double& c : r.coef) { is >> x; c = parse_double(x); }
+            is >> x; r.rhs = parse_double(x);
+            is >> x; r.budget = parse_double(x);
+            t.row[nm] = r;
         } else if (key == "tag") {
             is >> t.tag;
         } else if (key == "W0" || key == "r_in" || key == "R_in" || key == "dWdr") {

@@ -82,6 +82,38 @@ std::vector<std::string> split2(const std::string& s)
     return out;
 }
 
+/**
+ * The left-hand side of an inner BC row as a Kadath expression string.
+ *
+ * SPEC v2 rows are general 6-vectors on the r-jet (U, dr(U), Q, dr(Q), G,
+ * dr(G)); scripts/l0_bc_rows.py has already folded 1/(dW/dr) into the
+ * derivative slots (the rows are quoted in W-derivatives) and normalised the
+ * row by its own max|entry|.  Coefficients are emitted into the string with
+ * full precision -- these are boundary conditions, not diagnostics.
+ */
+std::string bc_lhs(const TrumpetIO::BcRow& r, const std::string& prefix,
+                   Kadath::System_of_eqs& syst)
+{
+    if (!r.general)
+        return (r.kind == "der1") ? "dr(" + r.field + ")"
+             : (r.field == "4U+Q+G" ? "4 * U + Q + G" : r.field);
+    static const char* JETSTR[6] = {"U", "dr(U)", "Q", "dr(Q)", "G", "dr(G)"};
+    static const char* SUF[6] = {"cU", "cUp", "cQ", "cQp", "cG", "cGp"};
+    std::string out;
+    for (int k = 0; k < 6; k++) {
+        if (r.coef[k] == 0.0)
+            continue;                       // a genuinely absent slot (Q_W is 0)
+        const std::string cn = prefix + SUF[k];
+        syst.add_cst(cn.c_str(), r.coef[k]);
+        if (!out.empty())
+            out += " + ";
+        out += cn + " * " + JETSTR[k];
+    }
+    if (out.empty())
+        throw std::runtime_error("bc row " + prefix + " is identically zero");
+    return out;
+}
+
 /** Boundary value of a named add_def, read through the Chebyshev coefficients. */
 double def_at_boundary(System_of_eqs& syst, const Kadath::Space& space,
                        const char* name, int dom, int bound)
@@ -162,8 +194,11 @@ int main(int argc, char** argv)
         // The manufactured BVP's inner data comes from the backbone itself:
         // U_M = (1-W)/2  =>  dU_M/dr = -(dW/dr)/2, and Q_M = 0 identically.
         if (manufactured) {
-            bc.row["mU"] = TrumpetIO::BcRow{"der1", "U", -0.5 * bc.dWdr, 0.0};
-            bc.row["mQ"] = TrumpetIO::BcRow{"der1", "Q", 0.0, 0.0};
+            TrumpetIO::BcRow mU, mQ;
+            mU.kind = "der1"; mU.field = "U"; mU.rhs = -0.5 * bc.dWdr;
+            mQ.kind = "der1"; mQ.field = "Q"; mQ.rhs = 0.0;
+            bc.row["mU"] = mU;
+            bc.row["mQ"] = mQ;
         }
     } catch (const std::exception& e) {
         if (rank == 0)
@@ -274,10 +309,7 @@ int main(int argc, char** argv)
         // backbone, not from the j2 ladder).
         const double rhs = manufactured ? it->second.rhs : j2 * it->second.rhs;
         syst.add_cst(cnm.c_str(), rhs);
-        const std::string lhs =
-            (it->second.kind == "der1")
-                ? "dr(" + it->second.field + ")"
-                : (it->second.field == "4U+Q+G" ? "4 * U + Q + G" : it->second.field);
+        const std::string lhs = bc_lhs(it->second, "r" + nm, syst);
         inner_eq.push_back(lhs + " = " + cnm);
         syst.add_eq_bc(0, INNER_BC, inner_eq.back().c_str());
     }
@@ -394,9 +426,7 @@ int main(int argc, char** argv)
     for (const auto& nm : inn) {
         const auto& r = bc.row.at(nm);
         const std::string dn = "CHK" + nm;
-        const std::string lhs =
-            (r.kind == "der1") ? "dr(" + r.field + ")"
-                               : (r.field == "4U+Q+G" ? "4 * U + Q + G" : r.field);
+        const std::string lhs = bc_lhs(r, "k" + nm, syst);
         syst.add_def((dn + " = " + lhs).c_str());
         const double got = def_at_boundary(syst, m.space, dn.c_str(), 0, INNER_BC);
         const double want = manufactured ? r.rhs : j2 * r.rhs;
@@ -411,9 +441,7 @@ int main(int argc, char** argv)
         const auto& nm = kv.first;
         const auto& r = kv.second;
         const std::string dn = "ALT" + nm;
-        const std::string lhs =
-            (r.kind == "der1") ? "dr(" + r.field + ")"
-                               : (r.field == "4U+Q+G" ? "4 * U + Q + G" : r.field);
+        const std::string lhs = bc_lhs(r, "a" + nm, syst);
         syst.add_def((dn + " = " + lhs).c_str());
         const double got = def_at_boundary(syst, m.space, dn.c_str(), 0, INNER_BC);
         Trumpet::emit("ALT_" + nm, got);

@@ -223,4 +223,60 @@ inline RefTable read_ref(const std::string& path, const std::vector<DomainSpec>&
     return t;
 }
 
+/** bc <name> <kind> <field> <rhs_per_j2> <budget>, plus the excision geometry. */
+struct BcRow
+{
+    std::string kind;    // "der1" (d/dr, a FIRST derivative) | "val"
+    std::string field;   // "U" | "Q" | "G" | "4U+Q+G"
+    double rhs = 0.0;    // per unit j2
+    double budget = 0.0; // the research session's own error budget
+};
+
+struct BcTable
+{
+    std::string tag;
+    double W0 = 0.0, r_in = 0.0, R_in = 0.0, dWdr = 0.0;
+    std::map<std::string, BcRow> row;
+};
+
+inline BcTable read_bc(const std::string& path)
+{
+    std::ifstream fh(path);
+    if (!fh)
+        throw std::runtime_error("cannot open bc table: " + path);
+    BcTable t;
+    std::string line;
+    while (std::getline(fh, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        std::istringstream is(line);
+        std::string key;
+        is >> key;
+        if (key == "version") {
+            int v; is >> v;
+            if (v != 1)
+                throw std::runtime_error("unsupported bc table version");
+        } else if (key == "tag") {
+            is >> t.tag;
+        } else if (key == "W0" || key == "r_in" || key == "R_in" || key == "dWdr") {
+            std::string v; is >> v;
+            const double d = parse_double(v);
+            if (key == "W0") t.W0 = d;
+            else if (key == "r_in") t.r_in = d;
+            else if (key == "R_in") t.R_in = d;
+            else t.dWdr = d;
+        } else if (key == "bc") {
+            std::string nm, rv, bv;
+            BcRow r;
+            is >> nm >> r.kind >> r.field >> rv >> bv;
+            r.rhs = parse_double(rv);
+            r.budget = parse_double(bv);
+            t.row[nm] = r;
+        }
+    }
+    if (t.row.empty())
+        throw std::runtime_error("bc table has no bc records: " + path);
+    return t;
+}
+
 } // namespace TrumpetIO

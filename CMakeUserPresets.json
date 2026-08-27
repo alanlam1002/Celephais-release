@@ -1,0 +1,31 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "sakura-trumpet",
+            "displayName": "Sakura login node — trumpet dev (serial-friendly)",
+            "inherits": "sakura",
+            "cacheVariables": {
+                "BUILD_TESTING": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "sakura-trumpet", "configurePreset": "sakura-trumpet", "jobs": 0 },
+        {
+            "name": "sakura-trumpet-bh2d",
+            "configurePreset": "sakura-trumpet",
+            "jobs": 0,
+            "targets": ["celephais", "bh2d_solve", "bh2d_reader"]
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "sakura-trumpet-smoke",
+            "configurePreset": "sakura-trumpet",
+            "filter": { "include": { "label": "smoke", "name": "smoke_bh2d$" } },
+            "output": { "outputOnFailure": true }
+        }
+    ]
+}

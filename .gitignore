@@ -1,0 +1,14 @@
+# Build trees (CMakePresets binaryDirs)
+/build/
+/build-debug/
+/build-coverage/
+/build-asan-ubsan/
+/build-logs/
+
+# Installed/staged artefacts
+/lib/
+apps/*/bin/
+apps/*/sbatch_outputs/
+
+# Generated at configure time
+/compile_commands.json

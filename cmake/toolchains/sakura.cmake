@@ -4,7 +4,9 @@
 # Manual setup: source cmake/env/sakura.sh && cmake --preset sakura
 
 # ── Compilers (Intel MPI wrappers, version set by module) ────────────────────
-set(CMAKE_CXX_COMPILER "mpigxx" CACHE FILEPATH "C++ compiler")
+# impi/2021.17's gcc/13 C++ wrapper is named "mpig++" (older impi/2019.9's gcc/10
+# wrapper was "mpigxx" instead).
+set(CMAKE_CXX_COMPILER "mpig++" CACHE FILEPATH "C++ compiler")
 set(CMAKE_C_COMPILER   "mpigcc" CACHE FILEPATH "C compiler")
 
 # ── MKL (replaces OpenBLAS/ScaLAPACK/LAPACK) ─────────────────────────────────

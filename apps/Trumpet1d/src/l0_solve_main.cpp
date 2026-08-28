@@ -129,6 +129,16 @@ double def_at_boundary(System_of_eqs& syst, const Kadath::Space& space,
 /** true when --horizon-order asks for the first-order reading. */
 static bool horizonorder_is_o1(const std::string& h) { return h.rfind("o1@", 0) == 0; }
 
+extern "C" {
+// Least squares by SVD.  MKL LAPACK is already linked and Kadath declares
+// dgesdd_ this way itself (src/Newton/do_newton_jfnk_schur.cpp).  dgelsd
+// returns the singular values of the stack as a by-product, which is exactly
+// the P3 diagnostic.
+void dgelsd_(int* m, int* n, int* nrhs, double* a, int* lda, double* b, int* ldb,
+             double* s, double* rcond, int* rank, double* work, int* lwork,
+             int* iwork, int* info);
+}
+
 int main(int argc, char** argv)
 {
     const int rank = KadathApps::init_mpi(argc, argv);
@@ -147,6 +157,10 @@ int main(int argc, char** argv)
     bool rownorm = false, manufactured = false, dumpresid = false;
     std::string jacdump, pinat = "inner", horizonfix, hside = "left", horder;
     double residfloor = 1e-12;
+    bool additive = false;
+    double addweight = 1.0;
+    std::string addequil = "appended";   // research's prescription
+    std::string addrows = "all";
     for (int i = 4; i < argc; i++) {
         const std::string k = argv[i];
         auto next = [&]() -> std::string {
@@ -197,6 +211,26 @@ int main(int argc, char** argv)
         // Relative floor below which a collocation point is too small to carry
         // a meaningful RELATIVE residual -- see the residual block below.
         else if (k == "--resid-floor") residfloor = std::stod(next());
+        // --additive  ROUND-4 FORMULATION.  Leave the square 339x339 baseline
+        // untouched -- no add_eq_order, all six physics conditions, matching
+        // intact -- and APPEND three rows that are exact properties of the
+        // continuum solution, then solve the consistent 342x339 least-squares
+        // problem.  Round 4's theorem: the horizon costs the continuum budget
+        // nothing, so the two bits the tau projection loses must be handed back
+        // WITHOUT taking anything away.
+        else if (k == "--additive") additive = true;
+        // relative weight on the appended rows, 1 = equilibrated to the median
+        // core-row norm.  A sensitivity knob, reported, never a tuning knob.
+        else if (k == "--add-weight") addweight = std::stod(next());
+        // rows = every row to unit norm (default); appended = research's
+        // literal prescription, only the appended rows scaled, core untouched;
+        // none = no scaling at all.  Row scaling is not neutral for a least
+        // squares problem, so which one is used is measured, not assumed.
+        else if (k == "--add-equil") addequil = next();
+        // which appended rows to use: all | compat (rows 1-2 only) | g (row 3
+        // only).  Lets the core-row inconsistency be attributed to a row
+        // rather than to "the formulation".
+        else if (k == "--add-rows") addrows = next();
         else if (k == "--dump-jacobian") jacdump = next();
         else if (k == "--manufactured") {
             // MANUFACTURED-SOLUTION BVP (playbook rule 2).  The exact mass mode
@@ -764,6 +798,88 @@ int main(int argc, char** argv)
         syst.add_eq_bc(dlast, OUTER_BC, (fld + " = " + cnm).c_str());
     }
 
+    // --- ROUND-4 APPENDED ROWS.  Registered last, so they are the final three
+    // eq_index values and are identifiable in the row metadata.  Every one is an
+    // exact property of the continuum solution:
+    //   1  E_K pointwise at r(2M)                     -- theorem: implied by
+    //   2  (E_chi_tt - kappa E_K) pointwise at r(2M)     evolution + the pins
+    //   3  outer G decay                              -- (0,0,1) is a non-solution
+    // so the rectangular system is CONSISTENT at truncation level and the
+    // least-squares solution is the square solution plus the two bits the tau
+    // projection drops.  Row 3 also retires the G-constant near-null.
+    int n_appended = 0;
+    if (additive) {
+        if (dh < 0) {
+            if (rank == 0)
+                std::cerr << "FATAL: --additive: no interface found where E_K's "
+                             "Upp vanishes\n";
+            MPI_Finalize();
+            return 2;
+        }
+        const auto& cv = m.coefs().v;
+        auto C = [&](const char* row, const char* jet, int d, int i) {
+            return cv.at(std::make_pair(std::string(row), std::string(jet)))[d][i];
+        };
+        const int ih = m.nbr(dh) - 1;
+        const double k1 = C("E_chi_tt", "Upp", dh, ih - 1) / C("E_K", "Upp", dh, ih - 1);
+        const double k2 = C("E_chi_tt", "Upp", dh, ih - 2) / C("E_K", "Upp", dh, ih - 2);
+        if (std::fabs(k1 - k2) > 1e-10 * std::fabs(k1)) {
+            if (rank == 0)
+                std::cerr << "FATAL: --additive: E_chi_tt.Upp / E_K.Upp is not "
+                             "constant near the interface\n";
+            MPI_Finalize();
+            return 2;
+        }
+        double rowmax = 0.0;
+        for (const char* jt : {"G", "Gp", "Q", "Qp", "U", "Up", "Upp"})
+            rowmax = std::max(rowmax, std::fabs(C("E_chi_tt", jt, dh, ih)));
+        for (const char* jt : {"G", "Gp", "Q", "U", "Up", "Upp"}) {
+            const double v = C("E_chi_tt", jt, dh, ih) - k1 * C("E_K", jt, dh, ih);
+            if (std::fabs(v) > 1e-12 * rowmax) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --additive: slot " << jt << " of E_chi_tt - "
+                              << k1 << "*E_K is " << v << ", not zero\n";
+                MPI_Finalize();
+                return 2;
+            }
+        }
+        const double kap_eff = k1 * m.row_norm(0, dh, ih) / m.row_norm(2, dh, ih);
+        syst.add_cst("hkap", kap_eff);
+        syst.add_def("ECOMPAT = EXT - hkap * EK");
+        if (addrows == "all" || addrows == "compat") {
+            syst.add_eq_bc(dh, OUTER_BC, "EK = 0");
+            syst.add_eq_bc(dh, OUTER_BC, "ECOMPAT = 0");
+            n_appended += 2;
+        }
+        // ROW 3 AND ITS TARGET.  Round 4 says the mass mode satisfies every
+        // appended row exactly at j2 = 0; that holds for rows 1 and 2 but NOT for
+        // this one -- the manufactured mass mode has G(inf) = -2, not 0 (see the
+        // --manufactured note above, and OUTVAL_G = -1.9999999999999996 in the
+        // control).  Targeting 0 there would fail P1 for a reason that has nothing
+        // to do with the formulation, so the target follows the same convention
+        // --outer already uses.
+        const double gtarget = manufactured ? -2.0 : 0.0;
+        if (addrows == "all" || addrows == "g") {
+            syst.add_cst("outGadd", gtarget);
+            syst.add_eq_bc(dlast, OUTER_BC, "G = outGadd");
+            n_appended += 1;
+        }
+        if (n_appended == 0) {
+            if (rank == 0)
+                std::cerr << "FATAL: --add-rows must be all, compat or g\n";
+            MPI_Finalize();
+            return 2;
+        }
+        if (rank == 0) {
+            std::cout << "# additive kappa=" << k1 << "  kappa_eff=" << kap_eff
+                      << "  outer-G target=" << gtarget << "\n";
+            std::cout << "# additive appended: EK@d" << dh << "/OUTER_BC, ECOMPAT@d"
+                      << dh << "/OUTER_BC, G@d" << dlast << "/OUTER_BC\n";
+            Trumpet::emit("ADD_kappa_eff", kap_eff);
+            Trumpet::emit("ADD_G_target", gtarget);
+        }
+    }
+
     if (rank == 0) {
         for (const auto& e : inner_eq)
             std::cout << "# inner  add_eq_bc(0, INNER_BC, \"" << e << "\")\n";
@@ -796,8 +912,207 @@ int main(int argc, char** argv)
     double err = 0.0, err0 = -1.0;
     int iter = 0;
     bool ok = false;
+    if (additive) {
+        // ---------------------------------------- additive least squares ----
+        // The system is LINEAR, so one step from a zero guess is exact and the
+        // Jacobian is the operator itself.  sec_member() and do_col_J() carry no
+        // squareness assertion, so the 342x339 stack is extracted from Kadath
+        // rather than hand-assembled: the core 339 rows are literally the
+        // baseline system's rows, in the same order.
+        m.set_fields_zero();
+        Kadath::Array<double> bb(syst.sec_member());
+        const int nrow = syst.get_nbr_conditions();
+        const int ncol = syst.get_nbr_unknowns();
+        const int ncore = nrow - n_appended;
+        std::vector<double> A(std::size_t(nrow) * ncol, 0.0), rhs(nrow, 0.0);
+        for (int r = 0; r < nrow; r++)
+            rhs[r] = bb(r);
+        for (int c = 0; c < ncol; c++) {
+            Kadath::Array<double> col(syst.do_col_J(c));
+            for (int r = 0; r < nrow; r++)
+                A[std::size_t(c) * nrow + r] = col(r);       // column-major for LAPACK
+        }
+        // EQUILIBRATION.  The core rows of this system span many orders (matching
+        // rows, tau rows and BC rows are not commensurate), and for a LEAST
+        // SQUARES problem row scaling is not neutral -- it decides what is being
+        // minimised.  So every row is scaled to unit norm first, which makes
+        // "consistent" mean the same thing for all of them, and the appended rows
+        // then carry `addweight` on top (1 = the same weight as a core row, which
+        // is research's "equilibrate to the median core-row norm" once the core is
+        // itself equilibrated).  addweight is a sensitivity knob, reported.
+        std::vector<double> rnorm(nrow, 0.0), rscale(nrow, 1.0);
+        for (int r = 0; r < nrow; r++) {
+            double t = 0.0;
+            for (int c = 0; c < ncol; c++)
+                t += A[std::size_t(c) * nrow + r] * A[std::size_t(c) * nrow + r];
+            rnorm[r] = std::sqrt(t);
+        }
+        double medcore;
+        {
+            std::vector<double> cc(rnorm.begin(), rnorm.begin() + ncore);
+            std::nth_element(cc.begin(), cc.begin() + ncore / 2, cc.end());
+            medcore = cc[ncore / 2];
+        }
+        for (int r = 0; r < nrow; r++) {
+            double t = 0.0;
+            for (int c = 0; c < ncol; c++)
+                t += A[std::size_t(c) * nrow + r] * A[std::size_t(c) * nrow + r];
+            rnorm[r] = std::sqrt(t);
+            if (rnorm[r] <= 0.0)
+                continue;
+            if (addequil == "rows")
+                rscale[r] = (r >= ncore ? addweight : 1.0) / rnorm[r];
+            else if (addequil == "appended")
+                rscale[r] = (r >= ncore) ? addweight * medcore / rnorm[r] : 1.0;
+            else if (addequil == "none")
+                rscale[r] = 1.0;
+        }
+        std::vector<double> core(rnorm.begin(), rnorm.begin() + ncore);
+        std::nth_element(core.begin(), core.begin() + ncore / 2, core.end());
+        const double med = core[ncore / 2];
+        std::vector<double> Awork(std::size_t(nrow) * ncol, 0.0);
+        std::vector<double> bwork(std::max(nrow, ncol), 0.0);
+        for (int r = 0; r < nrow; r++) {
+            for (int c = 0; c < ncol; c++)
+                Awork[std::size_t(c) * nrow + r] = A[std::size_t(c) * nrow + r] * rscale[r];
+            bwork[r] = rhs[r] * rscale[r];
+        }
+        std::vector<double> sv(std::min(nrow, ncol), 0.0);
+        int mm = nrow, nn = ncol, nrhs = 1, lda = nrow, ldb = std::max(nrow, ncol);
+        int rank_out = 0, info = 0, lwork = -1;
+        // rcond NEGATIVE: machine precision, so dgelsd truncates nothing that is
+        // genuinely there.  A too-large rcond silently returns the minimum-norm
+        // solution of a TRUNCATED problem -- measured: rcond 1e-13 against
+        // sv_max 2.1e6 cut at 2.1e-7, above the true sv_min 2.6e-8, and P1 read
+        // 0.55 for that reason alone.  ADD_rank is reported so it is never
+        // invisible.
+        double rcond = -1.0, wkopt = 0.0;
+        std::vector<int> iwork(std::size_t(11) * ncol + 3 * ncol * 32 + 256, 0);
+        std::vector<double> Atmp(Awork), btmp(bwork);
+        dgelsd_(&mm, &nn, &nrhs, Atmp.data(), &lda, btmp.data(), &ldb, sv.data(),
+                &rcond, &rank_out, &wkopt, &lwork, iwork.data(), &info);
+        lwork = int(wkopt);
+        std::vector<double> work(std::max(lwork, 1), 0.0);
+        const double scale_used = medcore;
+
+        // ITERATIVE REFINEMENT.  One step is exact in exact arithmetic -- the
+        // problem is linear -- but this operator's condition number is ~1e11 and a
+        // single dense SVD solve lands three to four orders short of what MUMPS
+        // reaches on the same square system (measured: 3.5e-7 against 6.5e-10 on
+        // the manufactured control with the appended rows switched off).  The gap
+        // is refinement, which Kadath's Newton loop gets for free by iterating.
+        // Recomputing sec_member() from the FIELDS each pass makes the residual
+        // honest rather than a running linear-algebra estimate; the matrix is
+        // unchanged, so only the right-hand side is rebuilt.
+        double post_core = 0.0, post_add = 0.0, rescore = 0.0, resadd = 0.0;
+        int refine = 0;
+        for (refine = 0; refine < 8; refine++) {
+            Kadath::Array<double> res(refine == 0 ? bb : syst.sec_member());
+            for (int r = 0; r < nrow; r++)
+                btmp[r] = res(r) * rscale[r];
+            for (int r = nrow; r < ldb; r++)
+                btmp[r] = 0.0;
+            Atmp = Awork;
+            dgelsd_(&mm, &nn, &nrhs, Atmp.data(), &lda, btmp.data(), &ldb, sv.data(),
+                    &rcond, &rank_out, &work[0], &lwork, iwork.data(), &info);
+            if (info != 0) {
+                if (rank == 0)
+                    std::cerr << "FATAL: dgelsd returned info = " << info << "\n";
+                MPI_Finalize();
+                return 1;
+            }
+            Kadath::Array<double> xx(ncol);
+            for (int cc2 = 0; cc2 < ncol; cc2++)
+                xx.set(cc2) = btmp[cc2];
+            int conte = 0;
+            syst.xx_to_vars_delta(xx, conte);
+            // residual FROM THE FIELDS, split core / appended -- P2
+            Kadath::Array<double> b2(syst.sec_member());
+            double pc = 0.0, pa = 0.0;
+            for (int r = 0; r < nrow; r++) {
+                double& acc = (r >= ncore ? pa : pc);
+                acc = std::max(acc, std::fabs(b2(r)));
+            }
+            if (rank == 0)
+                std::cout << "# additive refine " << refine + 1 << "  core " << pc
+                          << "  appended " << pa << "\n";
+            const bool stalled = (refine > 0 && pc > 0.5 * post_core);
+            post_core = pc;
+            post_add = pa;
+            if (stalled)
+                break;
+        }
+        rescore = post_core;
+        resadd = post_add;
+        // WHERE the core residual lives.  If the least-squares has to sacrifice
+        // core rows to satisfy the appended ones, which rows it sacrifices is the
+        // whole diagnosis: tau rows on the horizon domains would mean the appended
+        // rows are exposing the tau blind spot, anything else means they are
+        // over-constraining.
+        if (rank == 0) {
+            std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
+            syst.classify_equation_row_metadata(rmeta);
+            Kadath::Array<double> b3(syst.sec_member());
+            std::vector<std::pair<double, int>> ord;
+            for (int r = 0; r < ncore; r++)
+                ord.emplace_back(std::fabs(b3(r)), r);
+            std::sort(ord.rbegin(), ord.rend());
+            auto taxname = [](Kadath::RowTaxonomy t) -> const char* {
+                switch (t) {
+                    case Kadath::RowTaxonomy::Vol: return "Vol";
+                    case Kadath::RowTaxonomy::TauBc: return "TauBc";
+                    case Kadath::RowTaxonomy::TauMatch: return "TauMatch";
+                    default: return "other";
+                }
+            };
+            std::cout << "# additive worst core rows (|res|, taxonomy, dom, eq, mode):\n";
+            for (int k = 0; k < 8 && k < int(ord.size()); k++) {
+                const auto& rm = rmeta[ord[k].second];
+                std::cout << "#   " << ord[k].first << "  " << taxname(rm.taxonomy)
+                          << " d" << rm.dom << " eq" << rm.eq_index
+                          << " mode" << rm.basis_mode << "\n";
+            }
+            std::map<std::string, double> bytax;
+            std::map<int, double> bydom;
+            for (int r = 0; r < ncore; r++) {
+                bytax[taxname(rmeta[r].taxonomy)] =
+                    std::max(bytax[taxname(rmeta[r].taxonomy)], std::fabs(b3(r)));
+                bydom[rmeta[r].dom] = std::max(bydom[rmeta[r].dom], std::fabs(b3(r)));
+            }
+            std::cout << "# additive core residual by taxonomy:";
+            for (const auto& kv : bytax)
+                std::cout << " " << kv.first << "=" << kv.second;
+            std::cout << "\n# additive core residual by domain:";
+            for (const auto& kv : bydom)
+                std::cout << " d" << kv.first << "=" << kv.second;
+            std::cout << "\n";
+        }
+        err = post_core;
+        err0 = 0.0;
+        for (int r = 0; r < nrow; r++)
+            err0 = std::max(err0, std::fabs(bb(r)));
+        ok = true;
+        iter = 1;
+        if (rank == 0) {
+            std::cout << "# additive  " << nrow << " x " << ncol << "  core " << ncore
+                      << " + appended " << n_appended << "  median core-row norm "
+                      << med << "  appended scale " << scale_used << "\n";
+            Trumpet::emit("ADD_rows", nrow);
+            Trumpet::emit("ADD_cols", ncol);
+            Trumpet::emit("ADD_rank", rank_out);
+            Trumpet::emit("ADD_sv_min", sv[std::min(nrow, ncol) - 1]);
+            Trumpet::emit("ADD_sv_next", sv[std::min(nrow, ncol) - 2]);
+            Trumpet::emit("ADD_sv_max", sv[0]);
+            Trumpet::emit("ADD_res_core", post_core);
+            Trumpet::emit("ADD_res_appended", post_add);
+            Trumpet::emit("ADD_lsq_res_core", rescore);
+            Trumpet::emit("ADD_lsq_res_appended", resadd);
+            Trumpet::emit("ADD_scale", scale_used);
+            Trumpet::emit("ADD_weight", addweight);
+        }
+    }
     try {
-        while (iter < 12) {
+        while (!additive && iter < 12) {
             iter++;
             ok = syst.do_newton(prec, err);
             if (err0 < 0.0)

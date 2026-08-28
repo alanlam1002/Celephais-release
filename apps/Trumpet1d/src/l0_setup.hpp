@@ -34,6 +34,7 @@
 #include <cmath>
 #include <deque>
 #include <iomanip>
+#include <sstream>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -89,7 +90,15 @@ inline std::string field_of(const std::string& jet)
 
 inline void emit(const std::string& k, double v)
 {
-    std::cout << "RESULT " << k << " " << std::setprecision(17) << v << "\n";
+    // Built whole, then written in ONE << and flushed.  Gates gather these logs
+    // with 2>&1, and std::cerr is unbuffered while std::cout is not: a warning
+    // written from Kadath or from this app mid-flush lands INSIDE a RESULT line
+    // and silently destroys it (seen: "RESULT WARNING: ...\nBC1_dWdr_rel 2.7e-13",
+    // which cost the gate its BC1 assertion with a bare KeyError).  One atomic
+    // write plus a flush closes the window.
+    std::ostringstream os;
+    os << "RESULT " << k << " " << std::setprecision(17) << v << "\n";
+    std::cout << os.str() << std::flush;
 }
 
 /**

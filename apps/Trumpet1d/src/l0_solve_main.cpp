@@ -140,8 +140,8 @@ int main(int argc, char** argv)
 
     double j2 = 1.0, seed = 0.0, prec = 1e-11;
     std::string inner = "dU,dQ", outer = "U,G", pins = "EH,EM", profile;
-    bool rownorm = false, manufactured = false;
-    std::string jacdump, pinat = "inner";
+    bool rownorm = false, manufactured = false, dumpresid = false;
+    std::string jacdump, pinat = "inner", horizonfix, hside = "left";
     for (int i = 4; i < argc; i++) {
         const std::string k = argv[i];
         auto next = [&]() -> std::string {
@@ -161,6 +161,26 @@ int main(int argc, char** argv)
         else if (k == "--pin-at") pinat = next();
         else if (k == "--profile") profile = next();
         else if (k == "--rownorm") rownorm = true;
+        // Per-POINT row residuals.  The gate needs the TAU-projected residual
+        // (add_eq_inside drops the top two Chebyshev coefficients of each
+        // equation), and the pointwise maximum below is a different number
+        // entirely: it can sit at O(1) while the tau residual is at 1e-10 if
+        // the solution is under-resolved on that domain.  Emitting the
+        // samples lets scripts/l0_diag.py do the projection and report both.
+        else if (k == "--dump-resid") dumpresid = true;
+        // --horizon-fix f1,f2  BUDGET-NEUTRAL form of the horizon trial:
+        // at the interface where the rows degenerate, DROP the C1 matching
+        // of the two named fields and impose the two lost pointwise
+        // conditions (EK = 0, EXT = 0) instead.  Two out, two in, so all six
+        // physics conditions -- both inner rows, both constraint pins and
+        // both outer decay rows -- survive untouched.  Rationale: at a
+        // degenerate endpoint the operator itself relates the one-sided
+        // derivatives, so full C1 matching there is not independent data.
+        else if (k == "--horizon-fix") horizonfix = next();
+        // where the two recovered pointwise rows are imposed.  "left" puts
+        // both on the inner domain's outer face; "split" gives each adjacent
+        // domain one, which is what a lost C1 link on BOTH sides needs.
+        else if (k == "--horizon-side") hside = next();
         else if (k == "--dump-jacobian") jacdump = next();
         else if (k == "--manufactured") {
             // MANUFACTURED-SOLUTION BVP (playbook rule 2).  The exact mass mode
@@ -285,12 +305,96 @@ int main(int argc, char** argv)
         syst.add_eq_inside(d, "EXR = 0");
         syst.add_eq_inside(d, "EXT = 0");
     }
+    // Locate the interface at which the rows degenerate: the domain boundary
+    // where E_K's only second-derivative coefficient vanishes against its own
+    // grid maximum.  Found, never hardcoded -- a table without this structure
+    // makes --horizon-fix fail loudly instead of acting on the wrong point.
+    int dh = -1;
+    {
+        const auto& cv = m.coefs().v;
+        const auto& kUpp = cv.at(std::make_pair(std::string("E_K"),
+                                                std::string("Upp")));
+        double mx = 0.0;
+        for (int d = 0; d <= dlast; d++)
+            for (int i = 0; i < m.nbr(d); i++)
+                mx = std::max(mx, std::fabs(kUpp[d][i]));
+        for (int d = 0; d < dlast && dh < 0; d++)
+            if (std::fabs(kUpp[d][m.nbr(d) - 1]) < 1e-12 * mx)
+                dh = d;
+    }
+    const auto hfix = horizonfix.empty() ? std::vector<std::string>()
+                                         : split2(horizonfix);
+    if (!hfix.empty()) {
+        if (dh < 0) {
+            if (rank == 0)
+                std::cerr << "FATAL: --horizon-fix: no interface found where E_K's "
+                             "Upp vanishes\n";
+            MPI_Finalize();
+            return 2;
+        }
+        if (hfix.size() != 2) {
+            if (rank == 0)
+                std::cerr << "FATAL: --horizon-fix takes exactly two fields (two C1 "
+                             "matchings out, two pointwise rows in)\n";
+            MPI_Finalize();
+            return 2;
+        }
+        for (const auto& f : hfix)
+            if (f != "U" && f != "Q" && f != "G") {
+                if (rank == 0)
+                    std::cerr << "FATAL: --horizon-fix fields must be U, Q or G\n";
+                MPI_Finalize();
+                return 2;
+            }
+    }
     // --- C0 + C1 matching of all three fields at every interface
     for (int d = 0; d < dlast; d++)
         for (const char* f : {"U", "Q", "G"}) {
             syst.add_eq_matching(d, OUTER_BC, f);
+            if (d == dh
+                && std::find(hfix.begin(), hfix.end(), std::string(f)) != hfix.end()) {
+                if (rank == 0)
+                    std::cout << "# hfix   C1 matching of " << f << " at d" << d
+                              << "/OUTER_BC DROPPED\n";
+                continue;
+            }
             syst.add_eq_matching(d, OUTER_BC, (std::string("dr(") + f + ")").c_str());
         }
+    if (!hfix.empty()) {
+        if (hside == "left") {
+            syst.add_eq_bc(dh, OUTER_BC, "EK = 0");
+            syst.add_eq_bc(dh, OUTER_BC, "EXT = 0");
+            if (rank == 0)
+                std::cout << "# hfix   add_eq_bc(" << dh << ", OUTER_BC, \"EK = 0\")"
+                             "  and  \"EXT = 0\"\n";
+        } else if (hside == "right") {
+            syst.add_eq_bc(dh + 1, INNER_BC, "EK = 0");
+            syst.add_eq_bc(dh + 1, INNER_BC, "EXT = 0");
+            if (rank == 0)
+                std::cout << "# hfix   add_eq_bc(" << dh + 1 << ", INNER_BC, "
+                             "\"EK = 0\")  and  \"EXT = 0\"\n";
+        } else if (hside == "split") {
+            syst.add_eq_bc(dh, OUTER_BC, "EK = 0");
+            syst.add_eq_bc(dh + 1, INNER_BC, "EXT = 0");
+            if (rank == 0)
+                std::cout << "# hfix   add_eq_bc(" << dh << ", OUTER_BC, \"EK = 0\")"
+                             "  and  add_eq_bc(" << dh + 1
+                          << ", INNER_BC, \"EXT = 0\")\n";
+        } else if (hside == "split2") {
+            syst.add_eq_bc(dh, OUTER_BC, "EXT = 0");
+            syst.add_eq_bc(dh + 1, INNER_BC, "EK = 0");
+            if (rank == 0)
+                std::cout << "# hfix   add_eq_bc(" << dh << ", OUTER_BC, \"EXT = 0\")"
+                             "  and  add_eq_bc(" << dh + 1
+                          << ", INNER_BC, \"EK = 0\")\n";
+        } else {
+            if (rank == 0)
+                std::cerr << "FATAL: --horizon-side must be left, right, split or "
+                             "split2\n";
+            MPI_Finalize();
+            return 2;
+        }
+    }
 
     // --- inner: two rows at the excision surface
     std::vector<std::string> inner_eq;
@@ -313,11 +417,121 @@ int main(int argc, char** argv)
         inner_eq.push_back(lhs + " = " + cnm);
         syst.add_eq_bc(0, INNER_BC, inner_eq.back().c_str());
     }
+    // --- HORIZON COMPATIBILITY ROW ("compat"), a DIAGNOSTIC allocation.
+    //
+    // At R = 2M the second-derivative coefficients of E_K (Upp) and E_chi_tt
+    // (Upp and Qpp) all vanish exactly, and E_chi_tt's Upp is exactly twice
+    // E_K's at every point.  So at that ONE point the combination
+    // E_chi_tt - 2*E_K has every slot bit-zero except Qp and j2, and the
+    // system forces an algebraic COMPATIBILITY CONDITION on any true solution:
+    //
+    //     dr(Q)|_{R=2M}  =  -c_j2 / c_Qp * j2
+    //
+    // The tau method never imposes a pointwise condition, so nothing makes the
+    // discrete solution satisfy it -- measured violation is ~1200x.  This block
+    // imposes it explicitly, as ONE of the six conditions (so it must displace
+    // another; the existing total-6 check enforces that).  It is a diagnostic
+    // for the research session's adjudication of the degeneracy, never a gate.
+    //
+    // The interface is LOCATED, not hardcoded: it is the domain boundary where
+    // E_K's only second-derivative coefficient vanishes against its own grid
+    // maximum.  Everything else is asserted, so a table that does not have this
+    // structure makes the run fail loudly rather than impose a wrong number.
+    double compat = 0.0;
+    const bool want_compat =
+        std::find(pin.begin(), pin.end(), std::string("compat")) != pin.end();
+    const bool want_hEK =
+        std::find(pin.begin(), pin.end(), std::string("hEK")) != pin.end();
+    const bool want_hEXT =
+        std::find(pin.begin(), pin.end(), std::string("hEXT")) != pin.end();
+    if (want_compat || want_hEK || want_hEXT) {
+        const auto& cv = m.coefs().v;
+        auto C = [&](const char* row, const char* jet, int d, int i) {
+            return cv.at(std::make_pair(std::string(row), std::string(jet)))[d][i];
+        };
+        if (dh < 0) {
+            if (rank == 0)
+                std::cerr << "FATAL: --pins compat: no interface found where "
+                             "E_K's Upp vanishes\n";
+            MPI_Finalize();
+            return 2;
+        }
+        const int ih = m.nbr(dh) - 1;
+        // kappa = E_chi_tt.Upp / E_K.Upp, taken one point INSIDE (it is 0/0 at
+        // the interface itself) and required to be the same 2 at two points.
+        const double k1 = C("E_chi_tt", "Upp", dh, ih - 1) / C("E_K", "Upp", dh, ih - 1);
+        const double k2 = C("E_chi_tt", "Upp", dh, ih - 2) / C("E_K", "Upp", dh, ih - 2);
+        if (std::fabs(k1 - k2) > 1e-10 * std::fabs(k1)) {
+            if (rank == 0)
+                std::cerr << "FATAL: --pins compat: E_chi_tt.Upp / E_K.Upp is not "
+                             "constant near the interface (" << k1 << " vs " << k2
+                          << ")\n";
+            MPI_Finalize();
+            return 2;
+        }
+        // every slot of E_chi_tt - kappa*E_K must be bit-zero at the interface
+        // except Qp and j2 -- that IS the content of the condition
+        static const char* SLOT[] = {"G", "Gp", "Q", "U", "Up", "Upp"};
+        double rowmax = 0.0;
+        for (const char* jt : {"G", "Gp", "Q", "Qp", "U", "Up", "Upp"})
+            rowmax = std::max(rowmax, std::fabs(C("E_chi_tt", jt, dh, ih)));
+        for (const char* jt : SLOT) {
+            const double v = C("E_chi_tt", jt, dh, ih) - k1 * C("E_K", jt, dh, ih);
+            if (std::fabs(v) > 1e-12 * rowmax) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --pins compat: slot " << jt << " of "
+                                 "E_chi_tt - " << k1 << "*E_K is " << v
+                              << ", not zero\n";
+                MPI_Finalize();
+                return 2;
+            }
+        }
+        const double cQp = C("E_chi_tt", "Qp", dh, ih) - k1 * C("E_K", "Qp", dh, ih);
+        // E_chi_tt carries no j2 column, so the j2 part is -kappa * E_K.j2
+        const double cj2 = -k1 * C("E_K", "j2", dh, ih);
+        compat = -cj2 / cQp * j2;
+        if (rank == 0) {
+            std::cout << "# compat  interface d" << dh << "/OUTER_BC  kappa=" << k1
+                      << "  cQp=" << std::setprecision(17) << cQp
+                      << "  cj2=" << cj2 << "\n";
+            Trumpet::emit("COMPAT_target", compat);
+            Trumpet::emit("COMPAT_per_j2", j2 != 0.0 ? compat / j2 : 0.0);
+        }
+        if (want_compat) {
+            syst.add_cst("compatv", compat);
+            syst.add_eq_bc(dh, OUTER_BC, "dr(Q) = compatv");
+            if (rank == 0)
+                std::cout << "# compat  add_eq_bc(" << dh << ", OUTER_BC, "
+                             "\"dr(Q) = " << compat << "\")\n";
+        }
+        // hEK / hEXT: impose the degenerate rows POINTWISE at the interface.
+        // add_eq_inside imposes them in the tau sense, which drops the top two
+        // Chebyshev coefficients -- the right count for a second-order equation
+        // but not for one that has lost its second-order content at this point.
+        // Two of the three are degenerate here, so there are exactly TWO
+        // independent conditions to recover, and "compat" is their difference.
+        if (want_hEK) {
+            syst.add_eq_bc(dh, OUTER_BC, "EK = 0");
+            if (rank == 0)
+                std::cout << "# compat  add_eq_bc(" << dh
+                          << ", OUTER_BC, \"EK = 0\")\n";
+        }
+        if (want_hEXT) {
+            syst.add_eq_bc(dh, OUTER_BC, "EXT = 0");
+            if (rank == 0)
+                std::cout << "# compat  add_eq_bc(" << dh
+                          << ", OUTER_BC, \"EXT = 0\")\n";
+        }
+    }
+
     // --- constraint pins, same boundary
     for (const auto& p : pin) {
+        if (p == "compat" || p == "hEK" || p == "hEXT")
+            continue;                       // handled above, at its own interface
         if (p != "EH" && p != "EM") {
             if (rank == 0)
-                std::cerr << "FATAL: --pins entries must be EH or EM, got " << p << "\n";
+                std::cerr << "FATAL: --pins entries must be EH, EM, compat, hEK "
+                             "or hEXT, got " << p << "\n";
             MPI_Finalize();
             return 2;
         }
@@ -349,7 +563,8 @@ int main(int argc, char** argv)
         for (const auto& e : inner_eq)
             std::cout << "# inner  add_eq_bc(0, INNER_BC, \"" << e << "\")\n";
         for (const auto& p : pin)
-            std::cout << "# pin    add_eq_bc(0, INNER_BC, \"" << p << " = 0\")\n";
+            if (p != "compat" && p != "hEK" && p != "hEXT")
+                std::cout << "# pin    add_eq_bc(0, INNER_BC, \"" << p << " = 0\")\n";
         for (const auto& o : outset)
             std::cout << "# outer  add_eq_bc(" << dlast << ", OUTER_BC, \"" << o.first
                       << " = " << o.second << "\")\n";
@@ -404,9 +619,11 @@ int main(int argc, char** argv)
     Trumpet::emit("CONV_rel", err0 > 0.0 ? err / err0 : 0.0);
     Trumpet::emit("CONV_iters", iter);
     Trumpet::emit("CONV_ok", (ok || (err0 > 0.0 && err / err0 < 1e-12)) ? 1.0 : 0.0);
+    // stdout, not stderr: gates capture both into one file, and an unbuffered
+    // cerr write can land inside a buffered cout line.  See Trumpet::emit.
     if (!ok && rank == 0)
-        std::cerr << "WARNING: Newton did not reach " << prec << " in " << iter
-                  << " iterations\n";
+        std::cout << "# WARNING: Newton did not reach " << prec << " in " << iter
+                  << " iterations\n" << std::flush;
 
     if (rank != 0) {
         MPI_Finalize();
@@ -497,6 +714,10 @@ int main(int argc, char** argv)
                         jmax = std::max(jmax, std::fabs(t) / c);
                 }
                 wabs = std::max(wabs, std::fabs(E(idx)));
+                if (dumpresid && rank == 0)
+                    std::cout << "residpt " << Trumpet::rows()[n] << " " << d
+                              << " " << i << " " << std::setprecision(17)
+                              << E(idx) << " " << sc << "\n";
                 if (cmax * jmax > 0.0)
                     wcf = std::max(wcf, std::fabs(E(idx)) / (cmax * jmax));
                 if (nz < 2 || sc <= 0.0) {

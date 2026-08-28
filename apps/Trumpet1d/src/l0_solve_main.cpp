@@ -54,6 +54,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -352,6 +353,11 @@ int main(int argc, char** argv)
     //              and no extra rows go in.
     // Both are implemented so the choice is measured, not argued.
     bool lowerEK[64] = {false}, lowerEXT[64] = {false};
+    // Where each pointwise row is imposed.  Defaults reproduce the earlier
+    // behaviour (both rows on the inner domain's outer face) so the old
+    // placements keep their recorded numbers.
+    int rowEK_dom = -1, rowEK_bound = OUTER_BC;
+    int rowCOMPAT_dom = -1, rowCOMPAT_bound = OUTER_BC;
     int taurder = 3;
     if (horder.rfind("o1@", 0) == 0) { taurder = 1; horder = horder.substr(3); }
     else if (horder.rfind("o3@", 0) == 0) { horder = horder.substr(3); }
@@ -367,7 +373,40 @@ int main(int argc, char** argv)
         // spend is fixed (both rows at the r(2M) interface, per research Q1);
         // the free is a placement, and a bare integer names the donor domain so
         // every candidate can be scanned rather than assumed.
-        if (horder == "d1") {
+        // ROUND-3 PRESCRIPTION.  Free on the degenerate pairs themselves and
+        // give each donor its condition back AT ITS OWN degenerate face:
+        //   r3   add_eq_order(3) on (E_K, d1) and (E_chi_tt, d2);
+        //        E_K row at d1/OUTER_BC, (E_chi_tt - kappa E_K) row at d2/INNER_BC
+        //   r3t  the transpose, rows swapped to follow their donors
+        // Last session's "split" freed the same pair but spent BOTH rows at
+        // d1/OUTER_BC, leaving d1 over-supplied and d2 short -- and d2 is exactly
+        // what broke.  The pairing is the completion of that experiment.
+        // Compact pairing spec so the whole matrix can be scanned rather than
+        // enumerated by name:  p:<ek_donor><ext_donor>:<ek_row><compat_row>
+        // Each digit is 1 (the domain whose OUTER face is r(2M)) or 2 (the one
+        // whose INNER face is); a row placed on 1 goes to d1/OUTER_BC, on 2 to
+        // d2/INNER_BC.  r3 is p:12:12 and r3t is p:21:21.
+        if (horder.rfind("p:", 0) == 0 && horder.size() == 7 && horder[4] == ':') {
+            auto dom = [&](char c) { return c == '1' ? dh : dh + 1; };
+            auto bnd = [&](char c) { return c == '1' ? OUTER_BC : INNER_BC; };
+            for (char c : {horder[2], horder[3], horder[5], horder[6]})
+                if (c != '1' && c != '2') {
+                    if (rank == 0)
+                        std::cerr << "FATAL: --horizon-order p: digits must be 1 or 2\n";
+                    MPI_Finalize();
+                    return 2;
+                }
+            lowerEK[dom(horder[2])] = true;
+            lowerEXT[dom(horder[3])] = true;
+            rowEK_dom = dom(horder[5]);         rowEK_bound = bnd(horder[5]);
+            rowCOMPAT_dom = dom(horder[6]);     rowCOMPAT_bound = bnd(horder[6]);
+        } else if (horder == "r3") {
+            lowerEK[dh] = true;      rowEK_dom = dh;      rowEK_bound = OUTER_BC;
+            lowerEXT[dh + 1] = true; rowCOMPAT_dom = dh + 1; rowCOMPAT_bound = INNER_BC;
+        } else if (horder == "r3t") {
+            lowerEXT[dh] = true;     rowCOMPAT_dom = dh;  rowCOMPAT_bound = OUTER_BC;
+            lowerEK[dh + 1] = true;  rowEK_dom = dh + 1;  rowEK_bound = INNER_BC;
+        } else if (horder == "d1") {
             lowerEK[dh] = lowerEXT[dh] = true;
         } else if (horder == "d2") {
             lowerEK[dh + 1] = lowerEXT[dh + 1] = true;
@@ -386,11 +425,13 @@ int main(int argc, char** argv)
             lowerEK[dd] = lowerEXT[dd] = true;
         } else {
             if (rank == 0)
-                std::cerr << "FATAL: --horizon-order must be d1, d2, split or a "
-                             "domain index\n";
+                std::cerr << "FATAL: --horizon-order must be r3, r3t, d1, d2, "
+                             "split, o1@<dom> or a domain index\n";
             MPI_Finalize();
             return 2;
         }
+        if (rowEK_dom < 0)     { rowEK_dom = dh;     rowEK_bound = OUTER_BC; }
+        if (rowCOMPAT_dom < 0) { rowCOMPAT_dom = dh; rowCOMPAT_bound = OUTER_BC; }
     }
 
     // --- bulk: the three evolution rows, in every domain.  E_XR is never
@@ -491,11 +532,17 @@ int main(int argc, char** argv)
         // the whole point of the difference form.  (Measured here: N_T = 2*N_K
         // at the interface, so the naive string imposes E_chi_tt - 4*E_K.)
         // Rescale by the normaliser ratio; without --rownorm both are 1.
-        const double kap_eff = k1 * m.row_norm(0, dh, ih) / m.row_norm(2, dh, ih);
+        // kappa_eff is evaluated AT THE FACE WHERE THE ROW IS IMPOSED, not
+        // reused from d1's last point.  The two sides of the interface carry
+        // identical coefficients here (measured), so the two are equal in
+        // practice -- but the code must not assume what it can compute.
+        const int ic = (rowCOMPAT_bound == OUTER_BC) ? m.nbr(rowCOMPAT_dom) - 1 : 0;
+        const double kap_eff = k1 * m.row_norm(0, rowCOMPAT_dom, ic)
+                                  / m.row_norm(2, rowCOMPAT_dom, ic);
         syst.add_cst("hkap", kap_eff);
         syst.add_def("ECOMPAT = EXT - hkap * EK");
-        syst.add_eq_bc(dh, OUTER_BC, "EK = 0");
-        syst.add_eq_bc(dh, OUTER_BC, "ECOMPAT = 0");
+        syst.add_eq_bc(rowEK_dom, rowEK_bound, "EK = 0");
+        syst.add_eq_bc(rowCOMPAT_dom, rowCOMPAT_bound, "ECOMPAT = 0");
         if (rank == 0) {
             std::cout << "# horder placement=" << horder << "  interface d" << dh
                       << "|d" << dh + 1 << "  kappa=" << k1
@@ -506,8 +553,10 @@ int main(int argc, char** argv)
                 if (lowerEXT[d]) std::cout << " EXT@d" << d;
             }
             std::cout << "   conditions freed = " << freed << "\n";
-            std::cout << "# horder add_eq_bc(" << dh << ", OUTER_BC, \"EK = 0\") and "
-                         "\"ECOMPAT = 0\"   -> spent = 2\n";
+            auto bnd = [](int b) { return b == OUTER_BC ? "OUTER_BC" : "INNER_BC"; };
+            std::cout << "# horder add_eq_bc(" << rowEK_dom << ", " << bnd(rowEK_bound)
+                      << ", \"EK = 0\")  and  add_eq_bc(" << rowCOMPAT_dom << ", "
+                      << bnd(rowCOMPAT_bound) << ", \"ECOMPAT = 0\")   -> spent = 2\n";
             std::cout << "# horder implied dr(Q) at r(2M) = " << std::setprecision(17)
                       << -cj2 / cQp << " * j2\n";
             Trumpet::emit("HORDER_freed", freed);
@@ -915,6 +964,13 @@ int main(int argc, char** argv)
             std::cout << "# resid " << Trumpet::rows()[n] << " d" << d << " rel="
                       << wdom << "\n";
         }
+        {   // skip fraction, registered per research round-3 Q5
+            int tot = 0;
+            for (int d = 0; d <= dlast; d++)
+                tot += m.nbr(d);
+            Trumpet::emit(std::string("RESID_") + Trumpet::rows()[n] + "_skipfrac",
+                          tot > 0 ? double(nskip) / double(tot) : 0.0);
+        }
         Trumpet::emit(std::string("RESID_") + Trumpet::rows()[n] + "_abs", wabs);
         Trumpet::emit(std::string("RESID_") + Trumpet::rows()[n] + "_rel", wrel);
         Trumpet::emit(std::string("RESID_") + Trumpet::rows()[n] + "_relcf", wcf);
@@ -931,6 +987,54 @@ int main(int argc, char** argv)
     // return.  do_col_J(i) is public and nbr_conditions is populated by the
     // solve above, so a full dump costs nbr_unknowns column evaluations.
     // T2.3 asks for Jacobian conditioning to be logged; this is that hook.
+    // --- EXPORT LAYOUT.  Placed AFTER the solve on purpose:
+    // classify_equation_row_metadata needs nbr_conditions, which is only
+    // populated once sec_member() has run ("Number of conditions unknown ;
+    // call sec_member first").  Before the solve it throws.
+    // --- EXPORT LAYOUT (detail).  Which rows land in which export block, per domain, in
+    // export order.  Round 3 asks for this whenever a placement misbehaves, and
+    // it is cheap enough to print always: a Vol count that is not 3*(n_d - 2)
+    // names the domain that gave up conditions, and the TauBc roster names
+    // where they were spent.
+    if (rank == 0) {
+        std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
+        syst.classify_equation_row_metadata(rmeta);
+        auto taxname = [](Kadath::RowTaxonomy t) -> std::string {
+            switch (t) {
+                case Kadath::RowTaxonomy::Vol: return "Vol";
+                case Kadath::RowTaxonomy::TauBc: return "TauBc";
+                case Kadath::RowTaxonomy::TauMatch: return "TauMatch";
+                case Kadath::RowTaxonomy::GlobalInt: return "GlobalInt";
+                default: return "Unknown";
+            }
+        };
+        std::map<std::string, std::map<int, int>> per;
+        std::vector<std::string> taubc;
+        for (const auto& rm : rmeta) {
+            per[taxname(rm.taxonomy)][rm.dom]++;
+            if (rm.taxonomy == Kadath::RowTaxonomy::TauBc) {
+                std::ostringstream os;
+                os << "d" << rm.dom << "/eq" << rm.eq_index;
+                taubc.push_back(os.str());
+            }
+        }
+        for (const auto& blk : per) {
+            std::cout << "# export " << std::setw(9) << std::left << blk.first << " ";
+            for (int d = 0; d <= dlast; d++) {
+                const auto it = blk.second.find(d);
+                std::cout << " d" << d << "=" << (it == blk.second.end() ? 0 : it->second);
+                if (blk.first == "Vol")
+                    std::cout << "(nat " << 3 * (m.nbr(d) - 2) << ")";
+            }
+            std::cout << "\n";
+        }
+        std::cout << "# export TauBc roster (export order):";
+        for (const auto& t : taubc)
+            std::cout << " " << t;
+        std::cout << "\n";
+    }
+
+
     if (!jacdump.empty()) {
         const int n = syst.get_nbr_unknowns();
         const int mrows = syst.get_nbr_conditions();

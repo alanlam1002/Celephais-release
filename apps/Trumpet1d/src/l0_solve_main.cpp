@@ -1086,6 +1086,11 @@ int main(int argc, char** argv)
             for (const auto& kv : bydom)
                 std::cout << " d" << kv.first << "=" << kv.second;
             std::cout << "\n";
+            // as RESULT lines too, so a gate or a sweep table can read them
+            for (const auto& kv : bydom)
+                Trumpet::emit("ADD_res_core_d" + std::to_string(kv.first), kv.second);
+            for (const auto& kv : bytax)
+                Trumpet::emit("ADD_res_core_" + kv.first, kv.second);
         }
         err = post_core;
         err0 = 0.0;

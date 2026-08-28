@@ -125,6 +125,9 @@ double def_at_boundary(System_of_eqs& syst, const Kadath::Space& space,
 
 } // namespace
 
+/** true when --horizon-order asks for the first-order reading. */
+static bool horizonorder_is_o1(const std::string& h) { return h.rfind("o1@", 0) == 0; }
+
 int main(int argc, char** argv)
 {
     const int rank = KadathApps::init_mpi(argc, argv);
@@ -141,7 +144,8 @@ int main(int argc, char** argv)
     double j2 = 1.0, seed = 0.0, prec = 1e-11;
     std::string inner = "dU,dQ", outer = "U,G", pins = "EH,EM", profile;
     bool rownorm = false, manufactured = false, dumpresid = false;
-    std::string jacdump, pinat = "inner", horizonfix, hside = "left";
+    std::string jacdump, pinat = "inner", horizonfix, hside = "left", horder;
+    double residfloor = 1e-12;
     for (int i = 4; i < argc; i++) {
         const std::string k = argv[i];
         auto next = [&]() -> std::string {
@@ -181,6 +185,17 @@ int main(int argc, char** argv)
         // both on the inner domain's outer face; "split" gives each adjacent
         // domain one, which is what a lost C1 link on BOTH sides needs.
         else if (k == "--horizon-side") hside = next();
+        // --horizon-order d1|d2|split   THE FIX (research round-2 Q1).
+        // add_eq_order lowers E_K and E_chi_tt by one tau order on the
+        // horizon-adjacent domain(s), freeing exactly two conditions, and they
+        // are spent on the two pointwise rows the degeneracy leaves unimposed
+        // at r(2M):  E_K = 0  and  (E_chi_tt - kappa*E_K) = 0.  Matching and
+        // all six physics conditions are untouched.  Which adjacent domain
+        // gives up the conditions is a measured choice, not a derived one.
+        else if (k == "--horizon-order") horder = next();
+        // Relative floor below which a collocation point is too small to carry
+        // a meaningful RELATIVE residual -- see the residual block below.
+        else if (k == "--resid-floor") residfloor = std::stod(next());
         else if (k == "--dump-jacobian") jacdump = next();
         else if (k == "--manufactured") {
             // MANUFACTURED-SOLUTION BVP (playbook rule 2).  The exact mass mode
@@ -238,11 +253,19 @@ int main(int argc, char** argv)
     // distributed between inner rows, constraint pins and outer decay is the
     // open question SPEC_T22_innerBC and T4.1 answer differently, so the split
     // is a runtime choice and only the TOTAL is enforced.
-    if (inn.size() + out.size() + pin.size() != 6) {
+    // How many PHYSICS conditions the budget wants.  Six with every equation at
+    // its natural tau order; two fewer if the degenerate rows are declared
+    // first-order somewhere (they then supply two more themselves).  The
+    // order-3 reading also imposes two pointwise rows of its own, which is why
+    // it leaves the physics total at six.
+    int want_conditions = 6;
+    if (horizonorder_is_o1(horder))
+        want_conditions = 4;
+    if (inn.size() + out.size() + pin.size() != (std::size_t)want_conditions) {
         if (rank == 0)
             std::cerr << "FATAL: --inner (" << inn.size() << ") + --pins ("
                       << pin.size() << ") + --outer (" << out.size()
-                      << ") must total exactly 6\n";
+                      << ") must total exactly " << want_conditions << "\n";
         MPI_Finalize();
         return 2;
     }
@@ -299,16 +322,10 @@ int main(int argc, char** argv)
         }
     }
 
-    // --- bulk: the three evolution rows, in every domain
-    for (int d = 0; d <= dlast; d++) {
-        syst.add_eq_inside(d, "EK = 0");
-        syst.add_eq_inside(d, "EXR = 0");
-        syst.add_eq_inside(d, "EXT = 0");
-    }
     // Locate the interface at which the rows degenerate: the domain boundary
     // where E_K's only second-derivative coefficient vanishes against its own
     // grid maximum.  Found, never hardcoded -- a table without this structure
-    // makes --horizon-fix fail loudly instead of acting on the wrong point.
+    // makes the horizon options fail loudly instead of acting on the wrong point.
     int dh = -1;
     {
         const auto& cv = m.coefs().v;
@@ -321,6 +338,71 @@ int main(int argc, char** argv)
         for (int d = 0; d < dlast && dh < 0; d++)
             if (std::fabs(kUpp[d][m.nbr(d) - 1]) < 1e-12 * mx)
                 dh = d;
+    }
+
+    // --- which domains give up a tau order, per --horizon-order.  dh is the
+    // domain whose OUTER face is r(2M); dh+1 is the one whose INNER face is.
+    // TWO READINGS OF "lower the order at the degenerate edge", and they point
+    // opposite ways in the tau bookkeeping:
+    //   order 3  -- the equation supplies one FEWER condition on that domain, so
+    //              two extra rows must be imposed (research Q1's literal form);
+    //   order 1  -- the equation supplies one MORE, which is what "this equation
+    //              is first-order here, so it needs one fewer boundary condition"
+    //              means for a tau scheme; then two PHYSICS conditions come out
+    //              and no extra rows go in.
+    // Both are implemented so the choice is measured, not argued.
+    bool lowerEK[64] = {false}, lowerEXT[64] = {false};
+    int taurder = 3;
+    if (horder.rfind("o1@", 0) == 0) { taurder = 1; horder = horder.substr(3); }
+    else if (horder.rfind("o3@", 0) == 0) { horder = horder.substr(3); }
+    if (!horder.empty()) {
+        if (dh < 0) {
+            if (rank == 0)
+                std::cerr << "FATAL: --horizon-order: no interface found where "
+                             "E_K's Upp vanishes\n";
+            MPI_Finalize();
+            return 2;
+        }
+        // WHICH domain gives up the two tau orders is a MEASURED choice.  The
+        // spend is fixed (both rows at the r(2M) interface, per research Q1);
+        // the free is a placement, and a bare integer names the donor domain so
+        // every candidate can be scanned rather than assumed.
+        if (horder == "d1") {
+            lowerEK[dh] = lowerEXT[dh] = true;
+        } else if (horder == "d2") {
+            lowerEK[dh + 1] = lowerEXT[dh + 1] = true;
+        } else if (horder == "split") {
+            lowerEK[dh] = true;
+            lowerEXT[dh + 1] = true;
+        } else if (horder.find_first_not_of("0123456789") == std::string::npos) {
+            const int dd = std::stoi(horder);
+            if (dd < 0 || dd > dlast) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --horizon-order domain " << dd
+                              << " out of range 0.." << dlast << "\n";
+                MPI_Finalize();
+                return 2;
+            }
+            lowerEK[dd] = lowerEXT[dd] = true;
+        } else {
+            if (rank == 0)
+                std::cerr << "FATAL: --horizon-order must be d1, d2, split or a "
+                             "domain index\n";
+            MPI_Finalize();
+            return 2;
+        }
+    }
+
+    // --- bulk: the three evolution rows, in every domain.  E_XR is never
+    // lowered: it keeps all three second-derivative slots at r(2M) and is the
+    // one row that does not degenerate there.
+    int freed = 0;
+    for (int d = 0; d <= dlast; d++) {
+        if (lowerEK[d])  { syst.add_eq_order(d, taurder, "EK = 0");  freed++; }
+        else               syst.add_eq_inside(d, "EK = 0");
+        syst.add_eq_inside(d, "EXR = 0");
+        if (lowerEXT[d]) { syst.add_eq_order(d, taurder, "EXT = 0"); freed++; }
+        else               syst.add_eq_inside(d, "EXT = 0");
     }
     const auto hfix = horizonfix.empty() ? std::vector<std::string>()
                                          : split2(horizonfix);
@@ -360,6 +442,80 @@ int main(int argc, char** argv)
             }
             syst.add_eq_matching(d, OUTER_BC, (std::string("dr(") + f + ")").c_str());
         }
+    // --- THE FIX: spend the freed conditions on the two pointwise rows the
+    // degeneracy leaves unimposed at r(2M).  Research round-2 Q1 names them as
+    // E_K = 0 and (E_chi_tt - 2 E_K) = 0; the DIFFERENCE form matters
+    // numerically, not just formally -- at that point it has exactly two
+    // nonzero slots (Qp and j2) while bare E_chi_tt has six of order 1e4..1e5
+    // that must cancel.  kappa is MEASURED one point inside (it is 0/0 at the
+    // interface itself) and asserted, so a table without this structure fails
+    // loudly rather than imposing a wrong row.
+    if (!horder.empty() && taurder == 3) {
+        const auto& cv = m.coefs().v;
+        auto C = [&](const char* row, const char* jet, int d, int i) {
+            return cv.at(std::make_pair(std::string(row), std::string(jet)))[d][i];
+        };
+        const int ih = m.nbr(dh) - 1;
+        const double k1 = C("E_chi_tt", "Upp", dh, ih - 1) / C("E_K", "Upp", dh, ih - 1);
+        const double k2 = C("E_chi_tt", "Upp", dh, ih - 2) / C("E_K", "Upp", dh, ih - 2);
+        if (std::fabs(k1 - k2) > 1e-10 * std::fabs(k1)) {
+            if (rank == 0)
+                std::cerr << "FATAL: --horizon-order: E_chi_tt.Upp / E_K.Upp is not "
+                             "constant near the interface (" << k1 << " vs " << k2
+                          << ")\n";
+            MPI_Finalize();
+            return 2;
+        }
+        double rowmax = 0.0;
+        for (const char* jt : {"G", "Gp", "Q", "Qp", "U", "Up", "Upp"})
+            rowmax = std::max(rowmax, std::fabs(C("E_chi_tt", jt, dh, ih)));
+        for (const char* jt : {"G", "Gp", "Q", "U", "Up", "Upp"}) {
+            const double v = C("E_chi_tt", jt, dh, ih) - k1 * C("E_K", jt, dh, ih);
+            if (std::fabs(v) > 1e-12 * rowmax) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --horizon-order: slot " << jt
+                              << " of E_chi_tt - " << k1 << "*E_K is " << v
+                              << ", not zero\n";
+                MPI_Finalize();
+                return 2;
+            }
+        }
+        const double cQp = C("E_chi_tt", "Qp", dh, ih) - k1 * C("E_K", "Qp", dh, ih);
+        const double cj2 = -k1 * C("E_K", "j2", dh, ih);
+        // ROW NORMALISATION CHANGES THE CONSTANT.  With --rownorm every
+        // coefficient of row n at (d,i) is divided by that row's OWN
+        // max_j|c_{n,j}|, so the registered defs are E_K/N_K and E_chi_tt/N_T
+        // with N_T != N_K.  The string "EXT - kappa*EK" would then mean
+        // E_chi_tt/N_T - kappa*E_K/N_K, which is NOT proportional to
+        // E_chi_tt - kappa*E_K and destroys the bit-zero cancellation that is
+        // the whole point of the difference form.  (Measured here: N_T = 2*N_K
+        // at the interface, so the naive string imposes E_chi_tt - 4*E_K.)
+        // Rescale by the normaliser ratio; without --rownorm both are 1.
+        const double kap_eff = k1 * m.row_norm(0, dh, ih) / m.row_norm(2, dh, ih);
+        syst.add_cst("hkap", kap_eff);
+        syst.add_def("ECOMPAT = EXT - hkap * EK");
+        syst.add_eq_bc(dh, OUTER_BC, "EK = 0");
+        syst.add_eq_bc(dh, OUTER_BC, "ECOMPAT = 0");
+        if (rank == 0) {
+            std::cout << "# horder placement=" << horder << "  interface d" << dh
+                      << "|d" << dh + 1 << "  kappa=" << k1
+                      << "  kappa_eff(after rownorm)=" << kap_eff << "\n";
+            std::cout << "# horder add_eq_order(.,3,.) on:";
+            for (int d = 0; d <= dlast; d++) {
+                if (lowerEK[d])  std::cout << " EK@d" << d;
+                if (lowerEXT[d]) std::cout << " EXT@d" << d;
+            }
+            std::cout << "   conditions freed = " << freed << "\n";
+            std::cout << "# horder add_eq_bc(" << dh << ", OUTER_BC, \"EK = 0\") and "
+                         "\"ECOMPAT = 0\"   -> spent = 2\n";
+            std::cout << "# horder implied dr(Q) at r(2M) = " << std::setprecision(17)
+                      << -cj2 / cQp << " * j2\n";
+            Trumpet::emit("HORDER_freed", freed);
+            Trumpet::emit("HORDER_kappa", k1);
+            Trumpet::emit("HORDER_compat_per_j2", -cj2 / cQp);
+        }
+    }
+
     if (!hfix.empty()) {
         if (hside == "left") {
             syst.add_eq_bc(dh, OUTER_BC, "EK = 0");
@@ -685,6 +841,33 @@ int main(int argc, char** argv)
     for (int n = 0; n < 5; n++) {
         double wabs = 0.0, wrel = 0.0, wcf = 0.0;
         int wd = -1, wi = -1, nskip = 0;
+        // PASS 0: the grid-wide term scale for this row.
+        //
+        // WHY.  Both relative measures are |E| divided by something built from
+        // the terms at that point, and at r = infinity the r^{-p_n} scaling
+        // leaves E_H and E_Mr with only (Qpp, Upp) -- in the exact (4,1) ratio
+        // that is these rows' global second-derivative weighting.  A DECAYING
+        // solution has U'' -> 0 and Q'' -> 0 there, so at that one point the
+        // residual AND its normaliser are both at roundoff and the ratio is
+        // 0/0.  Measured consequence: the EXACT mass mode, which annihilates
+        // E_H and E_Mr identically, scored RESID_E_H_rel = 1.0000001 -- the
+        // gate would have rejected a known-exact solution.  A point whose terms
+        // are negligible against the row's own grid-wide scale carries no
+        // relative information, so it is skipped and counted.
+        double gridscale = 0.0;
+        for (int d = 0; d <= dlast; d++) {
+            std::vector<const Val_domain*> T0;
+            for (const auto& t : termdef[n])
+                T0.push_back(&syst.give_val_def_scalar_domain(t.c_str(), d));
+            Index idx0(m.space.get_domain(d)->get_nbr_points());
+            for (int i = 0; i < m.nbr(d); i++) {
+                idx0.set(0) = i;
+                double sc0 = 0.0;
+                for (const auto* t : T0)
+                    sc0 = std::max(sc0, std::fabs((*t)(idx0)));
+                gridscale = std::max(gridscale, sc0);
+            }
+        }
         for (int d = 0; d <= dlast; d++) {
             const Val_domain& E =
                 syst.give_val_def_scalar_domain(Trumpet::row_defs()[n], d);
@@ -713,14 +896,15 @@ int main(int argc, char** argv)
                     if (c > 0.0)
                         jmax = std::max(jmax, std::fabs(t) / c);
                 }
+                const bool tiny = (sc < residfloor * gridscale);
                 wabs = std::max(wabs, std::fabs(E(idx)));
                 if (dumpresid && rank == 0)
                     std::cout << "residpt " << Trumpet::rows()[n] << " " << d
                               << " " << i << " " << std::setprecision(17)
                               << E(idx) << " " << sc << "\n";
-                if (cmax * jmax > 0.0)
+                if (cmax * jmax > 0.0 && !tiny)
                     wcf = std::max(wcf, std::fabs(E(idx)) / (cmax * jmax));
-                if (nz < 2 || sc <= 0.0) {
+                if (nz < 2 || sc <= 0.0 || sc < residfloor * gridscale) {
                     nskip++;
                     continue;
                 }
@@ -735,8 +919,10 @@ int main(int argc, char** argv)
         Trumpet::emit(std::string("RESID_") + Trumpet::rows()[n] + "_rel", wrel);
         Trumpet::emit(std::string("RESID_") + Trumpet::rows()[n] + "_relcf", wcf);
         std::cout << "# resid " << Trumpet::rows()[n] << " worst-rel at d" << wd
-                  << " ipt " << wi << "  (single-term points skipped: " << nskip
-                  << ")\n";
+                  << " ipt " << wi << "  (points skipped: " << nskip
+                  << " of " << [&] { int t = 0; for (int d = 0; d <= dlast; d++) t += m.nbr(d); return t; }()
+                  << "; single-term or below " << residfloor << " of the row's "
+                     "grid-wide term scale " << gridscale << ")\n";
     }
 
     // ------------------------------------------------- Jacobian dump --------

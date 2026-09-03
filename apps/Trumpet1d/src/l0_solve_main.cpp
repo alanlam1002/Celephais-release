@@ -162,6 +162,14 @@ int main(int argc, char** argv)
     std::string addequil = "appended";   // research's prescription
     std::string addrows = "all";
     std::string logenrich;          // e.g. "1:UQG" or "1:U,2:U"
+    // ROUND-9 DROP-ONE-PIN.  The constraint-proportionality theorem
+    // (E_Mr = lambda E_H + gK E_K + gTT E_chi_tt, exact on every slot -- checked
+    // independently in scripts/bianchi_closure.py --proportionality) says there
+    // is ONE independent constraint, so ONE pin suffices in the continuum and
+    // the sixth budget slot is freed.  Whose it becomes is research's ruling, so
+    // this flag does NOT reassign it: it permits the physics total to fall short
+    // by `conddef` and reports the resulting counts.
+    int conddef = 0;
     for (int i = 4; i < argc; i++) {
         const std::string k = argv[i];
         auto next = [&]() -> std::string {
@@ -179,6 +187,7 @@ int main(int argc, char** argv)
         // identity propagation.  Measurement says otherwise on this grid, so
         // where the pin sits is a testable choice, not a detail.
         else if (k == "--pin-at") pinat = next();
+        else if (k == "--cond-deficit") conddef = std::stoi(next());
         else if (k == "--profile") profile = next();
         else if (k == "--rownorm") rownorm = true;
         // Per-POINT row residuals.  The gate needs the TAU-projected residual
@@ -303,6 +312,16 @@ int main(int argc, char** argv)
     int want_conditions = 6;
     if (horizonorder_is_o1(horder))
         want_conditions = 4;
+    // Round 9: permit a deliberate shortfall, additive only.  Without the
+    // appended rows a short budget leaves do_newton a singular system, which
+    // would fail for a reason unrelated to the pin question.
+    if (conddef != 0 && !additive) {
+        if (rank == 0)
+            std::cerr << "FATAL: --cond-deficit requires --additive\n";
+        MPI_Finalize();
+        return 2;
+    }
+    want_conditions -= conddef;
     if (inn.size() + out.size() + pin.size() != (std::size_t)want_conditions) {
         if (rank == 0)
             std::cerr << "FATAL: --inner (" << inn.size() << ") + --pins ("
@@ -956,8 +975,17 @@ int main(int argc, char** argv)
         if (rank == 0) {
             std::cout << "# additive kappa=" << k1 << "  kappa_eff=" << kap_eff
                       << "  outer-G target=" << gtarget << "\n";
-            std::cout << "# additive appended: EK@d" << dh << "/OUTER_BC, ECOMPAT@d"
-                      << dh << "/OUTER_BC, G@d" << dlast << "/OUTER_BC\n";
+            // --add-rows selects which of these are actually registered, so
+            // the roster must be built from addrows, not printed as a fixed
+            // string (it read "all three" under --add-rows compat).
+            std::cout << "# additive appended:";
+            if (addrows == "all" || addrows == "compat")
+                std::cout << " EK@d" << dh << "/OUTER_BC, ECOMPAT@d" << dh
+                          << "/OUTER_BC";
+            if (addrows == "all" || addrows == "g")
+                std::cout << (addrows == "all" ? ", " : " ") << "G@d" << dlast
+                          << "/OUTER_BC";
+            std::cout << "  (n_appended = " << n_appended << ")\n";
             Trumpet::emit("ADD_kappa_eff", kap_eff);
             Trumpet::emit("ADD_G_target", gtarget);
         }
@@ -968,7 +996,10 @@ int main(int argc, char** argv)
             std::cout << "# inner  add_eq_bc(0, INNER_BC, \"" << e << "\")\n";
         for (const auto& p : pin)
             if (p != "compat" && p != "hEK" && p != "hEXT")
-                std::cout << "# pin    add_eq_bc(0, INNER_BC, \"" << p << " = 0\")\n";
+                std::cout << "# pin    add_eq_bc("
+                          << (pinat == "inner" ? 0 : dlast) << ", "
+                          << (pinat == "inner" ? "INNER_BC" : "OUTER_BC")
+                          << ", \"" << p << " = 0\")\n";
         for (const auto& o : outset)
             std::cout << "# outer  add_eq_bc(" << dlast << ", OUTER_BC, \"" << o.first
                       << " = " << o.second << "\")\n";

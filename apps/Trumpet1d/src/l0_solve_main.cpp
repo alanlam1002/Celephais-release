@@ -170,6 +170,23 @@ int main(int argc, char** argv)
     std::string addequil = "appended";   // research's prescription
     std::string addrows = "all";
     std::string logenrich;          // e.g. "1:UQG" or "1:U,2:U"
+    // ROUND-14 CONSTANT-MODE PIN.  The solution was measured to be 99.87% the
+    // two census constants c1_const = (1,0,-4) and c2_const = (0,1,-1), which
+    // are bit-zero on every bulk row AND (research round 14) exactly zero on
+    // both compat rows, so the only conditions that see them are the two outer
+    // decay rows -- one collocation point each, with nothing propagating the
+    // condition inward.  a = 0 and b = 0 are PROVEN properties of the physical
+    // solution (U, Q -> 0 at infinity), not regularizers.
+    //
+    // c1_const carries all of U's constant content and c2_const all of Q's, so
+    // the two rows act on U and Q respectively.  FORM MATTERS at finite radius:
+    //   val    U = 0        biased by the physical U ~ t_U/r
+    //   robin  oor*U + dr(U) = 0
+    // With U = a + t/r + s/r^2 the Robin combination is exactly a/r - s/r^3, so
+    // it annihilates the 1/r part and pins a with error only s/r^2 -- it is
+    // d(rU)/dr, the unbiased extractor of a constant against 1/r content.
+    std::string pinconst;
+
     // ROUND-9 DROP-ONE-PIN.  The constraint-proportionality theorem
     // (E_Mr = lambda E_H + gK E_K + gTT E_chi_tt, exact on every slot -- checked
     // independently in scripts/bianchi_closure.py --proportionality) says there
@@ -196,6 +213,7 @@ int main(int argc, char** argv)
         // where the pin sits is a testable choice, not a detail.
         else if (k == "--pin-at") pinat = next();
         else if (k == "--cond-deficit") conddef = std::stoi(next());
+        else if (k == "--pin-const") pinconst = next();
         else if (k == "--profile") profile = next();
         else if (k == "--rownorm") rownorm = true;
         // Per-POINT row residuals.  The gate needs the TAU-projected residual
@@ -377,6 +395,7 @@ int main(int argc, char** argv)
     // the research session's own dW/dr -- a manufactured test of the whole
     // boundary-derivative path with an exactly known answer
     syst.add_cst("Wbb", m.Wf);
+    syst.add_cst("oorbb", m.oorf);      // 1/r, for the round-14 Robin pin rows
     syst.add_def("DWCHK = dr(Wbb)");
 
     // per-term definitions, used ONLY to build the row normalisation (largest
@@ -979,6 +998,31 @@ int main(int argc, char** argv)
             syst.add_cst("outGadd", gtarget);
             syst.add_eq_bc(dlast, OUTER_BC, (P("G", 0) + " = outGadd").c_str());
             n_appended += 1;
+        }
+        // --- ROUND-14: pin the two constant homogeneous modes.
+        if (!pinconst.empty()) {
+            if (pinconst != "val" && pinconst != "robin") {
+                if (rank == 0)
+                    std::cerr << "FATAL: --pin-const must be val or robin\n";
+                MPI_Finalize();
+                return 2;
+            }
+            // Imposed at the OUTERMOST CLEAN point: d4's inner face.  r = inf
+            // is where the existing decay rows already sit and where the Robin
+            // form degenerates (a/r -> 0), so it carries no information there.
+            const std::string eU = (pinconst == "robin")
+                                       ? "oorbb * " + P("U", 0) + " + " + P("U", 1)
+                                       : P("U", 0);
+            const std::string eQ = (pinconst == "robin")
+                                       ? "oorbb * " + P("Q", 0) + " + " + P("Q", 1)
+                                       : P("Q", 0);
+            syst.add_eq_bc(dlast, INNER_BC, (eU + " = 0").c_str());
+            syst.add_eq_bc(dlast, INNER_BC, (eQ + " = 0").c_str());
+            n_appended += 2;
+            if (rank == 0)
+                std::cout << "# pinconst " << pinconst << ": add_eq_bc(" << dlast
+                          << ", INNER_BC, \"" << eU << " = 0\")  and  \""
+                          << eQ << " = 0\"\n";
         }
         if (n_appended == 0) {
             if (rank == 0)

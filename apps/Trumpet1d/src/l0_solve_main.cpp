@@ -186,6 +186,22 @@ int main(int argc, char** argv)
     // it annihilates the 1/r part and pins a with error only s/r^2 -- it is
     // d(rU)/dr, the unbiased extractor of a constant against 1/r content.
     std::string pinconst;
+    // ROUND-15 INNER CONSTRAINT PIN.  Forming the constraint-propagation ODE
+    // needs the evolution triple's leading matrix inverted, and
+    //   det A2 ∝ (2M-R)^2 (3M-2R)^2
+    // so dC/dr = P C has a REGULAR SINGULAR POINT at the horizon with exponent
+    // C ~ (r - r_2M)^(-101/64) from both sides.  Negative exponent => the
+    // constraint cannot be transported across R = 2M and the exterior and
+    // throat-side sectors carry INDEPENDENT integration constants.  Pinning C
+    // at r = infinity therefore determines the exterior only, which is the
+    // measured 662x compat violation at --add-weight 0.  The budget is SEVEN:
+    // a second constraint pin, E_H = 0, on the throat side of the horizon.
+    std::string pininner;
+    // As a CORE row the inner pin is one of 340 and the least-squares trades it
+    // away (measured: it lands at 1.7e-4 rather than 0 at its own point).
+    // Appending it instead enforces it at the appended-row weight, which
+    // separates "the condition is wrong" from "the condition was not imposed".
+    bool pininnerapp = false;
 
     // ROUND-9 DROP-ONE-PIN.  The constraint-proportionality theorem
     // (E_Mr = lambda E_H + gK E_K + gTT E_chi_tt, exact on every slot -- checked
@@ -214,6 +230,8 @@ int main(int argc, char** argv)
         else if (k == "--pin-at") pinat = next();
         else if (k == "--cond-deficit") conddef = std::stoi(next());
         else if (k == "--pin-const") pinconst = next();
+        else if (k == "--pin-inner") pininner = next();
+        else if (k == "--pin-inner-append") pininnerapp = true;
         else if (k == "--profile") profile = next();
         else if (k == "--rownorm") rownorm = true;
         // Per-POINT row residuals.  The gate needs the TAU-projected residual
@@ -353,6 +371,17 @@ int main(int argc, char** argv)
         return 2;
     }
     want_conditions -= conddef;
+    // Round 15's throat-side constraint pin is the SEVENTH condition, over and
+    // above the six slots --inner/--pins/--outer distribute, so it is not part
+    // of that count.  It makes the core rectangular (340 conditions, 339
+    // unknowns), which only the additive least-squares path can take.
+    if (!pininner.empty() && !additive) {
+        if (rank == 0)
+            std::cerr << "FATAL: --pin-inner requires --additive (it makes the "
+                         "core over-determined by one)\n";
+        MPI_Finalize();
+        return 2;
+    }
     if (inn.size() + out.size() + pin.size() != (std::size_t)want_conditions) {
         if (rank == 0)
             std::cerr << "FATAL: --inner (" << inn.size() << ") + --pins ("
@@ -419,6 +448,7 @@ int main(int argc, char** argv)
     // where E_K's only second-derivative coefficient vanishes against its own
     // grid maximum.  Found, never hardcoded -- a table without this structure
     // makes the horizon options fail loudly instead of acting on the wrong point.
+    int pinner_dom = -1; bool pinner_outer = false;
     int dh = -1;
     {
         // The degenerate direction is U'' -- physically, whatever the table's
@@ -921,6 +951,45 @@ int main(int argc, char** argv)
             return 2;
         }
     }
+    // --- ROUND-15: the throat-side constraint pin, E_H = 0 at a collocation
+    // point INTERIOR to r(2M).  Its own sector's integration constant.
+    if (!pininner.empty()) {
+        int pd = -1; bool pouter = false;
+        if (pininner.size() == 2 && std::isdigit(pininner[0])
+            && (pininner[1] == 'i' || pininner[1] == 'o')) {
+            pd = pininner[0] - '0';
+            pouter = (pininner[1] == 'o');
+        }
+        if (pd < 0 || pd > dlast) {
+            if (rank == 0)
+                std::cerr << "FATAL: --pin-inner takes <domain><i|o>, e.g. 1i\n";
+            MPI_Finalize();
+            return 2;
+        }
+        // must be strictly inside the horizon radius, or it is not a
+        // throat-side condition at all
+        const double rpin = pouter ? m.table().pts[pd][m.nbr(pd) - 1].r
+                                   : m.table().pts[pd][0].r;
+        const double r2m = (dh >= 0) ? m.table().pts[dh][m.nbr(dh) - 1].r : -1.0;
+        if (!(rpin < r2m)) {
+            if (rank == 0)
+                std::cerr << "FATAL: --pin-inner at r = " << rpin << " is not "
+                             "interior to r(2M) = " << r2m << "\n";
+            MPI_Finalize();
+            return 2;
+        }
+        if (!pininnerapp)
+            syst.add_eq_bc(pd, pouter ? OUTER_BC : INNER_BC, "EH = 0");
+        else {
+            pinner_dom = pd; pinner_outer = pouter;
+        }
+        if (rank == 0)
+            std::cout << "# pininner add_eq_bc(" << pd << ", "
+                      << (pouter ? "OUTER_BC" : "INNER_BC") << ", \"EH = 0\")"
+                      << "   r = " << std::setprecision(17) << rpin
+                      << "  (r_2M = " << r2m << ")\n";
+    }
+
     // --- outer: decay conditions at r = infinity.  An entry is "F" (meaning
     // F = 0) or "F=value" -- the manufactured BVP needs G(inf) = -2.
     std::vector<std::pair<std::string, double>> outset;
@@ -998,6 +1067,14 @@ int main(int argc, char** argv)
             syst.add_cst("outGadd", gtarget);
             syst.add_eq_bc(dlast, OUTER_BC, (P("G", 0) + " = outGadd").c_str());
             n_appended += 1;
+        }
+        // --- ROUND-15: the throat-side constraint pin, as an APPENDED row.
+        if (pinner_dom >= 0) {
+            syst.add_eq_bc(pinner_dom, pinner_outer ? OUTER_BC : INNER_BC,
+                           "EH = 0");
+            n_appended += 1;
+            if (rank == 0)
+                std::cout << "# pininner APPENDED (weight-carrying), not a core row\n";
         }
         // --- ROUND-14: pin the two constant homogeneous modes.
         if (!pinconst.empty()) {

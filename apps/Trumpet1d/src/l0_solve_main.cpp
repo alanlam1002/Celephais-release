@@ -161,6 +161,7 @@ int main(int argc, char** argv)
     double addweight = 1.0;
     std::string addequil = "appended";   // research's prescription
     std::string addrows = "all";
+    std::string logenrich;          // e.g. "1:UQG" or "1:U,2:U"
     for (int i = 4; i < argc; i++) {
         const std::string k = argv[i];
         auto next = [&]() -> std::string {
@@ -231,6 +232,12 @@ int main(int argc, char** argv)
         // only).  Lets the core-row inconsistency be attributed to a row
         // rather than to "the formulation".
         else if (k == "--add-rows") addrows = next();
+        // --log-enrich <k>:<fields>[,<k>:<fields>]  far-field enrichment.
+        // "1:UQG" adds ln(r)/r in all three field directions, three
+        // amplitudes, so the DIRECTION is recovered rather than assumed;
+        // "1:U" adds one, which keeps the appended rows overdetermining the
+        // system so the P2 residual split stays a real test.
+        else if (k == "--log-enrich") logenrich = next();
         else if (k == "--dump-jacobian") jacdump = next();
         else if (k == "--manufactured") {
             // MANUFACTURED-SOLUTION BVP (playbook rule 2).  The exact mass mode
@@ -468,16 +475,92 @@ int main(int argc, char** argv)
         if (rowCOMPAT_dom < 0) { rowCOMPAT_dom = dh; rowCOMPAT_bound = OUTER_BC; }
     }
 
+    // ---------------------------------------------- log enrichment ----------
+    // Parse "<k>:<fields>[,<k>:<fields>]" into (power, field) amplitude slots,
+    // register the analytic profiles and one double unknown per slot, and build
+    // the per-row log columns E<row>L<k><field>.
+    //
+    // WHERE THE LOG ACTUALLY BITES.  The profiles are zero on every domain but
+    // the last, so the amplitude columns of the inner rows, the constraint pins,
+    // the compatibility rows and the outer decay rows are IDENTICALLY zero (at
+    // r = infinity L, L' and L'' are all 0 too).  Only the bulk rows on the last
+    // domain and the matching at the last interface see a nonzero column.  Those
+    // two are written compound; the rest are left alone because adding a term
+    // that is exactly zero would change nothing but the string.  LOGCOL_zero
+    // below asserts that claim rather than trusting it.
+    struct LogSlot { int k; std::string field, amp; std::array<std::string,3> L; };
+    std::vector<LogSlot> logslots;
+    std::vector<double> logamp;
+    logamp.reserve(16);
+    if (!logenrich.empty()) {
+        for (const auto& part : split2(logenrich)) {
+            const auto colon = part.find(':');
+            if (colon == std::string::npos) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --log-enrich expects <k>:<fields>\n";
+                MPI_Finalize();
+                return 2;
+            }
+            const int k = std::stoi(part.substr(0, colon));
+            const std::string tagn = "Lg" + std::to_string(k);
+            const auto L = m.enrich_log(syst, k, tagn);
+            for (char c : part.substr(colon + 1)) {
+                const std::string f(1, c);
+                if (f != "U" && f != "Q" && f != "G") {
+                    if (rank == 0)
+                        std::cerr << "FATAL: --log-enrich field must be U, Q or G\n";
+                    MPI_Finalize();
+                    return 2;
+                }
+                logamp.push_back(0.0);
+                LogSlot sl{k, f, "alg" + std::to_string(k) + f, L};
+                syst.add_var(sl.amp.c_str(), logamp.back());
+                logslots.push_back(sl);
+            }
+        }
+        for (int n = 0; n < 5; n++)
+            for (const auto& sl : logslots) {
+                const std::string body = m.log_row(n, sl.field, sl.L);
+                const std::string nm = std::string(Trumpet::row_defs()[n]) + "L"
+                                       + std::to_string(sl.k) + sl.field;
+                syst.add_def((nm + " = " + (body.empty() ? std::string("0 * ") + sl.L[0]
+                                                         : body)).c_str());
+            }
+        if (rank == 0) {
+            std::cout << "# logenrich " << logslots.size() << " amplitude(s):";
+            for (const auto& sl : logslots)
+                std::cout << " " << sl.amp << "=ln(r)/r^" << sl.k << " in " << sl.field;
+            std::cout << "  (supported on d" << dlast << " only)\n";
+        }
+    }
+    // row n's equation string, with the log terms appended when enriched
+    auto eqstr = [&](int n) {
+        std::string e = Trumpet::row_defs()[n];
+        for (const auto& sl : logslots)
+            e += " + " + sl.amp + " * " + Trumpet::row_defs()[n] + "L"
+                 + std::to_string(sl.k) + sl.field;
+        return e + " = 0";
+    };
+    // a field, plus its log content -- for matching, where the two sides of the
+    // last interface see different profile values
+    auto aug = [&](const std::string& f, int order) {
+        std::string e = (order == 0) ? f : "dr(" + f + ")";
+        for (const auto& sl : logslots)
+            if (sl.field == f)
+                e += " + " + sl.amp + " * " + sl.L[order];
+        return e;
+    };
+
     // --- bulk: the three evolution rows, in every domain.  E_XR is never
     // lowered: it keeps all three second-derivative slots at r(2M) and is the
     // one row that does not degenerate there.
     int freed = 0;
     for (int d = 0; d <= dlast; d++) {
-        if (lowerEK[d])  { syst.add_eq_order(d, taurder, "EK = 0");  freed++; }
-        else               syst.add_eq_inside(d, "EK = 0");
-        syst.add_eq_inside(d, "EXR = 0");
-        if (lowerEXT[d]) { syst.add_eq_order(d, taurder, "EXT = 0"); freed++; }
-        else               syst.add_eq_inside(d, "EXT = 0");
+        if (lowerEK[d])  { syst.add_eq_order(d, taurder, eqstr(0).c_str());  freed++; }
+        else               syst.add_eq_inside(d, eqstr(0).c_str());
+        syst.add_eq_inside(d, eqstr(1).c_str());
+        if (lowerEXT[d]) { syst.add_eq_order(d, taurder, eqstr(2).c_str()); freed++; }
+        else               syst.add_eq_inside(d, eqstr(2).c_str());
     }
     const auto hfix = horizonfix.empty() ? std::vector<std::string>()
                                          : split2(horizonfix);
@@ -507,7 +590,7 @@ int main(int argc, char** argv)
     // --- C0 + C1 matching of all three fields at every interface
     for (int d = 0; d < dlast; d++)
         for (const char* f : {"U", "Q", "G"}) {
-            syst.add_eq_matching(d, OUTER_BC, f);
+            syst.add_eq_matching(d, OUTER_BC, aug(f, 0).c_str());
             if (d == dh
                 && std::find(hfix.begin(), hfix.end(), std::string(f)) != hfix.end()) {
                 if (rank == 0)
@@ -515,7 +598,7 @@ int main(int argc, char** argv)
                               << "/OUTER_BC DROPPED\n";
                 continue;
             }
-            syst.add_eq_matching(d, OUTER_BC, (std::string("dr(") + f + ")").c_str());
+            syst.add_eq_matching(d, OUTER_BC, aug(f, 1).c_str());
         }
     // --- THE FIX: spend the freed conditions on the two pointwise rows the
     // degeneracy leaves unimposed at r(2M).  Research round-2 Q1 names them as
@@ -1044,6 +1127,17 @@ int main(int argc, char** argv)
         }
         rescore = post_core;
         resadd = post_add;
+        // LOGCOL_zero: the claim that only the last domain's bulk rows and the
+        // last matching see a nonzero amplitude column.  Measured, not assumed:
+        // the largest |column| entry outside those rows must be exactly 0.
+        if (!logslots.empty() && rank == 0) {
+            double outside = 0.0;
+            const int ncol_poly = ncol - int(logslots.size());
+            for (int c = ncol_poly; c < ncol; c++)
+                for (int r = 0; r < nrow; r++)
+                    outside = std::max(outside, std::fabs(A[std::size_t(c) * nrow + r]));
+            Trumpet::emit("LOGCOL_max", outside);
+        }
         // WHERE the core residual lives.  If the least-squares has to sacrifice
         // core rows to satisfy the appended ones, which rows it sacrifices is the
         // whole diagnosis: tau rows on the horizon domains would mean the appended
@@ -1114,6 +1208,9 @@ int main(int argc, char** argv)
             Trumpet::emit("ADD_lsq_res_appended", resadd);
             Trumpet::emit("ADD_scale", scale_used);
             Trumpet::emit("ADD_weight", addweight);
+            for (std::size_t j = 0; j < logslots.size(); j++)
+                Trumpet::emit("LOGAMP_" + std::to_string(logslots[j].k) + "_"
+                              + logslots[j].field, logamp[j]);
         }
     }
     try {

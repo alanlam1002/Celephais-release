@@ -31,6 +31,7 @@
 #include "src/table_io.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <deque>
 #include <iomanip>
@@ -290,6 +291,80 @@ public:
         return defs;
     }
 
+    /**
+     * FAR-FIELD LOG ENRICHMENT (round-6 option (a)).
+     *
+     * The constraints source a ln(r) far field that no polynomial basis in 1/r
+     * represents, so the compactified domain's ansatz is enriched with
+     * L_k(r) = ln(r)/r^k, amplitude an ordinary unknown.  Three points of care:
+     *
+     * ANALYTIC DERIVATIVES.  Filling one Scalar with L and asking Kadath for
+     * dr() of it would differentiate the INTERPOLANT, carrying exactly the
+     * representation error the enrichment exists to remove.  L, L' and L'' are
+     * therefore three separate add_cst fields, each analytic at the collocation
+     * points, so every row's log column is an exact pointwise combination of
+     * tabulated numbers.
+     *
+     * BUILT FROM 1/r, NOT r.  The compactified domain's last point is r = inf;
+     * oor = 1/r is 0 there and finite everywhere, so the profiles are written in
+     * oor and set to exactly 0 when oor == 0.
+     *
+     * SUPPORTED ON THE LAST DOMAIN ONLY.  ln(r)/r reads -12.0 at r_in = 0.155;
+     * a globally supported log would corrupt the inner rows, whose census says
+     * the local family at the throat is analytic.  Zero inside means the SAME
+     * compound expressions can be used on every domain and interface without
+     * special-casing anything.
+     *
+     * Returns the registered names {L, L', L''} for the caller to build rows.
+     */
+    std::array<std::string, 3> enrich_log(Kadath::System_of_eqs& syst, int k,
+                                          const std::string& tagname)
+    {
+        const int dlast = ndom - 1;
+        auto val = [&](int order, int d, int i) -> double {
+            if (d != dlast)
+                return 0.0;
+            const double u = bt.pts[d][i].oor;          // u = 1/r
+            if (u <= 0.0)
+                return 0.0;                             // r = infinity
+            const double lr = -std::log(u);             // ln r
+            const double uk = std::pow(u, k);
+            switch (order) {
+                case 0: return lr * uk;                         // ln(r)/r^k
+                case 1: return uk * u * (1.0 - k * lr);         // d/dr
+                default: return uk * u * u * (k * (k + 1) * lr - (2 * k + 1));
+            }
+        };
+        std::array<std::string, 3> nm{tagname, tagname + "p", tagname + "pp"};
+        for (int order = 0; order < 3; order++) {
+            logprof.emplace_back(space);
+            fill(logprof.back(), [&](int d, int i) { return val(order, d, i); });
+            syst.add_cst(nm[order].c_str(), logprof.back());
+        }
+        return nm;
+    }
+
+    /**
+     * The row operator applied to a log profile in ONE field direction: the same
+     * coefficient-times-jet sum register_rows() builds, with (L, L', L'') in
+     * place of (f, dr(f), ddr(f)) and the j2 column dropped -- the source does
+     * not multiply the amplitude.  Empty when the row has no jets in that field.
+     */
+    std::string log_row(int n, const std::string& field,
+                        const std::array<std::string, 3>& L) const
+    {
+        std::string rhs;
+        for (const auto& jet : ct.jets.at(rows()[n])) {
+            if (jet == "j2" || field_of(jet) != field)
+                continue;
+            const int order = (jet.size() == 1) ? 0 : int(jet.size()) - 1;
+            if (!rhs.empty())
+                rhs += " + ";
+            rhs += nameof.at(std::string(rows()[n]) + "/" + jet) + " * " + L[order];
+        }
+        return rhs;
+    }
+
     /** Header lines describing the imported operator. */
     void print_banner() const
     {
@@ -315,6 +390,8 @@ public:
     Trumpet::Space_oned_trumpet space;
     Kadath::Scalar Wf, Rrf, oorf, iR;
     Kadath::Scalar U, Q, G;
+    /// Analytic log profiles for the far-field enrichment; see enrich_log().
+    std::vector<Kadath::Scalar> logprof;
 
 private:
     static std::vector<Kadath::Dim_array> make_res(const TrumpetIO::Table& t)

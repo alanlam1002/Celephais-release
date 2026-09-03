@@ -93,12 +93,20 @@ std::vector<std::string> split2(const std::string& s)
  * full precision -- these are boundary conditions, not diagnostics.
  */
 std::string bc_lhs(const TrumpetIO::BcRow& r, const std::string& prefix,
-                   Kadath::System_of_eqs& syst)
+                   Kadath::System_of_eqs& syst,
+                   const std::vector<std::string>& fields)
 {
+    // SPEC v2's rows are quoted on the PHYSICAL jet (U, dr(U), Q, dr(Q), G,
+    // dr(G)) and round 11 asks for them to be transformed, not re-derived.
+    // phys_expr does exactly that, and is the identity for a (U,Q,G) table.
+    auto P = [&](const char* f, int o) { return Trumpet::phys_expr(fields, f, o); };
     if (!r.general)
-        return (r.kind == "der1") ? "dr(" + r.field + ")"
-             : (r.field == "4U+Q+G" ? "4 * U + Q + G" : r.field);
-    static const char* JETSTR[6] = {"U", "dr(U)", "Q", "dr(Q)", "G", "dr(G)"};
+        return (r.kind == "der1") ? P(r.field.c_str(), 1)
+             : (r.field == "4U+Q+G"
+                    ? "4 * " + P("U", 0) + " + " + P("Q", 0) + " + " + P("G", 0)
+                    : P(r.field.c_str(), 0));
+    const std::string JETSTR[6] = {P("U", 0), P("U", 1), P("Q", 0), P("Q", 1),
+                                   P("G", 0), P("G", 1)};
     static const char* SUF[6] = {"cU", "cUp", "cQ", "cQp", "cG", "cGp"};
     std::string out;
     for (int k = 0; k < 6; k++) {
@@ -296,6 +304,11 @@ int main(int argc, char** argv)
     const int ndom = m.nb_domains();
     const int dlast = ndom - 1;
 
+    // Physical (U,Q,G) conditions, written in the table's native fields.
+    const std::vector<std::string>& FLD = m.coefs().fields;
+    auto P = [&](const std::string& f, int o) {
+        return Trumpet::phys_expr(FLD, f, o);
+    };
     const auto inn = split2(inner);
     const auto out = split2(outer);
     const auto pin = split2(pins);
@@ -377,7 +390,7 @@ int main(int argc, char** argv)
             std::ostringstream nm;
             nm << "T" << Trumpet::row_codes()[n] << t++;
             const std::string d = nm.str() + " = c" + Trumpet::row_codes()[n] + jet
-                                  + " * " + Trumpet::apply_jet(jet, Trumpet::field_of(jet));
+                                  + " * " + Trumpet::apply_jet(jet, Trumpet::field_of(jet, m.coefs().fields));
             syst.add_def(d.c_str());
             termdef[n].push_back(nm.str());
         }
@@ -389,15 +402,16 @@ int main(int argc, char** argv)
     // makes the horizon options fail loudly instead of acting on the wrong point.
     int dh = -1;
     {
-        const auto& cv = m.coefs().v;
-        const auto& kUpp = cv.at(std::make_pair(std::string("E_K"),
-                                                std::string("Upp")));
+        // The degenerate direction is U'' -- physically, whatever the table's
+        // fields are.  phys_coef reconstructs it, so this works in (U,Q,G) and
+        // in (S,T,G) alike and finds the same interface.
+        auto kUpp = [&](int d, int i) { return m.phys_coef("E_K", "Upp", d, i); };
         double mx = 0.0;
         for (int d = 0; d <= dlast; d++)
             for (int i = 0; i < m.nbr(d); i++)
-                mx = std::max(mx, std::fabs(kUpp[d][i]));
+                mx = std::max(mx, std::fabs(kUpp(d, i)));
         for (int d = 0; d < dlast && dh < 0; d++)
-            if (std::fabs(kUpp[d][m.nbr(d) - 1]) < 1e-12 * mx)
+            if (std::fabs(kUpp(d, m.nbr(d) - 1)) < 1e-12 * mx)
                 dh = d;
     }
 
@@ -599,16 +613,19 @@ int main(int argc, char** argv)
             return 2;
         }
         for (const auto& f : hfix)
-            if (f != "U" && f != "Q" && f != "G") {
+            if (std::find(FLD.begin(), FLD.end(), f) == FLD.end()) {
                 if (rank == 0)
-                    std::cerr << "FATAL: --horizon-fix fields must be U, Q or G\n";
+                    std::cerr << "FATAL: --horizon-fix fields must be among "
+                              << FLD[0] << ", " << FLD[1] << ", " << FLD[2] << "\n";
                 MPI_Finalize();
                 return 2;
             }
     }
-    // --- C0 + C1 matching of all three fields at every interface
+    // --- C0 + C1 matching of all three fields at every interface.  This is
+    // continuity of the UNKNOWNS, so it runs over the native fields (S,T,G or
+    // U,Q,G) -- not the physical ones.
     for (int d = 0; d < dlast; d++)
-        for (const char* f : {"U", "Q", "G"}) {
+        for (const std::string& f : FLD) {
             syst.add_eq_matching(d, OUTER_BC, aug(f, 0).c_str());
             if (d == dh
                 && std::find(hfix.begin(), hfix.end(), std::string(f)) != hfix.end()) {
@@ -628,9 +645,8 @@ int main(int argc, char** argv)
     // interface itself) and asserted, so a table without this structure fails
     // loudly rather than imposing a wrong row.
     if (!horder.empty() && taurder == 3) {
-        const auto& cv = m.coefs().v;
         auto C = [&](const char* row, const char* jet, int d, int i) {
-            return cv.at(std::make_pair(std::string(row), std::string(jet)))[d][i];
+            return m.phys_coef(row, jet, d, i);
         };
         const int ih = m.nbr(dh) - 1;
         const double k1 = C("E_chi_tt", "Upp", dh, ih - 1) / C("E_K", "Upp", dh, ih - 1);
@@ -754,7 +770,7 @@ int main(int argc, char** argv)
         // backbone, not from the j2 ladder).
         const double rhs = manufactured ? it->second.rhs : j2 * it->second.rhs;
         syst.add_cst(cnm.c_str(), rhs);
-        const std::string lhs = bc_lhs(it->second, "r" + nm, syst);
+        const std::string lhs = bc_lhs(it->second, "r" + nm, syst, m.coefs().fields);
         inner_eq.push_back(lhs + " = " + cnm);
         syst.add_eq_bc(0, INNER_BC, inner_eq.back().c_str());
     }
@@ -786,9 +802,8 @@ int main(int argc, char** argv)
     const bool want_hEXT =
         std::find(pin.begin(), pin.end(), std::string("hEXT")) != pin.end();
     if (want_compat || want_hEK || want_hEXT) {
-        const auto& cv = m.coefs().v;
         auto C = [&](const char* row, const char* jet, int d, int i) {
-            return cv.at(std::make_pair(std::string(row), std::string(jet)))[d][i];
+            return m.phys_coef(row, jet, d, i);
         };
         if (dh < 0) {
             if (rank == 0)
@@ -840,7 +855,7 @@ int main(int argc, char** argv)
         }
         if (want_compat) {
             syst.add_cst("compatv", compat);
-            syst.add_eq_bc(dh, OUTER_BC, "dr(Q) = compatv");
+            syst.add_eq_bc(dh, OUTER_BC, (P("Q", 1) + " = compatv").c_str());
             if (rank == 0)
                 std::cout << "# compat  add_eq_bc(" << dh << ", OUTER_BC, "
                              "\"dr(Q) = " << compat << "\")\n";
@@ -897,7 +912,7 @@ int main(int argc, char** argv)
         outset.emplace_back(fld, tgt);
         const std::string cnm = "out" + fld;
         syst.add_cst(cnm.c_str(), tgt);
-        syst.add_eq_bc(dlast, OUTER_BC, (fld + " = " + cnm).c_str());
+        syst.add_eq_bc(dlast, OUTER_BC, (P(fld, 0) + " = " + cnm).c_str());
     }
 
     // --- ROUND-4 APPENDED ROWS.  Registered last, so they are the final three
@@ -918,9 +933,8 @@ int main(int argc, char** argv)
             MPI_Finalize();
             return 2;
         }
-        const auto& cv = m.coefs().v;
         auto C = [&](const char* row, const char* jet, int d, int i) {
-            return cv.at(std::make_pair(std::string(row), std::string(jet)))[d][i];
+            return m.phys_coef(row, jet, d, i);
         };
         const int ih = m.nbr(dh) - 1;
         const double k1 = C("E_chi_tt", "Upp", dh, ih - 1) / C("E_K", "Upp", dh, ih - 1);
@@ -963,7 +977,7 @@ int main(int argc, char** argv)
         const double gtarget = manufactured ? -2.0 : 0.0;
         if (addrows == "all" || addrows == "g") {
             syst.add_cst("outGadd", gtarget);
-            syst.add_eq_bc(dlast, OUTER_BC, "G = outGadd");
+            syst.add_eq_bc(dlast, OUTER_BC, (P("G", 0) + " = outGadd").c_str());
             n_appended += 1;
         }
         if (n_appended == 0) {
@@ -1296,7 +1310,7 @@ int main(int argc, char** argv)
     for (const auto& nm : inn) {
         const auto& r = bc.row.at(nm);
         const std::string dn = "CHK" + nm;
-        const std::string lhs = bc_lhs(r, "k" + nm, syst);
+        const std::string lhs = bc_lhs(r, "k" + nm, syst, FLD);
         syst.add_def((dn + " = " + lhs).c_str());
         const double got = def_at_boundary(syst, m.space, dn.c_str(), 0, INNER_BC);
         const double want = manufactured ? r.rhs : j2 * r.rhs;
@@ -1311,7 +1325,7 @@ int main(int argc, char** argv)
         const auto& nm = kv.first;
         const auto& r = kv.second;
         const std::string dn = "ALT" + nm;
-        const std::string lhs = bc_lhs(r, "a" + nm, syst);
+        const std::string lhs = bc_lhs(r, "a" + nm, syst, FLD);
         syst.add_def((dn + " = " + lhs).c_str());
         const double got = def_at_boundary(syst, m.space, dn.c_str(), 0, INNER_BC);
         Trumpet::emit("ALT_" + nm, got);
@@ -1526,7 +1540,8 @@ int main(int argc, char** argv)
             double num = 0.0, den = 0.0;
             int wd = -1, wi = -1;
             for (int d = 0; d <= dlast; d++) {
-                const Val_domain& got = (f == 0) ? m.U(d) : (f == 1) ? m.Q(d) : m.G(d);
+                const Val_domain got = (f == 0) ? m.Uphys(d)
+                                       : (f == 1) ? m.Qphys(d) : m.Gphys(d);
                 const Val_domain& exa = (f == 0) ? Ue(d) : (f == 1) ? Qe(d) : Ge(d);
                 Index idx(m.space.get_domain(d)->get_nbr_points());
                 double wdom = 0.0;
@@ -1555,9 +1570,12 @@ int main(int argc, char** argv)
     {
         const Kadath::Domain* dom = m.space.get_domain(dlast);
         Index pcf(dom->get_nbr_coefs());
-        const double tU = dom->val_boundary(OUTER_BC, dom->mult_r(m.U(dlast)), pcf);
-        const double tQ = dom->val_boundary(OUTER_BC, dom->mult_r(m.Q(dlast)), pcf);
-        const double tG = dom->val_boundary(OUTER_BC, dom->mult_r(m.G(dlast)), pcf);
+        const double tU = dom->val_boundary(OUTER_BC,
+                                            dom->mult_r(m.Uphys(dlast)), pcf);
+        const double tQ = dom->val_boundary(OUTER_BC,
+                                            dom->mult_r(m.Qphys(dlast)), pcf);
+        const double tG = dom->val_boundary(OUTER_BC,
+                                            dom->mult_r(m.Gphys(dlast)), pcf);
         Trumpet::emit("TAIL_tU", tU);
         Trumpet::emit("TAIL_tQ", tQ);
         Trumpet::emit("TAIL_tG", tG);
@@ -1568,9 +1586,9 @@ int main(int argc, char** argv)
             for (const auto& o : outset)
                 if (o.first == f)
                     imposed = true;
-            const Val_domain& v = (std::strcmp(f, "U") == 0)   ? m.U(dlast)
-                                  : (std::strcmp(f, "Q") == 0) ? m.Q(dlast)
-                                                               : m.G(dlast);
+            const Val_domain v = (std::strcmp(f, "U") == 0)   ? m.Uphys(dlast)
+                                 : (std::strcmp(f, "Q") == 0) ? m.Qphys(dlast)
+                                                              : m.Gphys(dlast);
             Trumpet::emit(std::string("OUTVAL_") + f, dom->val_boundary(OUTER_BC, v, pcf));
             Trumpet::emit(std::string("OUTIMPOSED_") + f, imposed ? 1.0 : 0.0);
         }
@@ -1597,9 +1615,9 @@ int main(int argc, char** argv)
            << "  outer " << outer << "\n"
            << "# sol <dom> <ipt> <r> <U> <Q> <G> <dU/dr> <dQ/dr> <dG/dr>\n"
            << "# cf  <dom> <field> <i> <coef>\n";
-        syst.add_def("PdU = dr(U)");
-        syst.add_def("PdQ = dr(Q)");
-        syst.add_def("PdG = dr(G)");
+        syst.add_def(("PdU = " + P("U", 1)).c_str());
+        syst.add_def(("PdQ = " + P("Q", 1)).c_str());
+        syst.add_def(("PdG = " + P("G", 1)).c_str());
         fh << std::setprecision(17);
         for (int d = 0; d <= dlast; d++) {
             const Val_domain& dU = syst.give_val_def_scalar_domain("PdU", d);
@@ -1609,15 +1627,16 @@ int main(int argc, char** argv)
             for (int i = 0; i < m.nbr(d); i++) {
                 idx.set(0) = i;
                 fh << "sol " << d << " " << i << " " << m.table().pts[d][i].r << " "
-                   << m.U(d)(idx) << " " << m.Q(d)(idx) << " " << m.G(d)(idx) << " "
+                   << m.Uphys(d)(idx) << " " << m.Qphys(d)(idx) << " "
+                   << m.Gphys(d)(idx) << " "
                    << dU(idx) << " " << dQ(idx) << " " << dG(idx) << "\n";
             }
             // spectral coefficients: T2.3's throat oracle reads these
             Index icf(m.space.get_domain(d)->get_nbr_coefs());
             for (const char* f : {"U", "Q", "G"}) {
-                const Val_domain& v = (std::strcmp(f, "U") == 0)   ? m.U(d)
-                                      : (std::strcmp(f, "Q") == 0) ? m.Q(d)
-                                                                   : m.G(d);
+                const Val_domain v = (std::strcmp(f, "U") == 0)   ? m.Uphys(d)
+                                     : (std::strcmp(f, "Q") == 0) ? m.Qphys(d)
+                                                                  : m.Gphys(d);
                 v.coef();
                 for (int i = 0; i < m.space.get_domain(d)->get_nbr_coefs()(0); i++) {
                     icf.set(0) = i;

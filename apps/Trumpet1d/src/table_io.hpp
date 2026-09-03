@@ -127,6 +127,9 @@ struct CoefTable
     int ndom = 0, ncoef = 0;
     std::map<std::string, int> scale;                     // row -> p
     std::map<std::string, std::vector<std::string>> jets; // row -> jet names
+    /// The three unknowns, in jet order.  Tables written before the (S,T,G)
+    /// route carry no `fields` line, so this default keeps them readable.
+    std::vector<std::string> fields{"U", "Q", "G"};
     // (row, jet) -> [domain][ipoint]
     std::map<std::pair<std::string, std::string>, std::vector<std::vector<double>>> v;
 };
@@ -149,6 +152,15 @@ inline CoefTable read_coefs(const std::string& path, const std::vector<DomainSpe
             is >> t.tag;
         } else if (key == "ncoef") {
             is >> t.ncoef;
+        } else if (key == "fields") {
+            std::vector<std::string> f;
+            std::string nm;
+            while (is >> nm)
+                f.push_back(nm);
+            if (f.size() != 3)
+                throw std::runtime_error("coef table 'fields' line must name "
+                                         "exactly three unknowns");
+            t.fields = f;
         } else if (key == "scale") {
             std::string row; int p; is >> row >> p; t.scale[row] = p;
         } else if (key == "jets") {

@@ -64,29 +64,72 @@ inline const char* const* row_defs()
     return D;
 }
 
-/** Jet name -> the string that applies it to a field. */
-inline std::string apply_jet(const std::string& jet, const std::string& f)
+/** Split a jet name into (field stem, derivative order): "Sp" -> ("S", 1). */
+inline std::pair<std::string, int> split_jet(const std::string& jet)
 {
-    if (jet == "U" || jet == "Q" || jet == "G")
-        return f;
-    if (jet == "Up" || jet == "Qp" || jet == "Gp")
-        return "dr(" + f + ")";
-    if (jet == "Upp" || jet == "Qpp" || jet == "Gpp")
-        return "ddr(" + f + ")";
-    if (jet == "j2")
-        return "jsrc";
-    throw std::runtime_error("unknown jet " + jet);
+    if (jet.size() > 2 && jet.compare(jet.size() - 2, 2, "pp") == 0)
+        return {jet.substr(0, jet.size() - 2), 2};
+    if (jet.size() > 1 && jet.back() == 'p')
+        return {jet.substr(0, jet.size() - 1), 1};
+    return {jet, 0};
 }
 
-inline std::string field_of(const std::string& jet)
+/** Derivative order `n` of field `f` as a Kadath expression string. */
+inline std::string deriv(const std::string& f, int n)
 {
-    if (jet[0] == 'U')
-        return "U";
-    if (jet[0] == 'Q')
-        return "Q";
-    if (jet[0] == 'G')
-        return "G";
+    return n == 0 ? f : (n == 1 ? "dr(" + f + ")" : "ddr(" + f + ")");
+}
+
+/**
+ * Jet name -> the string that applies it to a field.
+ *
+ * Suffix-driven, so it is FIELD-SET AGNOSTIC: it serves (U,Q,G) and the
+ * round-11 (S,T,G) route with no per-set code.  `j2` is the source amplitude.
+ */
+inline std::string apply_jet(const std::string& jet, const std::string& f)
+{
+    if (jet == "j2")
+        return "jsrc";
+    return deriv(f, split_jet(jet).second);
+}
+
+/** Which of `fields` this jet belongs to; "" for the source column. */
+inline std::string field_of(const std::string& jet,
+                            const std::vector<std::string>& fields)
+{
+    const std::string stem = split_jet(jet).first;
+    for (const auto& f : fields)
+        if (stem == f)
+            return f;
     return "";
+}
+
+/**
+ * THE PHYSICAL VARIABLES (U,Q,G), expressed in whatever the table's fields are.
+ *
+ * Every gate, oracle, inner row and tail in this project is defined in (U,Q,G),
+ * and round 11 asks for the gates to be ported AS-IS.  The (S,T,G) route is the
+ * linear change S = 4U + Q, T = U, so the inverse
+ *
+ *     U = T,   Q = S - 4 T,   G = G
+ *
+ * is exact with constant coefficients, and every physical condition can be
+ * written in the native fields without re-deriving anything.  For the (U,Q,G)
+ * table this is the identity.
+ */
+inline std::string phys_expr(const std::vector<std::string>& fields,
+                             const std::string& phys, int order)
+{
+    const bool stg = (fields.size() == 3 && fields[0] == "S" && fields[1] == "T");
+    if (!stg)
+        return deriv(phys, order);
+    if (phys == "U")
+        return deriv("T", order);
+    if (phys == "G")
+        return deriv("G", order);
+    if (phys == "Q")
+        return "(" + deriv("S", order) + " - 4 * " + deriv("T", order) + ")";
+    throw std::runtime_error("phys_expr: unknown physical field " + phys);
 }
 
 inline void emit(const std::string& k, double v)
@@ -245,16 +288,67 @@ public:
     void set_fields_massmode()
     {
         const double M = bt.M;
+        // In (S,T,G) the same solution is S = 4U + Q = 2(1-W) and T = U, since
+        // the mass mode has Q identically zero.  Exact either way.
         for (int d = 0; d < ndom; d++) {
-            U.set_domain(d) = (1.0 - Wf(d)) * 0.5;
-            Q.set_domain(d) = 0.0 * Wf(d);
-            G.set_domain(d) =
+            const Kadath::Val_domain u = (1.0 - Wf(d)) * 0.5;
+            const Kadath::Val_domain g =
                 -(iR(d) - (27.0 / 8.0) * std::pow(M, 3) * Kadath::pow(iR(d), 4)) / Wf(d)
                 - 2.0;
+            if (is_stg()) {
+                U.set_domain(d) = 4.0 * u;          // S
+                Q.set_domain(d) = u;                // T
+            } else {
+                U.set_domain(d) = u;
+                Q.set_domain(d) = 0.0 * Wf(d);
+            }
+            G.set_domain(d) = g;
         }
         U.std_base();
         Q.std_base();
         G.std_base();
+    }
+
+    /// Is this model in the round-11 (S,T,G) variables?
+    bool is_stg() const
+    {
+        return ct.fields.size() == 3 && ct.fields[0] == "S" && ct.fields[1] == "T";
+    }
+
+    /** The physical (U,Q,G) fields, whatever the native ones are. */
+    Kadath::Val_domain Uphys(int d) const { return is_stg() ? Q(d) : U(d); }
+    Kadath::Val_domain Qphys(int d) const
+    {
+        return is_stg() ? (U(d) - 4.0 * Q(d)) : Q(d);
+    }
+    Kadath::Val_domain Gphys(int d) const { return G(d); }
+
+    /**
+     * Coefficient of a PHYSICAL jet ("Upp", "Qp", ...) in row n, recovered from
+     * a table written in the native fields.  With S = 4U+Q, T = U the stored
+     * coefficients satisfy  d_S. = c_Q.  and  d_T. = c_U. - 4 c_Q. , so
+     *     c_U. = d_T. + 4 d_S. ,   c_Q. = d_S. ,   c_G. = d_G.
+     * Verified against the (U,Q,G) table at the horizon interface: exact to the
+     * last bit, and it returns kappa = 2 in both variable sets.
+     */
+    double phys_coef(const std::string& row, const std::string& physjet,
+                     int d, int i) const
+    {
+        const auto sj = split_jet(physjet);
+        const int od = sj.second;
+        auto at = [&](const char* stem) -> double {
+            const std::string jn = std::string(stem)
+                                   + (od == 0 ? "" : (od == 1 ? "p" : "pp"));
+            const auto it = ct.v.find(std::make_pair(row, jn));
+            return it == ct.v.end() ? 0.0 : it->second[d][i];
+        };
+        if (!is_stg())
+            return at(sj.first.c_str());
+        if (sj.first == "U")
+            return at("T") + 4.0 * at("S");
+        if (sj.first == "Q")
+            return at("S");
+        return at("G");
     }
 
     /**
@@ -265,9 +359,9 @@ public:
      */
     std::vector<std::string> register_rows(Kadath::System_of_eqs& syst, double j2)
     {
-        syst.add_var("U", U);
-        syst.add_var("Q", Q);
-        syst.add_var("G", G);
+        syst.add_var(ct.fields[0].c_str(), U);
+        syst.add_var(ct.fields[1].c_str(), Q);
+        syst.add_var(ct.fields[2].c_str(), G);
         syst.add_cst("jsrc", j2);
 
         std::size_t k = 0;
@@ -283,7 +377,7 @@ public:
                 if (!rhs.empty())
                     rhs += " + ";
                 rhs += nameof.at(std::string(rows()[n]) + "/" + jet) + " * "
-                       + apply_jet(jet, field_of(jet));
+                       + apply_jet(jet, field_of(jet, ct.fields));
             }
             defs.push_back(std::string(row_defs()[n]) + " = " + rhs);
             syst.add_def(defs.back().c_str());
@@ -355,7 +449,7 @@ public:
     {
         std::string rhs;
         for (const auto& jet : ct.jets.at(rows()[n])) {
-            if (jet == "j2" || field_of(jet) != field)
+            if (jet == "j2" || field_of(jet, ct.fields) != field)
                 continue;
             const int order = (jet.size() == 1) ? 0 : int(jet.size()) - 1;
             if (!rhs.empty())

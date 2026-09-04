@@ -197,6 +197,17 @@ int main(int argc, char** argv)
     // measured 662x compat violation at --add-weight 0.  The budget is SEVEN:
     // a second constraint pin, E_H = 0, on the throat side of the horizon.
     std::string pininner;
+    // ROUND-19 EXTENDED-PRECISION TEST.  The square order-3 system is full rank,
+    // so its exact solution exists and is unique: solving it in extended
+    // precision DECIDES whether t_Q ~ 1e-2 and a ~ -0.1 are the formulation's
+    // real answer or an artefact of double precision at cond 4e10 (sourced) /
+    // 8e18 (manufactured).  --dump-system writes A and b = sec_member(0) in the
+    // SAME convention the additive path uses (solve A x = b, then
+    // xx_to_vars_delta), and --load-x reads a solution vector back so the
+    // existing diagnostics -- MAN_U_abs, the tails, the profile -- report on it
+    // unchanged.  Both off by default.
+    std::string dumpsys, loadx;
+    bool evalmm = false;
     // As a CORE row the inner pin is one of 340 and the least-squares trades it
     // away (measured: it lands at 1.7e-4 rather than 0 at its own point).
     // Appending it instead enforces it at the appended-row weight, which
@@ -232,6 +243,14 @@ int main(int argc, char** argv)
         else if (k == "--pin-const") pinconst = next();
         else if (k == "--pin-inner") pininner = next();
         else if (k == "--pin-inner-append") pininnerapp = true;
+        else if (k == "--dump-system") dumpsys = next();
+        else if (k == "--load-x") loadx = next();
+        // Set the fields to the EXACT mass mode and report the per-row residual
+        // of the discrete system.  The mass mode solves every equation
+        // everywhere, so a formulation that does not annihilate it row-by-row is
+        // imposing something the true solution does not satisfy -- this names
+        // which row that is.
+        else if (k == "--eval-massmode") evalmm = true;
         else if (k == "--profile") profile = next();
         else if (k == "--rownorm") rownorm = true;
         // Per-POINT row residuals.  The gate needs the TAU-projected residual
@@ -1161,6 +1180,105 @@ int main(int argc, char** argv)
     double err = 0.0, err0 = -1.0;
     int iter = 0;
     bool ok = false;
+    if (evalmm) {
+        m.set_fields_massmode();
+        Kadath::Array<double> rr(syst.sec_member());
+        const int nrow = syst.get_nbr_conditions();
+        std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
+        syst.classify_equation_row_metadata(rmeta);
+        auto tx = [](Kadath::RowTaxonomy t) -> const char* {
+            switch (t) {
+                case Kadath::RowTaxonomy::Vol: return "Vol";
+                case Kadath::RowTaxonomy::TauBc: return "TauBc";
+                case Kadath::RowTaxonomy::TauMatch: return "TauMatch";
+                default: return "other";
+            }
+        };
+        if (rank == 0) {
+            std::vector<std::pair<double, int>> ord;
+            for (int r = 0; r < nrow; r++)
+                ord.emplace_back(std::fabs(rr(r)), r);
+            std::sort(ord.rbegin(), ord.rend());
+            std::cout << "# massmode worst rows (|resid|, taxonomy, dom, eq, mode):\n";
+            for (int k = 0; k < 12 && k < int(ord.size()); k++) {
+                const auto& rm = rmeta[ord[k].second];
+                std::cout << "#   " << std::setprecision(6) << ord[k].first << "  "
+                          << tx(rm.taxonomy) << " d" << rm.dom << " eq" << rm.eq_index
+                          << " mode" << rm.basis_mode << "\n";
+            }
+            std::map<std::string, double> bytax;
+            for (int r = 0; r < nrow; r++)
+                bytax[tx(rmeta[r].taxonomy)] =
+                    std::max(bytax[tx(rmeta[r].taxonomy)], std::fabs(rr(r)));
+            for (const auto& kv : bytax)
+                Trumpet::emit("MM_" + kv.first, kv.second);
+            double mx = 0.0;
+            for (int r = 0; r < nrow; r++) mx = std::max(mx, std::fabs(rr(r)));
+            Trumpet::emit("MM_max", mx);
+        }
+        MPI_Finalize();
+        return 0;
+    }
+
+    // --- round 19: dump the discrete system, or load an externally-solved x.
+    if (!dumpsys.empty() || !loadx.empty()) {
+        m.set_fields_zero();
+        Kadath::Array<double> b0(syst.sec_member());
+        const int nrow = syst.get_nbr_conditions();
+        const int ncol = syst.get_nbr_unknowns();
+        if (!dumpsys.empty() && rank == 0) {
+            std::ofstream fh(dumpsys);
+            fh << "# discrete system at zero fields: solve A x = b, then "
+                  "xx_to_vars_delta(x)\n";
+            fh << "# rows " << nrow << " cols " << ncol << "\n";
+            fh << std::setprecision(17);
+            for (int r = 0; r < nrow; r++)
+                fh << "b " << r << " " << b0(r) << "\n";
+            for (int c = 0; c < ncol; c++) {
+                Kadath::Array<double> col(syst.do_col_J(c));
+                for (int r = 0; r < nrow; r++)
+                    if (col(r) != 0.0)
+                        fh << "A " << r << " " << c << " " << col(r) << "\n";
+            }
+            std::cout << "# wrote " << dumpsys << " (" << nrow << "x" << ncol
+                      << ")\n";
+        }
+        if (!loadx.empty()) {
+            std::vector<double> xv(ncol, 0.0);
+            std::ifstream fh(loadx);
+            if (!fh) {
+                if (rank == 0)
+                    std::cerr << "FATAL: cannot open --load-x " << loadx << "\n";
+                MPI_Finalize();
+                return 2;
+            }
+            std::string tok; int idx; double val; int nread = 0;
+            while (fh >> tok >> idx >> val)
+                if (tok == "x" && idx >= 0 && idx < ncol) { xv[idx] = val; nread++; }
+            if (nread != ncol) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --load-x read " << nread << " entries, "
+                              << "expected " << ncol << "\n";
+                MPI_Finalize();
+                return 2;
+            }
+            Kadath::Array<double> xx(ncol);
+            for (int c = 0; c < ncol; c++)
+                xx.set(c) = xv[c];
+            int conte = 0;
+            syst.xx_to_vars_delta(xx, conte);
+            Kadath::Array<double> rr(syst.sec_member());
+            double mx = 0.0;
+            for (int r = 0; r < nrow; r++)
+                mx = std::max(mx, std::fabs(rr(r)));
+            if (rank == 0)
+                std::cout << "# loaded x from " << loadx << "  residual max |Ax-b| = "
+                          << std::setprecision(17) << mx << "\n";
+            Trumpet::emit("LOADX_resid", mx);
+            err = mx; err0 = 1.0; ok = true;
+        }
+    }
+    const bool external = (!loadx.empty() || !dumpsys.empty());
     if (additive) {
         // ---------------------------------------- additive least squares ----
         // The system is LINEAR, so one step from a zero guess is exact and the
@@ -1380,7 +1498,7 @@ int main(int argc, char** argv)
         }
     }
     try {
-        while (!additive && iter < 12) {
+        while (!additive && !external && iter < 12) {
             iter++;
             ok = syst.do_newton(prec, err);
             if (err0 < 0.0)

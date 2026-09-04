@@ -208,6 +208,17 @@ int main(int argc, char** argv)
     // unchanged.  Both off by default.
     std::string dumpsys, loadx;
     bool evalmm = false;
+    // ROUND-20: impose the two PROVEN identities t_Q = 0 and 2t_U + t_G = 0 as
+    // appended rows.  They are exactly dual to the two contaminating constant
+    // modes -- a*c1 + b*c2 gives t_Q = b and 2t_U + t_G = -2a - b, a map of
+    // determinant 2 -- so imposing both IS round-14's a = b = 0, but delivered
+    // through val_boundary at r = infinity, which is exact on clean data
+    // (1.15e-13 on the mass mode), rather than a finite-radius surrogate.  The
+    // physical solution satisfies both identically, so unlike round 14's rows
+    // there is no inconsistency to amplify.  multr() is Kadath's
+    // Ope_mult_r; on Domain_oned_inf it composes with val_boundary(OUTER_BC) to
+    // read the 1/r coefficient exactly, which is what the tails block uses.
+    bool pintails = false;
     // As a CORE row the inner pin is one of 340 and the least-squares trades it
     // away (measured: it lands at 1.7e-4 rather than 0 at its own point).
     // Appending it instead enforces it at the appended-row weight, which
@@ -251,6 +262,7 @@ int main(int argc, char** argv)
         // imposing something the true solution does not satisfy -- this names
         // which row that is.
         else if (k == "--eval-massmode") evalmm = true;
+        else if (k == "--pin-tails") pintails = true;
         else if (k == "--profile") profile = next();
         else if (k == "--rownorm") rownorm = true;
         // Per-POINT row residuals.  The gate needs the TAU-projected residual
@@ -1073,6 +1085,11 @@ int main(int argc, char** argv)
             syst.add_eq_bc(dh, OUTER_BC, "EK = 0");
             syst.add_eq_bc(dh, OUTER_BC, "ECOMPAT = 0");
             n_appended += 2;
+        } else if (addrows != "g" && addrows != "none") {
+            if (rank == 0)
+                std::cerr << "FATAL: --add-rows must be all, compat, g or none\n";
+            MPI_Finalize();
+            return 2;
         }
         // ROW 3 AND ITS TARGET.  Round 4 says the mass mode satisfies every
         // appended row exactly at j2 = 0; that holds for rows 1 and 2 but NOT for
@@ -1120,9 +1137,23 @@ int main(int argc, char** argv)
                           << ", INNER_BC, \"" << eU << " = 0\")  and  \""
                           << eQ << " = 0\"\n";
         }
+        // --- ROUND-20: the two proven far-field identities, appended.
+        if (pintails) {
+            syst.add_eq_bc(dlast, OUTER_BC,
+                           ("multr(" + P("Q", 0) + ") = 0").c_str());
+            syst.add_eq_bc(dlast, OUTER_BC,
+                           ("2 * multr(" + P("U", 0) + ") + multr(" + P("G", 0)
+                            + ") = 0").c_str());
+            n_appended += 2;
+            if (rank == 0)
+                std::cout << "# pintails add_eq_bc(" << dlast << ", OUTER_BC, "
+                             "\"multr(Q) = 0\")  and  \"2*multr(U) + multr(G) = 0\""
+                             "   [proven identities, round 11]\n";
+        }
         if (n_appended == 0) {
             if (rank == 0)
-                std::cerr << "FATAL: --add-rows must be all, compat or g\n";
+                std::cerr << "FATAL: --add-rows must be all, compat, g or none "
+                             "(none requires --pin-tails)\n";
             MPI_Finalize();
             return 2;
         }

@@ -219,6 +219,7 @@ int main(int argc, char** argv)
     // Ope_mult_r; on Domain_oned_inf it composes with val_boundary(OUTER_BC) to
     // read the 1/r coefficient exactly, which is what the tails block uses.
     bool pintails = false;
+    int  farmodes = -1;
     // As a CORE row the inner pin is one of 340 and the least-squares trades it
     // away (measured: it lands at 1.7e-4 rather than 0 at its own point).
     // Appending it instead enforces it at the appended-row weight, which
@@ -263,6 +264,14 @@ int main(int argc, char** argv)
         // which row that is.
         else if (k == "--eval-massmode") evalmm = true;
         else if (k == "--pin-tails") pintails = true;
+        // --pin-farmodes <N>  ROUND-25.  Append rows setting Chebyshev modes
+        // n >= N of U, Q and G on the LAST (compactified) domain to zero.
+        // This is a RANGE condition on the far field: the exact solution is a
+        // rapidly converging power series in 1/r there (measured: its d4
+        // coefficients fall off geometrically, |c_n| <= 6.7e-14 for n >= 12),
+        // while the weakly determined near-constant mode decays only ~1/n and
+        // carries 3.2e-03 in the same block.  See LOG_code.md, round 25.
+        else if (k == "--pin-farmodes") farmodes = std::stoi(next());
         else if (k == "--profile") profile = next();
         else if (k == "--rownorm") rownorm = true;
         // Per-POINT row residuals.  The gate needs the TAU-projected residual
@@ -1150,10 +1159,42 @@ int main(int argc, char** argv)
                              "\"multr(Q) = 0\")  and  \"2*multr(U) + multr(G) = 0\""
                              "   [proven identities, round 11]\n";
         }
+        // --- ROUND-25: the far-field REGULARITY block, a range-based decay
+        // condition.  The endpoint rows U(inf) = Q(inf) = G(inf) = 0 are KEPT --
+        // round 23's D1 proved they are the only O(1) charge on the exact
+        // constant c1 = (1,0,-4), so dropping them would free a mode that is
+        // currently well determined.  These rows charge the OTHER object: the
+        // near-constant with a far-field boundary layer, which satisfies the
+        // endpoint rows identically and is invisible to them.
+        if (farmodes >= 0) {
+            const int ncf = m.space.get_domain(dlast)->get_nbr_coefs()(0);
+            if (farmodes < 2 || farmodes >= ncf) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --pin-farmodes must be in [2, " << ncf
+                              << ")\n";
+                MPI_Finalize();
+                return 2;
+            }
+            Index pos_cf(m.space.get_domain(dlast)->get_nbr_coefs());
+            int nfm = 0;
+            for (const char* ph : {"U", "Q", "G"}) {
+                const std::string ex = P(ph, 0);
+                for (int nn = farmodes; nn < ncf; nn++) {
+                    pos_cf.set(0) = nn;
+                    syst.add_eq_val_mode(dlast, ex.c_str(), pos_cf, 0.0);
+                    nfm++;
+                }
+            }
+            n_appended += nfm;
+            if (rank == 0)
+                std::cout << "# farmodes add_eq_val_mode(" << dlast
+                          << ", {U,Q,G}, n = " << farmodes << ".." << ncf - 1
+                          << ", 0)   -> " << nfm << " appended rows\n";
+        }
         if (n_appended == 0) {
             if (rank == 0)
                 std::cerr << "FATAL: --add-rows must be all, compat, g or none "
-                             "(none requires --pin-tails)\n";
+                             "(none requires --pin-tails or --pin-farmodes)\n";
             MPI_Finalize();
             return 2;
         }

@@ -48,6 +48,7 @@
 #include <cmath>
 #include <functional>
 #include <map>
+#include <sstream>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -123,6 +124,27 @@ int main(int argc, char** argv)
         }
     }
 
+    // ⚠ ROUND 97.  At ntheta <= 3 Kadath's angular transform is the IDENTITY:
+    // coef_1d_cos_even and its inverse both branch on `if (nbr > 3)` and
+    // otherwise call copy_untransformed_line, so every coefficient-space
+    // operation -- val_boundary at a given angular index, export_tau,
+    // affecte_tau -- silently acts on grid values instead.  Measured: a
+    // CONSTANT field returns angular coefficients (1, 1, 1) instead of
+    // (1, 0, 0), exactly, on shells and on the compact domain alike; at
+    // ntheta >= 5 the same probe returns 0.000e+00 error.  Both existing guards
+    // pass it -- the line length is odd, and the r2hc size check is never
+    // reached because the branch is taken first -- so it has to be refused
+    // here.
+    if (ntheta < 5) {
+        if (rank == 0)
+            std::cerr << "FATAL: ntheta must be >= 5.  At ntheta <= 3 the "
+                         "angular transform is the identity (coef_1d.cpp, "
+                         "`if (nbr > 3)`), so coefficients are grid values and "
+                         "every tau and val_boundary read is silently wrong.\n";
+        MPI_Finalize();
+        return 2;
+    }
+
     std::unique_ptr<L0Model2d> mp;
     TrumpetIO::BcTable bc;
     try {
@@ -158,6 +180,23 @@ int main(int argc, char** argv)
     System_of_eqs syst(m.sp(), 0, dlast);
     const auto defs = m.register_rows(syst, j2);
     syst.add_cst("oorbb", m.oorf);
+
+    // Per-TERM add_defs, so each term of each row can be read back separately:
+    // the relative residual measures are |E| divided by something built from
+    // the terms at that point, and that needs the terms, not just the row.
+    std::vector<std::vector<std::string>> termdef(5);
+    for (int n = 0; n < 5; n++) {
+        int t = 0;
+        for (const auto& jet : m.coefs().jets.at(Trumpet::rows()[n])) {
+            std::ostringstream nm;
+            nm << "T" << Trumpet::row_codes()[n] << t++;
+            const std::string d =
+                nm.str() + " = c" + Trumpet::row_codes()[n] + jet + " * "
+                + Trumpet::apply_jet(jet, Trumpet::field_of(jet, m.coefs().fields));
+            syst.add_def(d.c_str());
+            termdef[n].push_back(nm.str());
+        }
+    }
 
     auto P = [&](const char* f, int o) {
         return Trumpet::phys_expr(m.coefs().fields, f, o);
@@ -454,6 +493,132 @@ int main(int argc, char** argv)
     Trumpet::emit("ADD_refines", refine + 1);
     Trumpet::emit("ADD_res_core", post_core);
     Trumpet::emit("ADD_res_appended", post_add);
+
+    // ------------------------------------------- RESID_*, per row ----------
+    // Three measures, for the reason the 1-D app records: at r = infinity the
+    // r^{-p_n} scaling leaves E_H and E_Mr with only (Qpp, Upp), and a DECAYING
+    // solution has both -> 0 there, so the residual and its normaliser are both
+    // at roundoff and the ratio is 0/0.  The exact mass mode scored
+    // RESID_E_H_rel = 1.0000001 that way -- the gate would have rejected a
+    // known-exact solution.
+    //   _abs    max |E|
+    //   _rel    |E| / max_j |term_j|, only where at least two terms are nonzero
+    //   _relcf  |E| / (max_j |c_j| * max_j |jet_j|), defined everywhere
+    {
+        const double residfloor = 1e-12;
+        for (int n = 0; n < 5; n++) {
+            double wabs = 0.0, wrel = 0.0, wcf = 0.0, gridscale = 0.0;
+            int nskip = 0, npt = 0;
+            for (int d = 0; d <= dlast; d++) {
+                std::vector<const Kadath::Val_domain*> T0;
+                for (const auto& t : termdef[n])
+                    T0.push_back(&syst.give_val_def_scalar_domain(t.c_str(), d));
+                Index i0(m.sp().get_domain(d)->get_nbr_points());
+                do {
+                    double sc0 = 0.0;
+                    for (const auto* t : T0)
+                        sc0 = std::max(sc0, std::fabs((*t)(i0)));
+                    gridscale = std::max(gridscale, sc0);
+                } while (i0.inc());
+            }
+            for (int d = 0; d <= dlast; d++) {
+                const Kadath::Val_domain& E =
+                    syst.give_val_def_scalar_domain(Trumpet::row_defs()[n], d);
+                std::vector<const Kadath::Val_domain*> T;
+                std::vector<std::string> jets;
+                for (const auto& t : termdef[n])
+                    T.push_back(&syst.give_val_def_scalar_domain(t.c_str(), d));
+                for (const auto& jet : m.coefs().jets.at(Trumpet::rows()[n]))
+                    jets.push_back(jet);
+                Index idx(m.sp().get_domain(d)->get_nbr_points());
+                do {
+                    const int i = idx(0);          // the coefficient tables are
+                    double sc = 0.0, cmax = 0.0, jmax = 0.0;   // radial only
+                    int nz = 0;
+                    for (std::size_t k = 0; k < T.size(); k++) {
+                        const double t = (*T[k])(idx);
+                        if (t != 0.0)
+                            nz++;
+                        sc = std::max(sc, std::fabs(t));
+                        const double c =
+                            std::fabs(m.coefs().v.at(std::make_pair(
+                                std::string(Trumpet::rows()[n]), jets[k]))[d][i])
+                            / m.row_norm(n, d, i);
+                        cmax = std::max(cmax, c);
+                        if (c > 0.0)
+                            jmax = std::max(jmax, std::fabs(t) / c);
+                    }
+                    npt++;
+                    const bool tiny = (sc < residfloor * gridscale);
+                    wabs = std::max(wabs, std::fabs(E(idx)));
+                    if (cmax * jmax > 0.0 && !tiny)
+                        wcf = std::max(wcf, std::fabs(E(idx)) / (cmax * jmax));
+                    if (nz < 2 || sc <= 0.0 || tiny) {
+                        nskip++;
+                        continue;
+                    }
+                    wrel = std::max(wrel, std::fabs(E(idx)) / sc);
+                } while (idx.inc());
+            }
+            Trumpet::emit(std::string("RESID_") + Trumpet::rows()[n] + "_abs", wabs);
+            Trumpet::emit(std::string("RESID_") + Trumpet::rows()[n] + "_rel", wrel);
+            Trumpet::emit(std::string("RESID_") + Trumpet::rows()[n] + "_relcf", wcf);
+            Trumpet::emit(std::string("RESID_") + Trumpet::rows()[n] + "_skipfrac",
+                          npt > 0 ? double(nskip) / npt : 0.0);
+        }
+    }
+
+    // ------------------------------------------------------------- tails ----
+    // ⚠ THE COMPACT DOMAIN is the one piece of the 2-D layout with no
+    // inherited-assumption check of its own -- A0a exercised the shells, A0b the
+    // angular basis, A0e the shells again -- and the base rate on inherited-
+    // and-unexercised pieces is four for four wrong.  So this block does not
+    // just read the tails: it reads EVERY angular mode's tail.  The solution is
+    // driven only at mode 0, so modes 1.. must be zero, and a compact-domain
+    // bug that mixed modes would show there rather than in a number that has no
+    // reference.
+    {
+        const Kadath::Domain* dom = m.sp().get_domain(dlast);
+        Index pcf(dom->get_nbr_coefs());
+        const double tU = dom->val_boundary(OUTER_BC,
+                                            dom->mult_r(m.Uphys(dlast)), pcf);
+        const double tQ = dom->val_boundary(OUTER_BC,
+                                            dom->mult_r(m.Qphys(dlast)), pcf);
+        const double tG = dom->val_boundary(OUTER_BC,
+                                            dom->mult_r(m.Gphys(dlast)), pcf);
+        Trumpet::emit("TAIL_tU", tU);
+        Trumpet::emit("TAIL_tQ", tQ);
+        Trumpet::emit("TAIL_tG", tG);
+        Trumpet::emit("TAIL_komar_2tU_plus_tG", 2.0 * tU + tG);
+        Trumpet::emit("TAIL_tG_over_tU", tU != 0.0 ? tG / tU : 0.0);
+
+        double offmode = 0.0;
+        const int nk = dom->get_nbr_coefs()(1);
+        for (int k = 1; k < nk; k++) {
+            Index pk(dom->get_nbr_coefs());
+            pk.set(1) = k;
+            for (int f = 0; f < 3; f++) {
+                const Kadath::Val_domain v = (f == 0) ? m.Uphys(dlast)
+                                           : (f == 1) ? m.Qphys(dlast)
+                                                      : m.Gphys(dlast);
+                const double tk = std::fabs(dom->val_boundary(OUTER_BC,
+                                                             dom->mult_r(v), pk));
+                offmode = std::max(offmode, tk);
+                Trumpet::emit("TAILK_" + std::string(f == 0 ? "U" : f == 1 ? "Q" : "G")
+                                  + "_k" + std::to_string(k), tk);
+            }
+        }
+        Trumpet::emit("TAIL_offmode_max", offmode);
+        Trumpet::emit("TAIL_angular_modes", nk);
+
+        for (const char* f : {"U", "Q", "G"}) {
+            const Kadath::Val_domain v = (std::string(f) == "U") ? m.Uphys(dlast)
+                                       : (std::string(f) == "Q") ? m.Qphys(dlast)
+                                                                 : m.Gphys(dlast);
+            Trumpet::emit(std::string("OUTVAL_") + f,
+                          dom->val_boundary(OUTER_BC, v, pcf));
+        }
+    }
 
     // ------------------------------ the manufactured-solution comparison ----
     // The P1 oracle: the exact mass mode U = (1-W)/2, Q = 0, G = F_M - 2

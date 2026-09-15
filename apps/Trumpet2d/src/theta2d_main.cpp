@@ -306,6 +306,41 @@ int main(int argc, char** argv)
         }
     }
 
+    // ---- CONSTANT-FIELD ANGULAR PROBE (round 97) --------------------------
+    // A constant has COS_EVEN coefficients (1, 0, 0, ...) EXACTLY -- no
+    // aliasing, no truncation, nothing to approximate.  So any nonzero k >= 1
+    // coefficient is a defect in the transform or in the coefficient
+    // extraction, with no interpretation needed.  Added because l0_solve2d's
+    // compact-domain tails returned the SAME value at every angular index at
+    // ntheta = 3, and the alias instrument cannot adjudicate that resolution:
+    // with P = 2 the two-term alias formula is not valid, so it reports a large
+    // deviation whether or not anything is wrong.
+    {
+        double worst_shell = 0.0, worst_compact = 0.0;
+        for (int d = 0; d < ndom; d++) {
+            const Kadath::Domain* dom = space.get_domain(d);
+            Val_domain v(dom);
+            v.allocate_conf();
+            v = 1.0;
+            v.std_base();
+            const int nk = dom->get_nbr_coefs()(1);
+            const int bnd = (d == ndom - 1) ? OUTER_BC : INNER_BC;
+            for (int k = 0; k < nk; k++) {
+                Index pk(dom->get_nbr_coefs());
+                pk.set(1) = k;
+                const double c = dom->val_boundary(bnd, v, pk);
+                const double err = std::fabs(c - (k == 0 ? 1.0 : 0.0));
+                double& w = (d == ndom - 1) ? worst_compact : worst_shell;
+                w = std::max(w, err);
+                if (d == 0 || d == ndom - 1)
+                    emit("CONSTPROBE_d" + std::to_string(d) + "_k"
+                             + std::to_string(k), c);
+            }
+        }
+        emit("CONSTPROBE_worst_shell", worst_shell);
+        emit("CONSTPROBE_worst_compact", worst_compact);
+    }
+
     std::cout << "# done\n";
     return 0;
 }

@@ -69,18 +69,55 @@ struct Angular {
     }
 };
 
-/** Radial profile A(r) = 1/(1+(r/L)^2), decaying like r^-2 so the compact
- *  domain's variable represents it, with its first two r-derivatives. */
+/**
+ * Radial profile and its first two r-derivatives.  THREE KINDS, because round
+ * 92 established that the radial MAPPING decides which fields are resolved
+ * rather than what the floor is -- so a single field silently picks a winner:
+ *
+ *   RATIONAL  1/(1+(r/L)^2)  smooth on a fixed r-scale, decaying like r^-2 so
+ *                            the compact domain's variable represents it.
+ *                            FAVOURS the linear mapping.
+ *   POWER     r^n            the throat grading (rho = r^n, n = sqrt 2) and so
+ *                            the physically representative one near r_in.
+ *                            FAVOURS the log mapping.
+ *   MASSMODE  1/r            grad^2 = 0 identically, the pure cancellation
+ *                            test; also a power law, so it favours log.
+ *
+ * These are the same three the Python instrument scripts/a0_logmap.py uses, so
+ * the two can be held against each other.
+ */
 struct Radial {
-    double L;
+    double L = 2.0;
+    int kind = 0;                 // 0 rational, 1 power, 2 massmode
+    double n = 1.4142135623730951;
+
     double d(int deg, double r) const
     {
+        if (kind == 1)
+            return deg == 0 ? std::pow(r, n)
+                 : deg == 1 ? n * std::pow(r, n - 1.0)
+                            : n * (n - 1.0) * std::pow(r, n - 2.0);
+        if (kind == 2)
+            return deg == 0 ? 1.0 / r
+                 : deg == 1 ? -1.0 / (r * r)
+                            : 2.0 / (r * r * r);
         const double s = r / L, u = 1.0 + s * s;
         if (deg == 0)
             return 1.0 / u;
         if (deg == 1)
             return -2.0 * s / (L * u * u);
         return -2.0 * (1.0 - 3.0 * s * s) / (L * L * u * u * u);
+    }
+
+    /** grad^2 = f'' + 2f'/r, in closed form where cancellation makes the
+     *  pointwise sum lose digits (massmode is identically zero). */
+    double lap(double r) const
+    {
+        if (kind == 1)
+            return n * (n + 1.0) * std::pow(r, n - 2.0);
+        if (kind == 2)
+            return 0.0;
+        return d(2, r) + 2.0 * d(1, r) / r;
     }
 };
 

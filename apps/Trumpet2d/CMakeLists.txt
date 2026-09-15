@@ -24,3 +24,11 @@ target_include_directories(trumpet2d_theta PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.
 kadath_add_exec(trumpet2d_floor src/floor2d_main.cpp)
 set_target_properties(trumpet2d_floor PROPERTIES OUTPUT_NAME floor2d)
 target_include_directories(trumpet2d_floor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# Research round 282: measure what a LOG radial domain buys on the FLOOR before
+# building Domain_polar_shell_log.  Uses Kadath's own Domain_shell_log (3-D
+# spheric -- there is no polar one), so what is measured is the implementation a
+# port would carry over rather than a reimplementation of it.
+kadath_add_exec(trumpet2d_logfloor src/logfloor_main.cpp)
+set_target_properties(trumpet2d_logfloor PROPERTIES OUTPUT_NAME logfloor)
+target_include_directories(trumpet2d_logfloor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)

@@ -92,36 +92,9 @@ std::vector<std::string> split2(const std::string& s)
  * row by its own max|entry|.  Coefficients are emitted into the string with
  * full precision -- these are boundary conditions, not diagnostics.
  */
-std::string bc_lhs(const TrumpetIO::BcRow& r, const std::string& prefix,
-                   Kadath::System_of_eqs& syst,
-                   const std::vector<std::string>& fields)
-{
-    // SPEC v2's rows are quoted on the PHYSICAL jet (U, dr(U), Q, dr(Q), G,
-    // dr(G)) and round 11 asks for them to be transformed, not re-derived.
-    // phys_expr does exactly that, and is the identity for a (U,Q,G) table.
-    auto P = [&](const char* f, int o) { return Trumpet::phys_expr(fields, f, o); };
-    if (!r.general)
-        return (r.kind == "der1") ? P(r.field.c_str(), 1)
-             : (r.field == "4U+Q+G"
-                    ? "4 * " + P("U", 0) + " + " + P("Q", 0) + " + " + P("G", 0)
-                    : P(r.field.c_str(), 0));
-    const std::string JETSTR[6] = {P("U", 0), P("U", 1), P("Q", 0), P("Q", 1),
-                                   P("G", 0), P("G", 1)};
-    static const char* SUF[6] = {"cU", "cUp", "cQ", "cQp", "cG", "cGp"};
-    std::string out;
-    for (int k = 0; k < 6; k++) {
-        if (r.coef[k] == 0.0)
-            continue;                       // a genuinely absent slot (Q_W is 0)
-        const std::string cn = prefix + SUF[k];
-        syst.add_cst(cn.c_str(), r.coef[k]);
-        if (!out.empty())
-            out += " + ";
-        out += cn + " * " + JETSTR[k];
-    }
-    if (out.empty())
-        throw std::runtime_error("bc row " + prefix + " is identically zero");
-    return out;
-}
+// bc_lhs now lives in l0_setup.hpp, so the 1-D and 2-D apps build the inner
+// rows from one construction -- the same reason the row assembly is shared.
+using Trumpet::bc_lhs;
 
 /** Boundary value of a named add_def, read through the Chebyshev coefficients. */
 double def_at_boundary(System_of_eqs& syst, const Kadath::Space& space,

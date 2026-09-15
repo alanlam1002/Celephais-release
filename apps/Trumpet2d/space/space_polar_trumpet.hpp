@@ -31,6 +31,18 @@ namespace Trumpet
 class Space_polar_trumpet : public Kadath::Space
 {
   public:
+    /**
+     * Origin-centred, per-domain resolution -- the signature Space_oned_trumpet
+     * has, so L0ModelT can construct either from the same expression.  The
+     * trumpet is always centred at the origin.
+     */
+    Space_polar_trumpet(int ttype, const std::vector<Kadath::Dim_array>& res,
+                        const std::vector<double>& bounds,
+                        const std::vector<bool>& logshell = {})
+        : Space_polar_trumpet(ttype, origin(), res, bounds, logshell)
+    {
+    }
+
     /** Uniform resolution. */
     Space_polar_trumpet(int ttype, const Kadath::Point& center,
                         const Kadath::Dim_array& res,
@@ -90,6 +102,17 @@ class Space_polar_trumpet : public Kadath::Space
     }
 
     ~Space_polar_trumpet() override = default;
+
+  private:
+    static Kadath::Point origin()
+    {
+        Kadath::Point c(2);
+        c.set(1) = 0.0;
+        c.set(2) = 0.0;
+        return c;
+    }
+
+  public:
 
     void save(Kadath::BinarySink& sink) const override
     {

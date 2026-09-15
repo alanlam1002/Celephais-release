@@ -182,7 +182,58 @@ inline void emit(const std::string& k, double v)
  * Kadath::Space::~Space() is protected, so the space is held by VALUE as the
  * concrete type -- it cannot live in a unique_ptr<Space>.
  */
-class L0Model
+/**
+ * Inner-BC left-hand side, from a SPEC v2 bc row.
+ *
+ * Shared between the 1-D and 2-D solver apps (round 96): the rows are quoted on
+ * the PHYSICAL jet and phys_expr transforms them rather than re-deriving, so a
+ * second copy in the 2-D app would be a second chance to get the transform
+ * wrong.
+ */
+inline std::string bc_lhs(const TrumpetIO::BcRow& r, const std::string& prefix,
+                          Kadath::System_of_eqs& syst,
+                          const std::vector<std::string>& fields)
+{
+    // SPEC v2's rows are quoted on the PHYSICAL jet (U, dr(U), Q, dr(Q), G,
+    // dr(G)) and round 11 asks for them to be transformed, not re-derived.
+    // phys_expr does exactly that, and is the identity for a (U,Q,G) table.
+    auto P = [&](const char* f, int o) { return Trumpet::phys_expr(fields, f, o); };
+    if (!r.general)
+        return (r.kind == "der1") ? P(r.field.c_str(), 1)
+             : (r.field == "4U+Q+G"
+                    ? "4 * " + P("U", 0) + " + " + P("Q", 0) + " + " + P("G", 0)
+                    : P(r.field.c_str(), 0));
+    const std::string JETSTR[6] = {P("U", 0), P("U", 1), P("Q", 0), P("Q", 1),
+                                   P("G", 0), P("G", 1)};
+    static const char* SUF[6] = {"cU", "cUp", "cQ", "cQp", "cG", "cGp"};
+    std::string out;
+    for (int k = 0; k < 6; k++) {
+        if (r.coef[k] == 0.0)
+            continue;                       // a genuinely absent slot (Q_W is 0)
+        const std::string cn = prefix + SUF[k];
+        syst.add_cst(cn.c_str(), r.coef[k]);
+        if (!out.empty())
+            out += " + ";
+        out += cn + " * " + JETSTR[k];
+    }
+    if (out.empty())
+        throw std::runtime_error("bc row " + prefix + " is identically zero");
+    return out;
+}
+
+/**
+ * ROUND 95/96 -- templated on the space so ONE row assembly serves 1-D and 2-D.
+ *
+ * The header's own reason for existing is that the T2.1 gate certifies the
+ * operator T2.2 solves; if the 2-D port assembled the rows separately, the gate
+ * would stop certifying what the 2-D app solves and the whole A0 argument would
+ * lose its reference.  Everything dimension-dependent is confined to make_res()
+ * and fill(); the row assembly is strings and is dimension-blind.
+ *
+ * `L0Model` below is the 1-D instantiation, unchanged for every existing caller.
+ */
+template <class SpaceT, int NDIM>
+class L0ModelT
 {
 public:
     /**
@@ -194,12 +245,13 @@ public:
      *   row pointwise by a positive function does not move its zero set, so
      *   neither the solution nor a pin on EH/EM changes.
      */
-    L0Model(const std::string& backbone_path, const std::string& coefs_path,
-            bool rownorm = false)
+    L0ModelT(const std::string& backbone_path, const std::string& coefs_path,
+             bool rownorm = false, int ntheta = 1)
         : bt(TrumpetIO::read_table(backbone_path)),
           ct(TrumpetIO::read_coefs(coefs_path, bt.doms)),
           ndom(static_cast<int>(bt.doms.size())),
-          space(CHEB_TYPE, make_res(bt), make_bounds(bt)),
+          ntheta_(NDIM == 1 ? 1 : ntheta),
+          space(CHEB_TYPE, make_res(bt, NDIM == 1 ? 1 : ntheta), make_bounds(bt)),
           Wf(space), Rrf(space), oorf(space), iR(space),
           U(space), Q(space), G(space), Ud(space), Qd(space), Gd(space)
     {
@@ -270,15 +322,16 @@ public:
         return hi / std::max(lo, 1e-300);
     }
 
-    L0Model(const L0Model&) = delete;
-    L0Model& operator=(const L0Model&) = delete;
+    L0ModelT(const L0ModelT&) = delete;
+    L0ModelT& operator=(const L0ModelT&) = delete;
 
     /** Point count of domain d. */
     int nbr(int d) const { return bt.doms[d].nbr; }
     int nb_domains() const { return ndom; }
     const TrumpetIO::Table& table() const { return bt; }
     const TrumpetIO::CoefTable& coefs() const { return ct; }
-    Trumpet::Space_oned_trumpet& sp() { return space; }
+    SpaceT& sp() { return space; }
+    int ntheta() const { return ntheta_; }
 
     /** Write `get(d,i)` into every collocation point of a Scalar on this space. */
     template <class F>
@@ -287,11 +340,15 @@ public:
         for (int d = 0; d < ndom; d++) {
             Kadath::Val_domain& vd = f.set_domain(d);
             vd.allocate_conf();
+            // ⚠ The 1-D version set only idx(0) and wrote once per radial
+            // point.  In 2-D that fills the theta = 0 line and leaves the rest
+            // of the Val_domain uninitialised, which is a silent wrong answer
+            // rather than a crash.  The backbone and the coefficient fields are
+            // theta-independent, so every theta gets the same radial value.
             Kadath::Index idx(space.get_domain(d)->get_nbr_points());
-            for (int i = 0; i < bt.doms[d].nbr; i++) {
-                idx.set(0) = i;
-                vd.set(idx) = get(d, i);
-            }
+            do {
+                vd.set(idx) = get(d, idx(0));
+            } while (idx.inc());
         }
         f.std_base();
     }
@@ -527,7 +584,8 @@ public:
     TrumpetIO::Table bt;
     TrumpetIO::CoefTable ct;
     int ndom;
-    Trumpet::Space_oned_trumpet space;
+    int ntheta_ = 1;
+    SpaceT space;
     Kadath::Scalar Wf, Rrf, oorf, iR;
     Kadath::Scalar U, Q, G;
     /// First-order-reduction unknowns; registered only when
@@ -540,12 +598,14 @@ public:
     std::vector<Kadath::Scalar> logprof;
 
 private:
-    static std::vector<Kadath::Dim_array> make_res(const TrumpetIO::Table& t)
+    static std::vector<Kadath::Dim_array> make_res(const TrumpetIO::Table& t, int nt)
     {
         std::vector<Kadath::Dim_array> res;
         for (const auto& d : t.doms) {
-            Kadath::Dim_array n(1);
+            Kadath::Dim_array n(NDIM);
             n.set(0) = d.nbr;
+            if (NDIM > 1)
+                n.set(1) = nt;
             res.push_back(n);
         }
         return res;
@@ -562,5 +622,8 @@ private:
     std::map<std::string, std::string> nameof;   // "row/jet" -> add_cst name
     std::vector<std::vector<std::vector<double>>> norm;   // [row][domain][point]
 };
+
+/** The 1-D instantiation: unchanged for every existing caller. */
+using L0Model = L0ModelT<Trumpet::Space_oned_trumpet, 1>;
 
 } // namespace Trumpet

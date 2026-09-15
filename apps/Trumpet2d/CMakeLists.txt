@@ -40,3 +40,13 @@ target_include_directories(trumpet2d_logfloor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 kadath_add_exec(trumpet2d_tau src/tau2d_main.cpp)
 set_target_properties(trumpet2d_tau PROPERTIES OUTPUT_NAME tau2d)
 target_include_directories(trumpet2d_tau PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# A0c (research rounds 278/285): the O(j^2) solver on the 2-D polar layout.
+# Row assembly is SHARED with Trumpet1d through l0_setup.hpp, so the T2.1 gate
+# still certifies the operator this app solves.
+kadath_add_exec(trumpet2d_l0_solve src/l0_solve2d_main.cpp)
+set_target_properties(trumpet2d_l0_solve PROPERTIES OUTPUT_NAME l0_solve2d)
+# Trumpet1d's own directory too: l0_setup.hpp includes "space/space_oned_trumpet.hpp"
+# relative to ITS app root, and the shared header is the point.
+target_include_directories(trumpet2d_l0_solve PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)

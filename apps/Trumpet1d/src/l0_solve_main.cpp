@@ -1637,6 +1637,25 @@ int main(int argc, char** argv)
                       std::fabs(got - want) / std::max(std::fabs(want), 1e-300));
     }
 
+    // (a") THE COMPATIBILITY ORACLE AS A FREE DIAGNOSTIC.  Until now the solved
+    // dr(Q) at r(2M) was computed only inside the --pins compat branch, which
+    // displaces one of the six conditions and so changes the budget.  Evaluated
+    // here it imposes nothing and costs nothing, and it gives the 2-D port a
+    // 1-D number to be compared against at the SAME budget -- without which the
+    // 2-D value is a measurement with no reference, which is the one thing this
+    // project has learned to avoid.
+    if (dh >= 0) {
+        syst.add_def(("DRQFREE = " + P("Q", 1)).c_str());
+        const double got = def_at_boundary(syst, m.space, "DRQFREE", dh, OUTER_BC);
+        const double r2m = m.table().pts[dh][m.nbr(dh) - 1].r;
+        const double C = 9.0 * std::sqrt(3.0)
+                         / (64.0 * std::pow(m.table().M, 4) * r2m);
+        Trumpet::emit("COMPATFREE_closed_form", C);
+        Trumpet::emit("COMPATFREE_got", got);
+        Trumpet::emit("COMPATFREE_rel", std::fabs(got - j2 * C)
+                                            / std::max(std::fabs(j2 * C), 1e-300));
+    }
+
     // the alternates, evaluated (not imposed) on this solution: the swap test
     // compares these against their research-supplied budgets
     for (const auto& kv : bc.row) {

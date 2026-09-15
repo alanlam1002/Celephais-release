@@ -63,6 +63,16 @@ using L0Model2d = Trumpet::L0ModelT<Trumpet::Space_polar_trumpet, 2>;
 namespace
 {
 
+/** A named add_def, read at a domain boundary through its angular coefficients.
+ *  pcf all-zero is the theta-constant mode, which is the only driven one. */
+double def_at_boundary(System_of_eqs& syst, const Kadath::Space& space,
+                       const char* name, int dom, int bound)
+{
+    Index pcf(space.get_domain(dom)->get_nbr_coefs());
+    return space.get_domain(dom)->val_boundary(
+        bound, syst.give_val_def_scalar_domain(name, dom), pcf);
+}
+
 std::vector<std::string> split2(const std::string& s)
 {
     std::vector<std::string> out;
@@ -97,6 +107,7 @@ int main(int argc, char** argv)
     int ntheta = 5;
     double j2 = 1.0;
     bool rownorm = false, manufactured = false;
+    double seed = 0.0;
     std::string inner = "killer,MP", pins = "EH", outer = "U,Q,G";
     std::string pinat = "outer", addrows = "compat";
     for (int i = 4; i < argc; i++) {
@@ -105,6 +116,7 @@ int main(int argc, char** argv)
         if (k == "--ntheta") ntheta = std::stoi(nxt());
         else if (k == "--j2") j2 = std::stod(nxt());
         else if (k == "--rownorm") rownorm = true;
+        else if (k == "--seed") seed = std::stod(nxt());
         else if (k == "--inner") inner = nxt();
         else if (k == "--pins") pins = nxt();
         else if (k == "--outer") outer = nxt();
@@ -180,6 +192,8 @@ int main(int argc, char** argv)
     System_of_eqs syst(m.sp(), 0, dlast);
     const auto defs = m.register_rows(syst, j2);
     syst.add_cst("oorbb", m.oorf);
+    syst.add_cst("Wbb", m.Wf);
+    syst.add_def("DWCHK = dr(Wbb)");
 
     // Per-TERM add_defs, so each term of each row can be read back separately:
     // the relative residual measures are |E| divided by something built from
@@ -314,8 +328,27 @@ int main(int argc, char** argv)
     // hand-assembled: the core rows are literally the baseline system's rows,
     // in the same order.
     m.set_fields_zero();
+    if (seed != 0.0) {
+        // The uniqueness test needs a NONZERO start: with a zero guess on a
+        // homogeneous problem the residual is already below precision and the
+        // test passes without ever assembling anything.
+        m.fill(m.U, [&](int, int i) { return seed * (1.0 + 0.1 * (i % 3)); });
+        m.fill(m.Q, [&](int, int i) { return -seed * (1.0 + 0.2 * (i % 2)); });
+        m.fill(m.G, [&](int d, int) { return seed * (0.5 + 0.25 * d); });
+    }
     Kadath::Array<double> bb(syst.sec_member());
     const int nrow = syst.get_nbr_conditions();
+    {
+        // ⚠ Is the uniqueness test VACUOUS?  With a zero start on a homogeneous
+        // problem the residual is already zero and the test passes without
+        // measuring anything.  So the STARTING residual is emitted: it must be
+        // O(seed) for the seeded run to mean what it claims.
+        double b0 = 0.0;
+        for (int r = 0; r < nrow; r++)
+            b0 = std::max(b0, std::fabs(bb(r)));
+        Trumpet::emit("A0C_start_residual", b0);
+        Trumpet::emit("A0C_seed", seed);
+    }
     const int ncol = syst.get_nbr_unknowns();
     const int ncore = nrow - n_appended * ntheta;
     Trumpet::emit("ADD_rows", nrow);
@@ -493,6 +526,83 @@ int main(int argc, char** argv)
     Trumpet::emit("ADD_refines", refine + 1);
     Trumpet::emit("ADD_res_core", post_core);
     Trumpet::emit("ADD_res_appended", post_add);
+
+    // ------------------------------------------ BLOCK B's OWN INPUTS -------
+    // ⚠ These reach code the R1 budget never touches, and the base rate on
+    // inherited-and-unexercised pieces is four for four wrong -- so each is
+    // stated against something with an independent answer, not just against the
+    // 1-D run.
+
+    // BC1: dW/dr at the excision, read spectrally, against the research
+    // session's own quoted value.  dr(), never der_normal: its sign at
+    // INNER_BC was an open item in NOTES_kadath_api.md and dr() sidesteps it.
+    {
+        const double dW = def_at_boundary(syst, m.sp(), "DWCHK", 0, INNER_BC);
+        Trumpet::emit("BC1_dWdr_spectral", dW);
+        Trumpet::emit("BC1_dWdr_rel",
+                      std::fabs(dW - bc.dWdr) / std::max(std::fabs(bc.dWdr), 1e-300));
+    }
+    // BC2: did the imposed inner rows actually land?
+    for (const auto& nm : inn) {
+        const auto& r = bc.row.at(nm);
+        const std::string dn = "CHK" + nm;
+        syst.add_def((dn + " = "
+                      + Trumpet::bc_lhs(r, "k" + nm, syst, m.coefs().fields)).c_str());
+        const double got = def_at_boundary(syst, m.sp(), dn.c_str(), 0, INNER_BC);
+        const double want = manufactured ? r.rhs : j2 * r.rhs;
+        Trumpet::emit("BC2_" + nm + "_got", got);
+        Trumpet::emit("BC2_" + nm + "_rel",
+                      std::fabs(got - want) / std::max(std::fabs(want), 1e-300));
+    }
+    // (a") THE COMPATIBILITY ORACLE, and it is the one genuinely independent
+    // number in Block B: the solved dr(Q) at r(2M) against the research
+    // session's closed form 9*sqrt(3)/(64 M^4 r_2M).  It does not come from the
+    // 1-D run, so it tests the 2-D solution rather than the port's fidelity.
+    if (dh >= 0) {
+        syst.add_def(("DRQCHK = " + P("Q", 1)).c_str());
+        const double got = def_at_boundary(syst, m.sp(), "DRQCHK", dh, OUTER_BC);
+        const double r2m = m.table().pts[dh][m.nbr(dh) - 1].r;
+        const double M4 = std::pow(m.table().M, 4);
+        const double C = 9.0 * std::sqrt(3.0) / (64.0 * M4 * r2m);
+        Trumpet::emit("COMPAT_r2M", r2m);
+        Trumpet::emit("COMPAT_closed_form", C);
+        Trumpet::emit("COMPAT_got", got);
+        Trumpet::emit("COMPAT_rel", std::fabs(got - j2 * C)
+                                        / std::max(std::fabs(j2 * C), 1e-300));
+    }
+    // (a2) THE RESOLUTION GATE: spectral decay on the horizon domains.  Not the
+    // 1-D fit statistic -- the top-two radial coefficient fraction, labelled as
+    // such -- but the same thing it is for: an unresolved high-mode component
+    // shows here and nowhere else.
+    {
+        double worst_h = 0.0, worst_o = 0.0;
+        for (int d = 0; d <= dlast; d++) {
+            double t = 0.0;
+            for (int f = 0; f < 3; f++) {
+                const Kadath::Val_domain v = (f == 0) ? m.Uphys(d)
+                                           : (f == 1) ? m.Qphys(d) : m.Gphys(d);
+                v.coef();
+                const Kadath::Dim_array& nc = m.sp().get_domain(d)->get_nbr_coefs();
+                double top = 0.0, mx = 0.0;
+                Index ic(nc);
+                do {
+                    const double c = std::fabs(v.get_coef(ic));
+                    mx = std::max(mx, c);
+                    if (ic(0) >= nc(0) - 2)
+                        top = std::max(top, c);
+                } while (ic.inc());
+                if (mx > 0.0)
+                    t = std::max(t, top / mx);
+            }
+            Trumpet::emit("DECAY_d" + std::to_string(d), t);
+            if (d == dh || d == dh + 1)
+                worst_h = std::max(worst_h, t);
+            else
+                worst_o = std::max(worst_o, t);
+        }
+        Trumpet::emit("DECAY_max_horizon_domains", worst_h);
+        Trumpet::emit("DECAY_max_other_domains", worst_o);
+    }
 
     // ------------------------------------------- RESID_*, per row ----------
     // Three measures, for the reason the 1-D app records: at r = infinity the

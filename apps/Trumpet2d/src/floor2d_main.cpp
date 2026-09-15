@@ -30,7 +30,10 @@
  *
  * Usage:
  *   floor2d --rin A --rout B --ndom D --nr N [--ntheta N] [--q Q] [--L LfacM]
- *           [--geometric] [--compact]
+ *           [--geometric]
+ *
+ * --ndom D gives D shells spanning [rin, rout] PLUS the compact r -> infinity
+ * domain the space always terminates in, so D+1 domains in all.
  */
 
 #include "For_Kadath/Array/headcpp.hpp"
@@ -62,7 +65,7 @@ int main(int argc, char** argv)
     double rout = 3.9388952741521037;    // comparable with the production layout
     double q = 0.4, Lfac = 2.0;
     int ndom = 4, nr = 21, ntheta = 9, kind = 0;
-    bool geometric = false, compact = false;
+    bool geometric = false;
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         auto nxt = [&]() { return argv[++i]; };
@@ -75,7 +78,6 @@ int main(int argc, char** argv)
         else if (a == "--L") Lfac = std::atof(nxt());
         else if (a == "--kind") kind = std::atoi(nxt());
         else if (a == "--geometric") geometric = true;
-        else if (a == "--compact") compact = true;
         else { std::cerr << "unknown flag " << a << "\n"; return 2; }
     }
 
@@ -87,22 +89,25 @@ int main(int argc, char** argv)
         bounds.push_back(geometric ? rin * std::pow(rout / rin, t)
                                    : rin + (rout - rin) * t);
     }
+    // ROUND 92 CORRECTION.  Space_polar_trumpet ALWAYS makes its last domain a
+    // Domain_polar_compact (space_polar_trumpet.hpp:60) -- it is the r -> inf
+    // domain and there is no way to ask for a stack of shells alone.  The first
+    // version of this app passed bounds.begin()..end()-1 and carried a
+    // --compact flag, so "--ndom D" silently built D-1 shells plus the compact
+    // domain and the flag did nothing.  Round 91's grid is unaffected in its
+    // conclusions -- every configuration had the same structure and alpha_d0
+    // was always the first shell -- but the labels were wrong by one domain.
+    // Here --ndom D means D SHELLS spanning [rin, rout], plus the compact
+    // domain beyond rout, for D+1 in total.
+    std::vector<double> inner(bounds);          // all D+1 boundaries
     std::vector<Dim_array> res;
-    std::vector<double> inner(bounds.begin(), bounds.end() - 1);
-    for (int d = 0; d < ndom; d++) {
+    for (int d = 0; d <= ndom; d++) {
         Dim_array n(2);
         n.set(0) = nr;
         n.set(1) = ntheta;
         res.push_back(n);
     }
-    if (compact) {                    // append the r -> infinity domain
-        inner.push_back(bounds.back());
-        Dim_array n(2);
-        n.set(0) = nr;
-        n.set(1) = ntheta;
-        res.push_back(n);
-    }
-    const int nd = static_cast<int>(inner.size());
+    const int nd = static_cast<int>(inner.size());   // D shells + 1 compact
 
     Point center(2);
     center.set(1) = 0.0;
@@ -113,7 +118,7 @@ int main(int argc, char** argv)
     const Angular f{kind, q};
 
     std::cout << "# floor2d  rin=" << rin << " rout=" << rout << " ndom=" << ndom
-              << (compact ? "+compact" : "") << " nr=" << nr
+              << " shells + compact  nr=" << nr
               << " ntheta=" << ntheta << " kind=" << kind
               << (geometric ? " geometric" : " uniform") << "\n";
     emit("F_ndom", nd);

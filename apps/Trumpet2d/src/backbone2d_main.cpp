@@ -111,9 +111,16 @@ int main(int argc, char** argv)
     std::cout << "# table  " << t.tag << "  mode=" << t.mode << "  ndom=" << ndom
               << "  M=" << t.M << "  ntheta=" << ntheta << "\n";
 
+    // The table's per-domain `kind` selects the radial mapping: "log" builds a
+    // Domain_polar_shell_log (round 94).  Taken from the TABLE rather than from
+    // a flag, so the collocation radii the table carries and the mapping the
+    // space builds cannot disagree -- G1 would catch it, but only after the
+    // fact, and a mismatch here is the class of error round 91 produced.
     std::vector<double> bounds;
     std::vector<Dim_array> res;
+    std::vector<bool> logshell;
     for (int d = 0; d < ndom; d++) {
+        logshell.push_back(t.doms[d].kind == "log");
         bounds.push_back(t.doms[d].r_int);
         Dim_array n(2);
         n.set(0) = t.doms[d].nbr;      // radial: identical to the 1-D layout
@@ -124,7 +131,7 @@ int main(int argc, char** argv)
     center.set(1) = 0.0;
     center.set(2) = 0.0;
 
-    Trumpet::Space_polar_trumpet space(CHEB_TYPE, center, res, bounds);
+    Trumpet::Space_polar_trumpet space(CHEB_TYPE, center, res, bounds, logshell);
     if (space.get_nbr_domains() != ndom) {
         std::cerr << "FATAL: space has " << space.get_nbr_domains()
                   << " domains, table has " << ndom << "\n";
@@ -132,6 +139,22 @@ int main(int argc, char** argv)
     }
     emit("A0_ndim", space.get_ndim());
     emit("A0_ndom", space.get_nbr_domains());
+    {   // the mapping ACTUALLY built, read off the objects, not off the table
+        int nlog = 0, want = 0;
+        for (int d = 0; d < ndom - 1; d++) {
+            if (dynamic_cast<const Kadath::Domain_polar_shell_log*>(space.get_domain(d)))
+                nlog++;
+            if (logshell[d])
+                want++;
+        }
+        emit("A0_log_shells_built", nlog);
+        emit("A0_log_shells_in_table", want);
+        if (nlog != want) {
+            std::cerr << "FATAL: built " << nlog << " log shells, table asks for "
+                      << want << "\n";
+            return 1;
+        }
+    }
 
     // -------------------------------------- G1: collocation radii, 2-D grid --
     // Also checks that the radius is theta-INDEPENDENT, which it must be on a
@@ -312,18 +335,47 @@ int main(int argc, char** argv)
                                     0.98700321540622258614, 0.98611111111111111111,
                                     0.98853773533067255907, 0.99151234567901234568,
                                     0.99413447049956926588, 0.99617412551440329218};
-        double g7 = 0.0;
+        // ⚠ ROUND 94.  This series converges near the THROAT only, and the
+        // test was implicitly tied to the layout: on the production W005 layout
+        // d0 spans W in [0.05, 0.12] and it holds to 5.9e-9, but on a wide log
+        // layout d0 reaches W = 0.78 and the same test returns 0.46.  That is
+        // the ORACLE'S domain of validity, not a defect in the field.
+        //
+        // BOTH are emitted.  The unrestricted one keeps the bit-for-bit match
+        // with Trumpet1d that A0a rests on; the restricted one is the diagnostic
+        // that stays meaningful when d0 is not a throat shell.  A cut applied
+        // silently would have broken the 1-D comparison to fix a layout that is
+        // not yet in use.
+        const double W_CUT = 0.12;
+        double g7 = 0.0, g7r = 0.0, g7wmax = 0.0, wmax = 0.0;
+        int g7n = 0;
         for (int i = 0; i < t.doms[0].nbr; i++) {
             const double w = t.pts[0][i].W;
+            if (w > wmax)
+                wmax = w;
             const double Rv = t.pts[0][i].Rr * t.pts[0][i].r;
             double ser = 1.5 * M, wp = 1.0;
             for (double ck : c) {
                 wp *= w;
                 ser += ck * wp * M;
             }
-            g7 = std::max(g7, std::fabs(Rv - ser));
+            const double e = std::fabs(Rv - ser);
+            g7 = std::max(g7, e);
+            if (w <= W_CUT) {
+                g7n++;
+                g7r = std::max(g7r, e);
+                if (w > g7wmax)
+                    g7wmax = w;
+            }
         }
         emit("G7_throat_series_max_abs", g7);
+        emit("G7_restricted_max_abs", g7r);
+        emit("G7_W_max_in_d0", wmax);
+        // the production split sits exactly AT the cut, so compare with a relative
+        // tolerance or every production layout reports itself out of range
+        emit("G7_valid_range_exceeded", wmax > W_CUT * (1.0 + 1e-9) ? 1 : 0);
+        emit("G7_npts_used", g7n);
+        emit("G7_W_max_used", g7wmax);
     }
 
     std::cout << "# done\n";

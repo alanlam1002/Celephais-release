@@ -64,8 +64,8 @@ int main(int argc, char** argv)
     double rin = 0.15519545203273752;    // W005's excision, so the numbers are
     double rout = 3.9388952741521037;    // comparable with the production layout
     double q = 0.4, Lfac = 2.0;
-    int ndom = 4, nr = 21, ntheta = 9, kind = 0;
-    bool geometric = false;
+    int ndom = 4, nr = 21, ntheta = 9, kind = 0, field = 0;
+    bool geometric = false, uselog = false;
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         auto nxt = [&]() { return argv[++i]; };
@@ -76,8 +76,13 @@ int main(int argc, char** argv)
         else if (a == "--ntheta") ntheta = std::atoi(nxt());
         else if (a == "--q") q = std::atof(nxt());
         else if (a == "--L") Lfac = std::atof(nxt());
-        else if (a == "--kind") kind = std::atoi(nxt());
+        else if (a == "--kind") kind = std::atoi(nxt());   // ANGULAR class
+        else if (a == "--field") {                         // RADIAL profile
+            const std::string f = nxt();
+            field = (f == "power") ? 1 : (f == "massmode") ? 2 : 0;
+        }
         else if (a == "--geometric") geometric = true;
+        else if (a == "--log") uselog = true;   // Domain_polar_shell_log
         else { std::cerr << "unknown flag " << a << "\n"; return 2; }
     }
 
@@ -112,9 +117,10 @@ int main(int argc, char** argv)
     Point center(2);
     center.set(1) = 0.0;
     center.set(2) = 0.0;
-    Trumpet::Space_polar_trumpet space(CHEB_TYPE, center, res, inner);
+    Trumpet::Space_polar_trumpet space(CHEB_TYPE, center, res, inner,
+                                      std::vector<bool>(inner.size(), uselog));
 
-    const Radial A{Lfac};
+    const Radial A{Lfac, field};
     const Angular f{kind, q};
 
     std::cout << "# floor2d  rin=" << rin << " rout=" << rout << " ndom=" << ndom
@@ -122,6 +128,8 @@ int main(int argc, char** argv)
               << " ntheta=" << ntheta << " kind=" << kind
               << (geometric ? " geometric" : " uniform") << "\n";
     emit("F_ndom", nd);
+    emit("F_requested_log", uselog);
+    emit("F_field", field);
     emit("F_nr", nr);
     emit("F_total_radial_dof", nd * nr);
 
@@ -165,14 +173,23 @@ int main(int argc, char** argv)
             // points.  The resolution control is the off-grid val_point below.
             cdr.add(d1(idx), a1 * f0);
             cddr.add(d2(idx), a2 * f0);
-            clap.add(lp(idx), a2 * f0 + 2.0 * a1 * f0 / rr
-                              + a0 * (f2 + cotf1) / (rr * rr));
+            clap.add(lp(idx), A.lap(rr) * f0 + a0 * (f2 + cotf1) / (rr * rr));
+            // massmode's exact laplacian is identically zero, so Chan::rel()
+            // would fall back to the ABSOLUTE error.  logfloor scales it on
+            // max|f''| instead, and the two instruments must use the same
+            // normalisation or they differ by 2/r^3 ~ 535 and it reads as a
+            // broken domain.
+            if (field == 2 && std::fabs(A.d(2, rr)) > clap.scale)
+                clap.scale = std::fabs(A.d(2, rr));
         } while (idx.inc());
         // alpha is the domain half-width, the quantity the floor scaling is
         // usually written in terms of; reported so (nr/alpha) can be formed.
         const double a = (d + 1 < static_cast<int>(bounds.size()))
                              ? 0.5 * (bounds[d + 1] - bounds[d]) : 0.0;
         emit("F_alpha_d" + std::to_string(d), a);
+        // the mapping ACTUALLY built, read off the object, not off the request
+        emit("F_is_log_d" + std::to_string(d),
+             dynamic_cast<const Kadath::Domain_polar_shell_log*>(dom) != nullptr);
 
         emit("F_dr_d" + std::to_string(d), cdr.rel());
         emit("F_ddr_d" + std::to_string(d), cddr.rel());

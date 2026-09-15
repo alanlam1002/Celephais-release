@@ -40,22 +40,39 @@ class Space_polar_trumpet : public Kadath::Space
     {
     }
 
-    /** Per-domain resolution; res.size() must equal bounds.size(). */
+    /**
+     * Per-domain resolution; res.size() must equal bounds.size().
+     *
+     * `logshell`, if non-empty, selects a LOGARITHMIC radial mapping per shell
+     * (Domain_polar_shell_log, log r = alpha x + beta).  It must be either
+     * empty or one entry per domain; the last entry is ignored, since the last
+     * domain is always the compact one.  Round 93 measured that a log shell
+     * reaches a Laplacian floor an order below the linear one over [r_in,
+     * r(2M)], and resolves the full inner-to-outer region which the linear
+     * shell cannot reach at all within the 33-point ceiling.
+     */
     Space_polar_trumpet(int ttype, const Kadath::Point& center,
                         const std::vector<Kadath::Dim_array>& res,
-                        const std::vector<double>& bounds)
+                        const std::vector<double>& bounds,
+                        const std::vector<bool>& logshell = {})
     {
         assert(bounds.size() >= 2);
         assert(res.size() == bounds.size());
+        assert(logshell.empty() || logshell.size() == bounds.size());
 
         ndim = 2;
         type_base = ttype;
         nbr_domains = static_cast<int>(bounds.size());
         domains = new Kadath::Domain*[nbr_domains];
 
-        for (int i = 0; i < nbr_domains - 1; i++)
-            domains[i] = new Kadath::Domain_polar_shell(i, ttype, bounds[i], bounds[i + 1],
-                                                        center, res[i]);
+        for (int i = 0; i < nbr_domains - 1; i++) {
+            if (!logshell.empty() && logshell[i])
+                domains[i] = new Kadath::Domain_polar_shell_log(i, ttype, bounds[i],
+                                                                bounds[i + 1], center, res[i]);
+            else
+                domains[i] = new Kadath::Domain_polar_shell(i, ttype, bounds[i], bounds[i + 1],
+                                                            center, res[i]);
+        }
         domains[nbr_domains - 1] =
             new Kadath::Domain_polar_compact(nbr_domains - 1, ttype, bounds[nbr_domains - 1],
                                              center, res[nbr_domains - 1]);

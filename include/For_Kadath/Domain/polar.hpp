@@ -107,8 +107,15 @@ namespace Kadath
         ostream& print(ostream& o) const override;
     };
 
+    class Domain_polar_shell_log;
+
     class Domain_polar_shell : public Domain
     {
+        // The log-mapped shell is a subclass that must reinterpret alpha and
+        // beta as ln r = alpha x + beta, and must call do_coloc() to drop the
+        // cached radius afterwards.  Both are private here, so it is a friend --
+        // which is exactly how Domain_shell admits Domain_shell_log.
+        friend class Domain_polar_shell_log;
 
       private:
         double alpha;
@@ -193,6 +200,68 @@ namespace Kadath
         void affecte_tau_one_coef_val_domain(Val_domain& so, int mquant, int cc, int& pos_cf) const;
 
       public:
+        ostream& print(ostream& o) const override;
+    };
+
+    /**
+     * Polar shell with a LOGARITHMIC radial mapping: \f$ \log r = \alpha x +
+     * \beta \f$.  The polar analogue of \c Domain_shell_log, which exists for
+     * the 3-D spheric family only.
+     *
+     * WHY.  spinning_trumpet round 93 measured, on the real trumpet backbone
+     * with exact derivatives, that a log-mapped shell reaches a Laplacian floor
+     * of 1.68e-12 over [r_in, r(2M)] at 25 radial points where the linear shell's
+     * best is 1.43e-11 at 33; and that over the full inner-to-outer region the
+     * linear shell cannot resolve the field AT ALL within the hard 33-point
+     * transform ceiling.  Every field in that problem is a power law or a sum of
+     * them, which is the class the log mapping resolves.
+     *
+     * ⚠ UNLIKE the spheric case, the polar Laplacian is NOT inherited for free.
+     * Domain_shell has no laplacian() of its own, so Domain_shell_log picks up
+     * Domain::laplacian, which is built from der_abs and is therefore correct as
+     * soon as do_der_abs_from_der_var is.  Domain_polar_shell DOES define
+     * laplacian(), explicitly as der_var(1)/alpha, so it must be overridden here
+     * or it silently computes the linear-mapping answer.  In s = ln r,
+     *
+     *     r^2 grad^2 f = f_ss + f_s + f_thth + cot(theta) f_th
+     *
+     * which is where the constant-coefficient form comes from.
+     */
+    class Domain_polar_shell_log : public Domain_polar_shell
+    {
+      public:
+        Domain_polar_shell_log(int num, int ttype, double r_int, double r_ext, const Point& cr,
+                               const Dim_array& nbr);
+        Domain_polar_shell_log(const Domain_polar_shell_log& so);
+        Domain_polar_shell_log(int num, BinarySource& source); ///< Modern API.
+        ~Domain_polar_shell_log() override;
+        void save(BinarySink&) const override; ///< Modern API.
+
+      private:
+        void do_absol() const override;
+        void do_radius() const override;
+        void do_cart() const override;
+
+      public:
+        double get_rmin() const override { return exp(beta - alpha); };
+        double get_rmax() const override { return exp(beta + alpha); };
+        bool is_in(const Point& xx, double prec = 1e-13) const override;
+        const Point absol_to_num(const Point&) const override;
+        void do_der_abs_from_der_var(Val_domain** der_var, Val_domain** der_abs) const override;
+
+        Val_domain mult_r(const Val_domain&) const override;
+        Val_domain der_r(const Val_domain&) const override;
+        Val_domain laplacian(const Val_domain&, int) const override;
+        Val_domain laplacian2(const Val_domain&, int) const override;
+        Val_domain der_normal(const Val_domain&, int) const override;
+
+        // The volume quadratures below assume dr = alpha dx and are WRONG for
+        // this mapping (dr = alpha r dx).  They are not needed by anything that
+        // uses this class yet, and a silently wrong integral is the failure mode
+        // this project keeps finding, so they refuse rather than inherit.
+        double integrale(const Val_domain&) const override;
+        double integ_volume(const Val_domain&) const override;
+
         ostream& print(ostream& o) const override;
     };
 

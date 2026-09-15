@@ -114,12 +114,15 @@ int main(int argc, char** argv)
     }
     int ntheta = 9;
     double q = 0.4, Lfac = 2.0;
+    bool uselog = false;
     for (int i = 2; i < argc; i++) {
         const std::string a = argv[i];
         if (a == "--ntheta" && i + 1 < argc)
             ntheta = std::atoi(argv[++i]);
         else if (a == "--q" && i + 1 < argc)
             q = std::atof(argv[++i]);
+        else if (a == "--log")
+            uselog = true;   // Domain_polar_shell_log
         else if (a == "--L" && i + 1 < argc)
             Lfac = std::atof(argv[++i]);   // A's scale, in units of M
     }
@@ -147,12 +150,22 @@ int main(int argc, char** argv)
     Point center(2);
     center.set(1) = 0.0;
     center.set(2) = 0.0;
-    Trumpet::Space_polar_trumpet space(CHEB_TYPE, center, res, bounds);
+    Trumpet::Space_polar_trumpet space(CHEB_TYPE, center, res, bounds,
+                                      std::vector<bool>(bounds.size(), uselog));
 
     std::cout << "# theta rung  ntheta=" << ntheta << "  q=" << q << "  ndom=" << ndom
               << "  M=" << M << "\n";
     emit("TH_ntheta", ntheta);
     emit("TH_q", q);
+    emit("TH_requested_log", uselog);
+    {   // the mapping ACTUALLY built, per shell, read off the objects
+        int nlog = 0;
+        for (int d = 0; d < ndom - 1; d++)
+            if (dynamic_cast<const Kadath::Domain_polar_shell_log*>(space.get_domain(d)))
+                nlog++;
+        emit("TH_log_shells_built", nlog);
+        emit("TH_shells", ndom - 1);
+    }
     emit("TH_L_over_M", Lfac);
 
     // --------------------------------------------------------------- battery --

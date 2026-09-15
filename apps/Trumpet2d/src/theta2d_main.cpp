@@ -71,6 +71,7 @@
 #include "For_Kadath/Space/space.hpp"
 
 #include "space/space_polar_trumpet.hpp"
+#include "manufactured.hpp"
 #include "Trumpet1d/src/table_io.hpp"
 
 #include <cmath>
@@ -92,77 +93,10 @@ using TrumpetIO::read_table;
 namespace
 {
 
-constexpr int KMAX = 80;          // q=0.4 -> q^80 ~ 1e-32; q=0.6 -> ~1e-18
-
-void emit(const std::string& key, double v)
-{
-    std::cout << "RESULT " << key << " " << std::setprecision(17) << v << "\n";
-}
-
-/** Angular profiles and their exact coefficients.  kind: 0 even, 1 odd, 2 flat. */
-struct Angular {
-    int kind;
-    double q;
-
-    /** exact spectral coefficient on the k-th basis function of its class */
-    double coef(int k) const
-    {
-        if (kind == 2)
-            return (k == 0) ? 1.0 : 0.0;
-        if (kind == 1)
-            return std::pow(q, k);
-        return (k == 0) ? 1.0 / (1.0 - q * q) : 2.0 * std::pow(q, k) / (1.0 - q * q);
-    }
-    /** d-th theta-derivative of f, d = 0, 1, 2, summed term by term */
-    double d(int deg, double th) const
-    {
-        if (kind == 2)
-            return (deg == 0) ? 1.0 : 0.0;
-        double s = 0.0;
-        for (int k = 0; k <= KMAX; k++) {
-            const double m = (kind == 1) ? (2 * k + 1) : (2 * k);
-            const double c = coef(k);
-            switch (deg) {
-                case 0: s += c * std::cos(m * th); break;
-                case 1: s += -c * m * std::sin(m * th); break;
-                default: s += -c * m * m * std::cos(m * th); break;
-            }
-        }
-        return s;
-    }
-};
-
-/** Radial profile A(r) = 1/(1+(r/L)^2) and its first two r-derivatives. */
-struct Radial {
-    double L;
-    double d(int deg, double r) const
-    {
-        const double s = r / L, u = 1.0 + s * s;
-        if (deg == 0)
-            return 1.0 / u;
-        if (deg == 1)
-            return -2.0 * s / (L * u * u);
-        return -2.0 * (1.0 - 3.0 * s * s) / (L * L * u * u * u);
-    }
-};
-
-/** One error channel: the max absolute deviation and the max |exact| beside it,
- *  so the reported number is relative.  The operators carry very different
- *  scales (d_tt multiplies by m^2, the laplacian by 1/r^2 with r_int ~ 5e-2),
- *  and an absolute max would be a comparison between incommensurables. */
-struct Chan {
-    double err = 0, scale = 0;
-    void add(double got, double want)
-    {
-        const double e = std::fabs(got - want);
-        if (e > err) err = e;
-        if (std::fabs(want) > scale) scale = std::fabs(want);
-    }
-    /** relative where there is something to be relative to; absolute where the
-     *  exact quantity is identically zero (the FLOOR run has f' == f'' == 0,
-     *  and dividing by its scale would report 1e+286 rather than 0). */
-    double rel() const { return (scale > 1e-290) ? err / scale : err; }
-};
+using Trumpet::Angular;
+using Trumpet::Chan;
+using Trumpet::Radial;
+using Trumpet::emit;
 
 struct Errs {
     Chan interp, dt, ddt, lap, drho, dz;

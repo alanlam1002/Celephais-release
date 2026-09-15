@@ -16,3 +16,11 @@ target_include_directories(trumpet2d_backbone PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 kadath_add_exec(trumpet2d_theta src/theta2d_main.cpp)
 set_target_properties(trumpet2d_theta PROPERTIES OUTPUT_NAME theta2d)
 target_include_directories(trumpet2d_theta PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# A0 accuracy architecture (research round 279): does the Laplacian roundoff
+# floor improve by subdivision at fixed total dof?  Pure discretisation -- no
+# backbone table, because the question is about what a Chebyshev shell stack can
+# represent, not about the backbone.
+kadath_add_exec(trumpet2d_floor src/floor2d_main.cpp)
+set_target_properties(trumpet2d_floor PROPERTIES OUTPUT_NAME floor2d)
+target_include_directories(trumpet2d_floor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)

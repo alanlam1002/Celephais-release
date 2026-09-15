@@ -163,6 +163,7 @@ int main(int argc, char** argv)
     double j2 = 1.0, seed = 0.0, prec = 1e-11;
     std::string inner = "dU,dQ", outer = "U,G", pins = "EH,EM", profile;
     bool rownorm = false, manufactured = false, dumpresid = false;
+    bool firstorder = false;
     std::string jacdump, pinat = "inner", horizonfix, hside = "left", horder;
     double residfloor = 1e-12;
     bool additive = false;
@@ -330,6 +331,10 @@ int main(int argc, char** argv)
         // amplitudes, so the DIRECTION is recovered rather than assumed;
         // "1:U" adds one, which keeps the appended rows overdetermining the
         // system so the P2 residual split stays a real test.
+        // FIRST-ORDER REDUCTION (round 91).  Carries dr(U), dr(Q), dr(G) as
+        // unknowns with defining rows, so no row takes two radial derivatives
+        // of an interpolant.  Doubles the unknowns; see Trumpet::deriv().
+        else if (k == "--first-order") firstorder = true;
         else if (k == "--log-enrich") logenrich = next();
         else if (k == "--dump-jacobian") jacdump = next();
         else if (k == "--manufactured") {
@@ -355,6 +360,11 @@ int main(int argc, char** argv)
             return 2;
         }
     }
+
+    // Arm the reduction BEFORE anything builds an expression string: every row,
+    // matching and boundary condition goes through Trumpet::deriv(), and arming
+    // it late would give a system half in each formulation.
+    Trumpet::first_order_mode() = firstorder;
 
     std::unique_ptr<Trumpet::L0Model> mp;
     BcTable bc;
@@ -433,6 +443,9 @@ int main(int argc, char** argv)
 
     if (rank == 0) {
         m.print_banner();
+        if (firstorder)
+            std::cout << "# FIRST-ORDER REDUCTION: dr(f) carried as the unknown "
+                         "fd, second derivatives as dr(fd); tau order 1\n";
         std::cout << "# T2.2 solve  j2=" << j2 << "  inner=" << inner
                   << "  outer=" << outer << "  seed=" << seed
                   << "  prec=" << prec << "\n";
@@ -451,6 +464,11 @@ int main(int argc, char** argv)
         m.fill(m.U, [&](int, int i) { return seed * (1.0 + 0.1 * (i % 3)); });
         m.fill(m.Q, [&](int, int i) { return -seed * (1.0 + 0.2 * (i % 2)); });
         m.fill(m.G, [&](int d, int) { return seed * (0.5 + 0.25 * d); });
+        if (firstorder) {
+            m.fill(m.Ud, [&](int, int i) { return seed * (0.3 + 0.1 * (i % 2)); });
+            m.fill(m.Qd, [&](int, int i) { return -seed * (0.4 + 0.1 * (i % 3)); });
+            m.fill(m.Gd, [&](int d, int) { return seed * (0.2 + 0.1 * d); });
+        }
     }
 
     // ----------------------------------------------------------- system -----
@@ -677,12 +695,25 @@ int main(int argc, char** argv)
     // lowered: it keeps all three second-derivative slots at r(2M) and is the
     // one row that does not degenerate there.
     int freed = 0;
+    // FIRST-ORDER REDUCTION: each evolution row is now first order (its highest
+    // radial derivative is dr(<f>d)), so its natural tau order is 1, not 2; and
+    // three defining rows D<f> = <f>d - dr(<f>) join it, also at order 1.  The
+    // count stays square: 6 rows x (N-1) per domain against 6N unknowns, with
+    // C0 matching of BOTH <f> and <f>d at each interface.  In second-order form
+    // it is 3 x (N-2) against 3N with C0+C1.
+    const int taunat = firstorder ? 1 : 2;
     for (int d = 0; d <= dlast; d++) {
         if (lowerEK[d])  { syst.add_eq_order(d, taurder, eqstr(0).c_str());  freed++; }
+        else if (firstorder) syst.add_eq_order(d, taunat, eqstr(0).c_str());
         else               syst.add_eq_inside(d, eqstr(0).c_str());
-        syst.add_eq_inside(d, eqstr(1).c_str());
+        if (firstorder)    syst.add_eq_order(d, taunat, eqstr(1).c_str());
+        else               syst.add_eq_inside(d, eqstr(1).c_str());
         if (lowerEXT[d]) { syst.add_eq_order(d, taurder, eqstr(2).c_str()); freed++; }
+        else if (firstorder) syst.add_eq_order(d, taunat, eqstr(2).c_str());
         else               syst.add_eq_inside(d, eqstr(2).c_str());
+        if (firstorder)
+            for (const std::string& f : FLD)
+                syst.add_eq_order(d, 1, ("D" + f + " = 0").c_str());
     }
     const auto hfix = horizonfix.empty() ? std::vector<std::string>()
                                          : split2(horizonfix);
@@ -716,6 +747,9 @@ int main(int argc, char** argv)
     for (int d = 0; d < dlast; d++)
         for (const std::string& f : FLD) {
             syst.add_eq_matching(d, OUTER_BC, aug(f, 0).c_str());
+            // In the reduction, C1 continuity IS C0 continuity of <f>d, and
+            // aug(f,1) already expands to it through deriv(); the branch below
+            // is shared, so nothing else changes.
             if (d == dh
                 && std::find(hfix.begin(), hfix.end(), std::string(f)) != hfix.end()) {
                 if (rank == 0)

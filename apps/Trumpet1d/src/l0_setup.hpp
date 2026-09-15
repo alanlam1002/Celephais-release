@@ -74,10 +74,38 @@ inline std::pair<std::string, int> split_jet(const std::string& jet)
     return {jet, 0};
 }
 
+/**
+ * FIRST-ORDER REDUCTION (round 91; research round 279 asked for it MEASURED,
+ * not decided).
+ *
+ * When on, every first radial derivative is a separate UNKNOWN `<f>d` instead
+ * of `dr(<f>)`, and every second derivative is `dr(<f>d)`.  No row then takes
+ * two radial derivatives of a spectral interpolant, which round 90 measured as
+ * the binding accuracy constraint: the Laplacian's roundoff floor RISES with
+ * radial resolution while the field stays resolved to 6e-16.  The price is
+ * twice the unknowns -- expensive against a hard 33-point ceiling -- and
+ * whatever it does to cond(A_c), which is why both are reported.
+ *
+ * This is a property of the whole discretisation, not of one call site, so it
+ * is a module-level switch.  deriv() is the single point that every row, every
+ * matching and every boundary condition passes through (phys_expr routes here
+ * too), and a per-call-site flag would guarantee an inconsistency somewhere.
+ */
+inline bool& first_order_mode()
+{
+    static bool on = false;
+    return on;
+}
+
+/** The three derivative unknowns, in the order of `fields`. */
+inline std::string dvar(const std::string& f) { return f + "d"; }
+
 /** Derivative order `n` of field `f` as a Kadath expression string. */
 inline std::string deriv(const std::string& f, int n)
 {
-    return n == 0 ? f : (n == 1 ? "dr(" + f + ")" : "ddr(" + f + ")");
+    if (!first_order_mode())
+        return n == 0 ? f : (n == 1 ? "dr(" + f + ")" : "ddr(" + f + ")");
+    return n == 0 ? f : (n == 1 ? dvar(f) : "dr(" + dvar(f) + ")");
 }
 
 /**
@@ -173,7 +201,7 @@ public:
           ndom(static_cast<int>(bt.doms.size())),
           space(CHEB_TYPE, make_res(bt), make_bounds(bt)),
           Wf(space), Rrf(space), oorf(space), iR(space),
-          U(space), Q(space), G(space)
+          U(space), Q(space), G(space), Ud(space), Qd(space), Gd(space)
     {
         if (bt.mode != "excised")
             throw std::runtime_error("the l=0 system requires the excised layout, got "
@@ -274,10 +302,16 @@ public:
             U.set_domain(d) = 0.0 * Wf(d);
             Q.set_domain(d) = 0.0 * Wf(d);
             G.set_domain(d) = 0.0 * Wf(d);
+            Ud.set_domain(d) = 0.0 * Wf(d);
+            Qd.set_domain(d) = 0.0 * Wf(d);
+            Gd.set_domain(d) = 0.0 * Wf(d);
         }
         U.std_base();
         Q.std_base();
         G.std_base();
+        Ud.std_base();
+        Qd.std_base();
+        Gd.std_base();
     }
 
     /**
@@ -362,6 +396,18 @@ public:
         syst.add_var(ct.fields[0].c_str(), U);
         syst.add_var(ct.fields[1].c_str(), Q);
         syst.add_var(ct.fields[2].c_str(), G);
+        if (first_order_mode()) {
+            Kadath::Scalar* const D[3] = {&Ud, &Qd, &Gd};
+            for (int i = 0; i < 3; i++) {
+                syst.add_var(dvar(ct.fields[i]).c_str(), *D[i]);
+                // The DEFINING rows.  Written with a literal dr(), not deriv():
+                // deriv(f,1) is now the unknown itself, and using it here would
+                // define the unknown to be equal to itself.
+                dvardefs.push_back("D" + ct.fields[i] + " = " + dvar(ct.fields[i])
+                                   + " - dr(" + ct.fields[i] + ")");
+                syst.add_def(dvardefs.back().c_str());
+            }
+        }
         syst.add_cst("jsrc", j2);
 
         std::size_t k = 0;
@@ -484,6 +530,12 @@ public:
     Trumpet::Space_oned_trumpet space;
     Kadath::Scalar Wf, Rrf, oorf, iR;
     Kadath::Scalar U, Q, G;
+    /// First-order-reduction unknowns; registered only when
+    /// first_order_mode() is on, but always constructed so the
+    /// System_of_eqs references they are handed stay valid.
+    Kadath::Scalar Ud, Qd, Gd;
+    /// Names of the first-order defining rows, kept alive for add_def.
+    std::vector<std::string> dvardefs;
     /// Analytic log profiles for the far-field enrichment; see enrich_log().
     std::vector<Kadath::Scalar> logprof;
 

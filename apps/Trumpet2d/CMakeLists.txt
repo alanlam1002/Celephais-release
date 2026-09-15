@@ -32,3 +32,11 @@ target_include_directories(trumpet2d_floor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.
 kadath_add_exec(trumpet2d_logfloor src/logfloor_main.cpp)
 set_target_properties(trumpet2d_logfloor PROPERTIES OUTPUT_NAME logfloor)
 target_include_directories(trumpet2d_logfloor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# A0 tau rung (research round 284): does the TAU machinery work on a log radial
+# domain?  Domain_polar_shell_log inherits export_tau/affecte_tau/nbr_conditions
+# unchanged on the argument that they are coefficient-space; three inherited-
+# and-unexercised pieces have already been wrong, so it is measured.
+kadath_add_exec(trumpet2d_tau src/tau2d_main.cpp)
+set_target_properties(trumpet2d_tau PROPERTIES OUTPUT_NAME tau2d)
+target_include_directories(trumpet2d_tau PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)

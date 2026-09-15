@@ -203,6 +203,13 @@ int main(int argc, char** argv)
     emit("G2_a2_minus_W2_max", g2);
 
     // -------------------------------------- G3: same, off-grid, 2-D val_point --
+    // A0 FINDING (theta rung).  Scalar::val_point takes a Point in ABSOLUTE
+    // (rho, z) coordinates, not (r, theta): Domain_polar_*::absol_to_num forms
+    // air = sqrt(abs(1)^2 + abs(2)^2).  The first version of this loop passed
+    // (r, theta) and so sampled radius sqrt(r^2 + theta^2).  It did NOT fail,
+    // because a2 - W^2 vanishes at EVERY radius and both sides are evaluated at
+    // the same (wrong) point -- G3 is blind to the coordinate convention.  The
+    // theta rung, whose manufactured field is not constant, is not.
     double g3 = 0.0;
     for (int d = 0; d < ndom; d++) {
         const double a = t.doms[d].r_int;
@@ -214,8 +221,8 @@ int main(int argc, char** argv)
             for (int m = 0; m < 3; m++) {
                 const double th = M_PI * (double(m) + 0.5) / 3.0;
                 Point pt(2);
-                pt.set(1) = rr;
-                pt.set(2) = th;
+                pt.set(1) = rr * std::sin(th);      // rho
+                pt.set(2) = rr * std::cos(th);      // z
                 const double wv = Wf.val_point(pt);
                 const double iv = iR.val_point(pt);
                 const double av = 1.0 - 2.0 * M * iv

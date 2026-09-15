@@ -12,24 +12,30 @@
  *
  * THE KNOWN ANSWER THIS RUNG IS CHECKED AGAINST, and it is sharper than "it
  * assembles".  The O(j^2) operator is theta-INDEPENDENT: every coefficient
- * field is a function of r alone, and the source j2 is too.  So on a polar grid
- * the system is BLOCK DIAGONAL in the angular mode, with every block equal to
- * the 1-D system, and only the k = 0 block is driven.  Therefore
+ * field is a function of r alone, and the source j2 is too.  The theta-
+ * independent subspace is therefore INVARIANT (d_theta and cot(theta) d_theta
+ * annihilate it) and the source lies inside it, so the driven solution is the
+ * 1-D solution and
  *
  *     ADD_res_core, sv_min, sv_max and the manufactured oracle must come back
- *     EXACTLY at their 1-D values, at every ntheta,
+ *     at their 1-D values, at every ntheta.
  *
- * and P2's angular attribution must sit entirely at mode 0.  Anything else is
- * the port, not the physics -- which is the whole point of doing A0c against a
- * system whose answer is known.
+ * ROUND 99, measured with --dump-jacobian rather than asserted.  The block
+ * decomposition is real: the bipartite row/column graph splits into EXACTLY
+ * ntheta components of 341x339 at every ntheta tried (5, 9, 13), the largest
+ * entry crossing a block boundary is 1.4e-16 of the largest entry in the matrix
+ * -- one ulp, roundoff and not coupling -- and the union of the block spectra
+ * reproduces the full spectrum to 1.9e-07.  All ntheta blocks are identical to
+ * each other, and only block 0 carries a nonzero right-hand side.
  *
- * The row assembly is SHARED with Trumpet1d through l0_setup.hpp (L0ModelT,
- * bc_lhs), so the T2.1 gate still certifies the operator this app solves.  Only
- * the space and the fill are dimension-dependent.
- *
- * Usage: l0_solve2d <backbone> <coefs> <bc> [--ntheta N] [--j2 X] [--rownorm]
- *                   [--inner a,b] [--pins a] [--outer a,b,c] [--pin-at inner|outer]
- *                   [--add-rows compat] [--manufactured]
+ * The one refinement: a block is the 1-D system in its EXTREMES but not in its
+ * interior.  218 of 339 singular values have no 1-D partner within 1e-06
+ * relative, the worst off by 1.8e-02 -- the two codes build the same radial
+ * operator by different associations.  sv_max and sv_min agree to 7-10 figures,
+ * which is why the extremal and driven quantities above carry over while the
+ * interior does not have to.  ⚠ Compare the spectra as MULTISETS: sorted
+ * elementwise they appear to differ by 12%, which is one near-degenerate value
+ * shifting the alignment, not a difference.
  */
 
 #include <mpi.h>
@@ -44,6 +50,8 @@
 #include "Trumpet1d/src/l0_setup.hpp"
 #include "Trumpet1d/src/table_io.hpp"
 
+#include <fstream>
+#include <iomanip>
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -110,6 +118,7 @@ int main(int argc, char** argv)
     double seed = 0.0;
     std::string inner = "killer,MP", pins = "EH", outer = "U,Q,G";
     std::string pinat = "outer", addrows = "compat";
+    std::string jacdump;
     for (int i = 4; i < argc; i++) {
         const std::string k = argv[i];
         auto nxt = [&]() { return std::string(argv[++i]); };
@@ -122,6 +131,7 @@ int main(int argc, char** argv)
         else if (k == "--outer") outer = nxt();
         else if (k == "--pin-at") pinat = nxt();
         else if (k == "--add-rows") addrows = nxt();
+        else if (k == "--dump-jacobian") jacdump = nxt();
         else if (k == "--manufactured") {
             manufactured = true;
             j2 = 0.0;
@@ -363,6 +373,43 @@ int main(int argc, char** argv)
         Kadath::Array<double> col(syst.do_col_J(c));
         for (int r = 0; r < nrow; r++)
             A[std::size_t(c) * nrow + r] = col(r);       // column-major, LAPACK
+    }
+
+    // --- the Jacobian dump, in the RAW metric, before equilibration ---------
+    // Same triplet format and the same .rows/.cols metadata as the 1-D app, so
+    // scripts/l0_sparse_null.py reads a 2-D dump without knowing it is one.  A
+    // is already column-major here, so the walk is over the same numbers the
+    // least-squares path gets -- no second do_col_J pass that could diverge.
+    if (!jacdump.empty() && rank == 0) {
+        std::ofstream fh(jacdump);
+        fh << "# Jacobian of the T2.2 BVP  rows " << nrow << " cols " << ncol
+           << "\n";
+        fh << "# ntheta " << ntheta << " core_rows " << ncore
+           << " appended_per_mode " << n_appended << "\n";
+        fh << std::setprecision(17);
+        for (int r = 0; r < nrow; r++)
+            fh << "rhs " << r << " " << rhs[r] << "\n";
+        long long nnz = 0;
+        for (int c = 0; c < ncol; c++)
+            for (int r = 0; r < nrow; r++)
+                if (A[std::size_t(c) * nrow + r] != 0.0) {
+                    fh << "J " << r << " " << c << " "
+                       << A[std::size_t(c) * nrow + r] << "\n";
+                    nnz++;
+                }
+        std::ofstream rm(jacdump + ".rows"), cm(jacdump + ".cols");
+        syst.dump_tagged_jacobian_metadata_csv(rm, cm);
+        Trumpet::emit("JDUMP_rows", nrow);
+        Trumpet::emit("JDUMP_cols", ncol);
+        Trumpet::emit("JDUMP_nnz", double(nnz));
+        Trumpet::emit("JDUMP_density", double(nnz) / (double(nrow) * ncol));
+        // The metadata CSV is generated by the library from its own row count;
+        // if it disagrees with the matrix, the attribution would be silently
+        // misaligned -- which is the failure mode this project keeps finding.
+        std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
+        syst.classify_equation_row_metadata(rmeta);
+        Trumpet::emit("JDUMP_meta_rows", int(rmeta.size()));
+        Trumpet::emit("JDUMP_meta_matches", int(rmeta.size()) == nrow ? 1 : 0);
     }
 
     // equilibration: appended rows to the median core-row norm (the production

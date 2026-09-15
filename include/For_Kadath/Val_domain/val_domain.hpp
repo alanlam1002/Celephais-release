@@ -366,6 +366,7 @@ namespace Kadath
         friend class Domain_critic_outer;
         friend class Domain_polar_nucleus;
         friend class Domain_polar_shell;
+        friend class Domain_polar_shell_log;
         friend class Domain_polar_shell_inner_adapted;
         friend class Domain_polar_shell_inner_homothetic;
         friend class Domain_polar_shell_outer_adapted;

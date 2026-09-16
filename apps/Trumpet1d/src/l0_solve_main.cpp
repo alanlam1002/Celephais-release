@@ -480,20 +480,8 @@ int main(int argc, char** argv)
     // grid maximum.  Found, never hardcoded -- a table without this structure
     // makes the horizon options fail loudly instead of acting on the wrong point.
     int pinner_dom = -1; bool pinner_outer = false;
-    int dh = -1;
-    {
-        // The degenerate direction is U'' -- physically, whatever the table's
-        // fields are.  phys_coef reconstructs it, so this works in (U,Q,G) and
-        // in (S,T,G) alike and finds the same interface.
-        auto kUpp = [&](int d, int i) { return m.phys_coef("E_K", "Upp", d, i); };
-        double mx = 0.0;
-        for (int d = 0; d <= dlast; d++)
-            for (int i = 0; i < m.nbr(d); i++)
-                mx = std::max(mx, std::fabs(kUpp(d, i)));
-        for (int d = 0; d < dlast && dh < 0; d++)
-            if (std::fabs(kUpp(d, m.nbr(d) - 1)) < 1e-12 * mx)
-                dh = d;
-    }
+    // Shared with the 2-D port, which had transcribed a variant of this search.
+    int dh = Trumpet::locate_horizon_interface(m, dlast);
 
     // --- which domains give up a tau order, per --horizon-order.  dh is the
     // domain whose OUTER face is r(2M); dh+1 is the one whose INNER face is.
@@ -745,30 +733,18 @@ int main(int argc, char** argv)
             return m.phys_coef(row, jet, d, i);
         };
         const int ih = m.nbr(dh) - 1;
-        const double k1 = C("E_chi_tt", "Upp", dh, ih - 1) / C("E_K", "Upp", dh, ih - 1);
-        const double k2 = C("E_chi_tt", "Upp", dh, ih - 2) / C("E_K", "Upp", dh, ih - 2);
-        if (std::fabs(k1 - k2) > 1e-10 * std::fabs(k1)) {
+        // the norm face is where the row LANDS, which --horizon-order may put on
+        // the far side of the interface; everything else is the shared check
+        const int ic = (rowCOMPAT_bound == OUTER_BC) ? m.nbr(rowCOMPAT_dom) - 1 : 0;
+        const Trumpet::HorizonCompat hc =
+            Trumpet::horizon_compat(m, dh, rowCOMPAT_dom, ic, "--horizon-order");
+        if (!hc) {
             if (rank == 0)
-                std::cerr << "FATAL: --horizon-order: E_chi_tt.Upp / E_K.Upp is not "
-                             "constant near the interface (" << k1 << " vs " << k2
-                          << ")\n";
+                std::cerr << "FATAL: " << hc.error << "\n";
             MPI_Finalize();
             return 2;
         }
-        double rowmax = 0.0;
-        for (const char* jt : {"G", "Gp", "Q", "Qp", "U", "Up", "Upp"})
-            rowmax = std::max(rowmax, std::fabs(C("E_chi_tt", jt, dh, ih)));
-        for (const char* jt : {"G", "Gp", "Q", "U", "Up", "Upp"}) {
-            const double v = C("E_chi_tt", jt, dh, ih) - k1 * C("E_K", jt, dh, ih);
-            if (std::fabs(v) > 1e-12 * rowmax) {
-                if (rank == 0)
-                    std::cerr << "FATAL: --horizon-order: slot " << jt
-                              << " of E_chi_tt - " << k1 << "*E_K is " << v
-                              << ", not zero\n";
-                MPI_Finalize();
-                return 2;
-            }
-        }
+        const double k1 = hc.kappa;
         const double cQp = C("E_chi_tt", "Qp", dh, ih) - k1 * C("E_K", "Qp", dh, ih);
         const double cj2 = -k1 * C("E_K", "j2", dh, ih);
         // ROW NORMALISATION CHANGES THE CONSTANT.  With --rownorm every
@@ -784,9 +760,7 @@ int main(int argc, char** argv)
         // reused from d1's last point.  The two sides of the interface carry
         // identical coefficients here (measured), so the two are equal in
         // practice -- but the code must not assume what it can compute.
-        const int ic = (rowCOMPAT_bound == OUTER_BC) ? m.nbr(rowCOMPAT_dom) - 1 : 0;
-        const double kap_eff = k1 * m.row_norm(0, rowCOMPAT_dom, ic)
-                                  / m.row_norm(2, rowCOMPAT_dom, ic);
+        const double kap_eff = hc.kappa_eff;
         syst.add_cst("hkap", kap_eff);
         syst.add_def("ECOMPAT = EXT - hkap * EK");
         syst.add_eq_bc(rowEK_dom, rowEK_bound, "EK = 0");
@@ -909,35 +883,18 @@ int main(int argc, char** argv)
             return 2;
         }
         const int ih = m.nbr(dh) - 1;
-        // kappa = E_chi_tt.Upp / E_K.Upp, taken one point INSIDE (it is 0/0 at
-        // the interface itself) and required to be the same 2 at two points.
-        const double k1 = C("E_chi_tt", "Upp", dh, ih - 1) / C("E_K", "Upp", dh, ih - 1);
-        const double k2 = C("E_chi_tt", "Upp", dh, ih - 2) / C("E_K", "Upp", dh, ih - 2);
-        if (std::fabs(k1 - k2) > 1e-10 * std::fabs(k1)) {
+        // This branch imposes the row as a PIN, not as a def, so no normaliser
+        // correction applies; only kappa itself is wanted.  The measurement and
+        // its two checks are the shared ones.
+        const Trumpet::HorizonCompat hc =
+            Trumpet::horizon_compat(m, dh, dh, ih, "--pins compat");
+        if (!hc) {
             if (rank == 0)
-                std::cerr << "FATAL: --pins compat: E_chi_tt.Upp / E_K.Upp is not "
-                             "constant near the interface (" << k1 << " vs " << k2
-                          << ")\n";
+                std::cerr << "FATAL: " << hc.error << "\n";
             MPI_Finalize();
             return 2;
         }
-        // every slot of E_chi_tt - kappa*E_K must be bit-zero at the interface
-        // except Qp and j2 -- that IS the content of the condition
-        static const char* SLOT[] = {"G", "Gp", "Q", "U", "Up", "Upp"};
-        double rowmax = 0.0;
-        for (const char* jt : {"G", "Gp", "Q", "Qp", "U", "Up", "Upp"})
-            rowmax = std::max(rowmax, std::fabs(C("E_chi_tt", jt, dh, ih)));
-        for (const char* jt : SLOT) {
-            const double v = C("E_chi_tt", jt, dh, ih) - k1 * C("E_K", jt, dh, ih);
-            if (std::fabs(v) > 1e-12 * rowmax) {
-                if (rank == 0)
-                    std::cerr << "FATAL: --pins compat: slot " << jt << " of "
-                                 "E_chi_tt - " << k1 << "*E_K is " << v
-                              << ", not zero\n";
-                MPI_Finalize();
-                return 2;
-            }
-        }
+        const double k1 = hc.kappa;
         const double cQp = C("E_chi_tt", "Qp", dh, ih) - k1 * C("E_K", "Qp", dh, ih);
         // E_chi_tt carries no j2 column, so the j2 part is -kappa * E_K.j2
         const double cj2 = -k1 * C("E_K", "j2", dh, ih);
@@ -1068,33 +1025,15 @@ int main(int argc, char** argv)
             MPI_Finalize();
             return 2;
         }
-        auto C = [&](const char* row, const char* jet, int d, int i) {
-            return m.phys_coef(row, jet, d, i);
-        };
-        const int ih = m.nbr(dh) - 1;
-        const double k1 = C("E_chi_tt", "Upp", dh, ih - 1) / C("E_K", "Upp", dh, ih - 1);
-        const double k2 = C("E_chi_tt", "Upp", dh, ih - 2) / C("E_K", "Upp", dh, ih - 2);
-        if (std::fabs(k1 - k2) > 1e-10 * std::fabs(k1)) {
+        const Trumpet::HorizonCompat hc =
+            Trumpet::horizon_compat(m, dh, dh, m.nbr(dh) - 1, "--additive");
+        if (!hc) {
             if (rank == 0)
-                std::cerr << "FATAL: --additive: E_chi_tt.Upp / E_K.Upp is not "
-                             "constant near the interface\n";
+                std::cerr << "FATAL: " << hc.error << "\n";
             MPI_Finalize();
             return 2;
         }
-        double rowmax = 0.0;
-        for (const char* jt : {"G", "Gp", "Q", "Qp", "U", "Up", "Upp"})
-            rowmax = std::max(rowmax, std::fabs(C("E_chi_tt", jt, dh, ih)));
-        for (const char* jt : {"G", "Gp", "Q", "U", "Up", "Upp"}) {
-            const double v = C("E_chi_tt", jt, dh, ih) - k1 * C("E_K", jt, dh, ih);
-            if (std::fabs(v) > 1e-12 * rowmax) {
-                if (rank == 0)
-                    std::cerr << "FATAL: --additive: slot " << jt << " of E_chi_tt - "
-                              << k1 << "*E_K is " << v << ", not zero\n";
-                MPI_Finalize();
-                return 2;
-            }
-        }
-        const double kap_eff = k1 * m.row_norm(0, dh, ih) / m.row_norm(2, dh, ih);
+        const double kap_eff = hc.kappa_eff;
         syst.add_cst("hkap", kap_eff);
         syst.add_def("ECOMPAT = EXT - hkap * EK");
         if (addrows == "all" || addrows == "compat") {
@@ -1206,7 +1145,7 @@ int main(int argc, char** argv)
             return 2;
         }
         if (rank == 0) {
-            std::cout << "# additive kappa=" << k1 << "  kappa_eff=" << kap_eff
+            std::cout << "# additive kappa=" << hc.kappa << "  kappa_eff=" << kap_eff
                       << "  outer-G target=" << gtarget << "\n";
             // --add-rows selects which of these are actually registered, so
             // the roster must be built from addrows, not printed as a fixed

@@ -626,4 +626,128 @@ private:
 /** The 1-D instantiation: unchanged for every existing caller. */
 using L0Model = L0ModelT<Trumpet::Space_oned_trumpet, 1>;
 
+// ------------------------------------------------------------------------
+// THE HORIZON COMPATIBILITY ROW.
+//
+// Shared because it had been transcribed three times -- the 1-D --additive
+// branch, the 1-D --horizon-order branch and the 2-D port -- and the copies
+// diverged.  Round 100: the 2-D copy carried the mechanism and dropped the
+// normaliser correction, and the divergence was invisible for six rounds
+// because each copy passed its own checks.  Duplicated construction that has
+// diverged once will diverge again, and it is only visible from outside.
+// ------------------------------------------------------------------------
+
+/** What the compatibility row needs, measured at the interface. */
+struct HorizonCompat
+{
+    int dom = -1;             ///< Domain whose OUTER face carries the degeneracy.
+    double kappa = 0.;        ///< \f$ E^{tt}_{\chi,U''} / E^{K}_{U''} \f$ near it.
+    double norm_ratio = 1.;   ///< \f$ N_K / N_T \f$ at the face where the row lands.
+    double kappa_eff = 0.;    ///< The constant to REGISTER: kappa * norm_ratio.
+    std::string error;        ///< Empty on success; the whole message otherwise.
+    explicit operator bool() const { return error.empty(); }
+};
+
+/**
+ * Locate the interface whose OUTER face is \f$ r(2M) \f$.
+ *
+ * Found, never hardcoded: it is the face where E_K's only second-derivative
+ * coefficient vanishes against the grid maximum, so a table without this
+ * structure yields -1 and the caller fails loudly instead of acting on the
+ * wrong point.  The degenerate direction is U'' whatever the table's own
+ * fields are, and phys_coef reconstructs it, so this finds the same interface
+ * in (U,Q,G) and in (S,T,G) alike.
+ */
+template <class Model>
+int locate_horizon_interface(const Model& m, int dlast)
+{
+    auto kUpp = [&](int d, int i) { return m.phys_coef("E_K", "Upp", d, i); };
+    double mx = 0.;
+    for (int d = 0; d <= dlast; d++)
+        for (int i = 0; i < m.nbr(d); i++)
+            mx = std::max(mx, std::fabs(kUpp(d, i)));
+    for (int d = 0; d < dlast; d++)
+        if (std::fabs(kUpp(d, m.nbr(d) - 1)) < 1e-12 * mx)
+            return d;
+    return -1;
+}
+
+/**
+ * Measure kappa at the interface and convert it to the registered constant.
+ *
+ * ⚠ ROW NORMALISATION CHANGES THE CONSTANT, and this is what the 2-D port got
+ * wrong.  With row normalisation on, the registered defs are \c EK = E_K/N_K
+ * and \c EXT = E_chi_tt/N_T with \f$ N_T \neq N_K \f$, so the string
+ * "EXT - hkap*EK" means
+ *
+ *   \f$ E^{tt}_\chi/N_T - hkap\, E^K/N_K
+ *      = (1/N_T)[E^{tt}_\chi - hkap (N_T/N_K) E^K] \f$
+ *
+ * which is proportional to \f$ E^{tt}_\chi - \kappa E^K \f$ only if
+ * \c hkap is \f$ \kappa N_K/N_T \f$.  Registering the bare kappa destroys
+ * the bit-zero cancellation that is the whole point of the difference form:
+ * at the interface that difference has two nonzero slots where bare E_chi_tt
+ * has six of order 1e4..1e5 which must cancel against each other.
+ *
+ * ⚠ And note WHICH quantity may be asserted.  |kappa - 2| < tol is a true
+ * statement about the unnormalised ratio and says nothing about what may be
+ * registered; the 2-D port made exactly that check, it passed, and it licensed
+ * the wrong use.  So kappa is validated against its own neighbour instead --
+ * constancy near the interface -- and kappa_eff is reported rather than
+ * asserted, because its value depends on the normalisation the caller chose.
+ *
+ * @param m         the model.
+ * @param dh        the interface, from \c locate_horizon_interface.
+ * @param norm_dom  domain of the face where the row is actually imposed.
+ * @param norm_i    point index of that face.
+ * @param who       caller name, so the message names the option that failed.
+ */
+template <class Model>
+HorizonCompat horizon_compat(const Model& m, int dh, int norm_dom, int norm_i,
+                             const char* who)
+{
+    HorizonCompat hc;
+    auto C = [&](const char* row, const char* jet, int d, int i) {
+        return m.phys_coef(row, jet, d, i);
+    };
+    if (dh < 0) {
+        hc.error = std::string(who) + ": no interface found where E_K's Upp vanishes";
+        return hc;
+    }
+    const int ih = m.nbr(dh) - 1;
+    if (ih < 2) {
+        hc.error = std::string(who) + ": domain " + std::to_string(dh)
+                   + " has too few points to measure kappa off the interface";
+        return hc;
+    }
+    // kappa is measured one point INSIDE: it is 0/0 at the interface itself.
+    const double k1 = C("E_chi_tt", "Upp", dh, ih - 1) / C("E_K", "Upp", dh, ih - 1);
+    const double k2 = C("E_chi_tt", "Upp", dh, ih - 2) / C("E_K", "Upp", dh, ih - 2);
+    if (std::fabs(k1 - k2) > 1e-10 * std::fabs(k1)) {
+        hc.error = std::string(who) + ": E_chi_tt.Upp / E_K.Upp is not constant near "
+                   "the interface (" + std::to_string(k1) + " vs "
+                   + std::to_string(k2) + ")";
+        return hc;
+    }
+    // Every OTHER jet slot of E_chi_tt - kappa*E_K must vanish at the face; Qp
+    // is the one that must NOT, since it carries the condition.
+    double rowmax = 0.;
+    for (const char* jt : {"G", "Gp", "Q", "Qp", "U", "Up", "Upp"})
+        rowmax = std::max(rowmax, std::fabs(C("E_chi_tt", jt, dh, ih)));
+    for (const char* jt : {"G", "Gp", "Q", "U", "Up", "Upp"}) {
+        const double v = C("E_chi_tt", jt, dh, ih) - k1 * C("E_K", jt, dh, ih);
+        if (std::fabs(v) > 1e-12 * rowmax) {
+            hc.error = std::string(who) + ": slot " + jt + " of E_chi_tt - "
+                       + std::to_string(k1) + "*E_K is " + std::to_string(v)
+                       + ", not zero";
+            return hc;
+        }
+    }
+    hc.dom = dh;
+    hc.kappa = k1;
+    hc.norm_ratio = m.row_norm(0, norm_dom, norm_i) / m.row_norm(2, norm_dom, norm_i);
+    hc.kappa_eff = k1 * hc.norm_ratio;
+    return hc;
+}
+
 } // namespace Trumpet

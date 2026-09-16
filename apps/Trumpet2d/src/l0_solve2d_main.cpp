@@ -290,77 +290,27 @@ int main(int argc, char** argv)
     }
 
     // --- the two APPENDED compat rows at r(2M) ------------------------------
-    // Located, not hardcoded: the interface where E_K's only second-derivative
-    // coefficient vanishes against its own grid maximum.  kappa is MEASURED one
-    // point inside (it is 0/0 at the interface itself) and asserted, so a table
-    // without this structure fails loudly rather than imposing a wrong row.
+    // The construction is SHARED with the 1-D app (Trumpet::horizon_compat in
+    // l0_setup.hpp): it had been transcribed here, the copy dropped the
+    // normaliser correction, and nothing caught it for six rounds because each
+    // copy passed its own checks.
     int n_appended = 0;
-    int dh = -1;
+    int dh = Trumpet::locate_horizon_interface(m, dlast);
     if (addrows == "compat") {
-        double best = 1e300;
-        for (int d = 0; d < dlast; d++) {
-            const int i = m.nbr(d) - 1;
-            double mx = 0.0;
-            for (int k = 0; k < m.nbr(d); k++)
-                mx = std::max(mx, std::fabs(m.phys_coef("E_K", "Upp", d, k)));
-            const double rel = std::fabs(m.phys_coef("E_K", "Upp", d, i))
-                               / std::max(mx, 1e-300);
-            if (rel < best) { best = rel; dh = d; }
-        }
-        if (dh < 0 || best > 1e-12) {
+        const Trumpet::HorizonCompat hc =
+            Trumpet::horizon_compat(m, dh, dh, m.nbr(dh < 0 ? 0 : dh) - 1,
+                                    "--add-rows compat");
+        if (!hc) {
             if (rank == 0)
-                std::cerr << "FATAL: --add-rows compat: no interface where E_K's "
-                             "Upp vanishes (best relative " << best << ")\n";
+                std::cerr << "FATAL: " << hc.error << "\n";
             MPI_Finalize();
             return 2;
         }
-        // ⚠ ROW NORMALISATION CHANGES THE CONSTANT, and this is the whole of
-        // round 99's a" compat discrepancy.  Under --rownorm the registered defs
-        // are EK = E_K/N_K and EXT = E_chi_tt/N_T with N_T != N_K, so the string
-        // "EXT - kappa*EK" means E_chi_tt/N_T - kappa*E_K/N_K, which is NOT
-        // proportional to E_chi_tt - kappa*E_K and destroys the bit-zero
-        // cancellation that is the point of the difference form.  The registered
-        // constant must therefore be kappa * N_K / N_T, evaluated AT THE FACE
-        // where the row is imposed.  Without --rownorm both normalisers are 1
-        // and kap_eff == kap, which is how this is checked independently of the
-        // number it exists to fix.  The 1-D app has carried this since round 10;
-        // porting the mechanism and not the correction is what made the 2-D a"
-        // read 1.81e-08 against 5.45e-10.
-        auto C = [&](const char* row, const char* jet, int d, int i) {
-            return m.phys_coef(row, jet, d, i);
-        };
-        const int ih = m.nbr(dh) - 1;
-        const double kap = C("E_chi_tt", "Upp", dh, ih - 1) / C("E_K", "Upp", dh, ih - 1);
-        const double kap2 = C("E_chi_tt", "Upp", dh, ih - 2) / C("E_K", "Upp", dh, ih - 2);
-        if (std::fabs(kap - kap2) > 1e-10 * std::fabs(kap)) {
-            if (rank == 0)
-                std::cerr << "FATAL: E_chi_tt.Upp / E_K.Upp is not constant near "
-                             "the interface: " << kap << " vs " << kap2 << "\n";
-            MPI_Finalize();
-            return 2;
-        }
-        // every OTHER jet slot of E_chi_tt - kappa*E_K must vanish at the face:
-        // the structural statement the difference form rests on, checked rather
-        // than assumed (Qp is the one slot that must NOT vanish)
-        double rowmax = 0.0;
-        for (const char* jt : {"G", "Gp", "Q", "Qp", "U", "Up", "Upp"})
-            rowmax = std::max(rowmax, std::fabs(C("E_chi_tt", jt, dh, ih)));
-        for (const char* jt : {"G", "Gp", "Q", "U", "Up", "Upp"}) {
-            const double v = C("E_chi_tt", jt, dh, ih) - kap * C("E_K", jt, dh, ih);
-            if (std::fabs(v) > 1e-12 * rowmax) {
-                if (rank == 0)
-                    std::cerr << "FATAL: slot " << jt << " of E_chi_tt - " << kap
-                              << "*E_K is " << v << ", not zero\n";
-                MPI_Finalize();
-                return 2;
-            }
-        }
-        const double kap_eff = kap * m.row_norm(0, dh, ih) / m.row_norm(2, dh, ih);
-        Trumpet::emit("A0C_horizon_domain", dh);
-        Trumpet::emit("A0C_kappa", kap);
-        Trumpet::emit("A0C_kappa_eff", kap_eff);
-        Trumpet::emit("A0C_rownorm_ratio", m.row_norm(0, dh, ih) / m.row_norm(2, dh, ih));
-        syst.add_cst("hkap", kap_eff);
+        Trumpet::emit("A0C_horizon_domain", hc.dom);
+        Trumpet::emit("A0C_kappa", hc.kappa);
+        Trumpet::emit("A0C_kappa_eff", hc.kappa_eff);
+        Trumpet::emit("A0C_rownorm_ratio", hc.norm_ratio);
+        syst.add_cst("hkap", hc.kappa_eff);
         syst.add_def("ECOMPAT = EXT - hkap * EK");
         syst.add_eq_bc(dh, OUTER_BC, "EK = 0");
         syst.add_eq_bc(dh, OUTER_BC, "ECOMPAT = 0");

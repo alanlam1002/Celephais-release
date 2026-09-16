@@ -50,3 +50,13 @@ set_target_properties(trumpet2d_l0_solve PROPERTIES OUTPUT_NAME l0_solve2d)
 # relative to ITS app root, and the shared header is the point.
 target_include_directories(trumpet2d_l0_solve PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
+# A1 rung 0 (research round 293): do the SECTION-4 equations mean, inside
+# Kadath, what they mean in sympy?  The parser on 1.2k-3.6k character strings,
+# dr/dt on a Domain_polar_shell, and add_cst fields under differentiation are
+# four inherited-and-unexercised pieces, checked against the J = 0 seed whose
+# answer round 102 established symbolically.
+kadath_add_exec(trumpet2d_finiteJ_probe src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe PROPERTIES OUTPUT_NAME finiteJ_probe)
+target_include_directories(trumpet2d_finiteJ_probe PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)

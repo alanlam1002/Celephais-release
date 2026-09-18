@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <iomanip>
 #include <sstream>
@@ -489,21 +490,33 @@ public:
     }
 
     /**
-     * ROW RE-EXPRESSION CHECK (research round 303 item 1).
+     * ROW RE-EXPRESSION CHECK (research rounds 303 / 305).
      *
-     * Round 106 found a Kadath evaluation defect: a sum whose FIRST operand is
-     * an inline operator application can evaluate differently from the same sum
-     * with that operand named.  The rows above are sums of PRODUCTS, which is
-     * not the shape the defect was found on -- but "not the shape" is a reading
-     * of the source, and the question is about the expression tree the parser
-     * builds.  So each row is registered a SECOND time with every term named,
-     * and the two are compared.  Identical means T2.1 certifies what we have
-     * been treating it as certifying; different means it does not.
+     * Kadath evaluates some sums differently depending on the STATE of their
+     * operands: a sum registered while its named operands have never been read
+     * back can differ from the same sum registered after they have (round 305,
+     * reproduced in stock Kadath by apps/Trumpet2d kadath_expr_repro).  The
+     * rows are sums of products, which is not the shape the defect was first
+     * found on -- but "not the shape" is a reading of the source, and the
+     * question is about what the evaluator does, so it is measured: each row is
+     * registered a SECOND time with every term named AND READ, and the two are
+     * compared.  Identical means T2.1 certifies what we have been treating it
+     * as certifying; different means it does not.
+     *
+     * ⚠ Reading each term is the point, not a detail.  Registering the named
+     * form without reading it puts BOTH spellings in the same evaluator state,
+     * and two spellings measured in one state cannot discriminate a defect
+     * whose variable IS the state.
+     *
+     * L0_ROWCHECK_POISON=<n> drops term n from every named form.  It exists so
+     * the gate's selftest can prove this comparison is able to fail.
      *
      * Returns the check-def names, parallel to row_defs().
      */
     std::vector<std::string> register_row_checks(Kadath::System_of_eqs& syst)
     {
+        const char* const poison = std::getenv("L0_ROWCHECK_POISON");
+        const int drop = poison ? std::atoi(poison) : -1;
         std::vector<std::string> checks;
         for (int n = 0; n < 5; n++) {
             std::string sum;
@@ -515,6 +528,15 @@ public:
                               + nameof.at(std::string(rows()[n]) + "/" + jet)
                               + " * " + apply_jet(jet, field_of(jet, ct.fields)))
                                  .c_str());
+                // force each term into configuration space before it is used
+                for (int d = 0; d < ndom; d++) {
+                    const Kadath::Val_domain& v =
+                        syst.give_val_def_scalar_domain(tn.c_str(), d);
+                    Kadath::Index ix(space.get_domain(d)->get_nbr_points());
+                    (void)v(ix);
+                }
+                if (k - 1 == drop)
+                    continue;
                 sum += (sum.empty() ? "" : " + ") + tn;
             }
             const std::string cn = std::string("RC") + row_defs()[n];

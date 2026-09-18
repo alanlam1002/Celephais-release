@@ -60,6 +60,36 @@ int main(int argc, char** argv)
     const char* const* ROWS = Trumpet::rows();
     const char* const* DEFN = Trumpet::row_defs();
 
+    // ---- E  ROW RE-EXPRESSION (research round 305 ruling 2) ----------------
+    // Kadath evaluates some sums differently depending on whether their named
+    // operands have been read back before the sum is registered.  Round 303
+    // measured that no l=0 row is affected -- but the rows are regenerated
+    // whenever the operator tables are, so a certification that rests on one
+    // round's measurement decays silently.  It runs here, in the gate, where
+    // the use it licenses runs: each row against the same row with every term
+    // named and read, compared pointwise on every domain.
+    {
+        const auto checks = m.register_row_checks(syst);
+        double worst = 0.0;
+        for (int n = 0; n < 5; n++) {
+            double mx = 0.0, scale = 0.0;
+            for (int d = 0; d < ndom; d++) {
+                const Val_domain& a = syst.give_val_def_scalar_domain(DEFN[n], d);
+                const Val_domain& b =
+                    syst.give_val_def_scalar_domain(checks[n].c_str(), d);
+                Index idx(m.space.get_domain(d)->get_nbr_points());
+                do {
+                    mx = std::max(mx, std::fabs(a(idx) - b(idx)));
+                    scale = std::max(scale, std::fabs(a(idx)));
+                } while (idx.inc());
+            }
+            const double rel = mx / std::max(scale, 1e-300);
+            Trumpet::emit(std::string("E_rowcheck_rel_") + DEFN[n], rel);
+            worst = std::max(worst, rel);
+        }
+        Trumpet::emit("E_rowcheck_rel_max", worst);
+    }
+
     // ------------------------------------------------------- evaluate -------
     // The reference table carries the row scale (largest single term) computed
     // from ANALYTIC jets, so B and C are judged on the same normalisation

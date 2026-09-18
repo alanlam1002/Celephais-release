@@ -203,6 +203,107 @@ int main(int argc, char** argv)
          "R12 = CA * F + dr(F) + CC * ddr(F)",
          "R13 = R1 + dr(F) + R3");
 
+    // --- DEFECT 2, and the variable round 106 never varied -----------------
+    //
+    // ⚠ Every named def above was created through val(), which READS it back
+    // immediately -- and reading a def indexes its Val_domain, which forces it
+    // into configuration space.  Our emitter does not do that: it registers 309
+    // sub-defs and reads nothing until the end.  So the whole table above was
+    // measured in ONE state, and it is not the state the emitter runs in.
+    //
+    // The variable here is therefore not the spelling but whether an operand
+    // has been READ before the sum that uses it is registered.  Three
+    // spellings of one expression; the inline form is the reference.
+    {
+        auto reg = [&](const char* d) { syst.add_def(d); };
+        auto rd = [&](const char* nm) {
+            return syst.give_val_def_scalar_domain(nm, dom)(ix);
+        };
+        std::cout << "\n  DEFECT 2 -- the operand-read variable\n";
+        std::cout << "  " << std::left << std::setw(32) << "what"
+                  << std::setw(20) << "a+b (truth)" << std::setw(20) << "unread"
+                  << std::setw(20) << "re-read" << std::setw(20) << "read first"
+                  << std::setw(20) << "inline" << "\n";
+        struct Case { const char* what; const char* t1; const char* t2; };
+        const std::vector<Case> cs = {
+            {"dt(G) + divr(F)", "dt(G)", "divr(F)"},
+            {"the emitter's own failing pair",
+             "-1 * (-1 * (multr(dr(F))))", "-1 * (multr(dt(G) + divr(F)))"},
+            {"both operands plain", "F", "G"},
+        };
+        int k = 0;
+        for (const auto& c : cs) {
+            const std::string n = std::to_string(k++);
+            auto R = [&](const std::string& nm) { return rd(nm.c_str()); };
+            // (i) the sum registered while its operands have NEVER been read
+            reg((std::string("U") + n + "a = " + c.t1).c_str());
+            reg((std::string("U") + n + "b = " + c.t2).c_str());
+            reg((std::string("U") + n + "s = U" + n + "a + U" + n + "b").c_str());
+            const double unread = R("U" + n + "s");
+            // ⚠ the TRUTH for a pointwise sum is the two operands' own values,
+            // read back individually.  Without it the columns only compare
+            // Kadath with Kadath and none of them is a reference.
+            const double a = R("U" + n + "a"), b = R("U" + n + "b");
+            const double reread = R("U" + n + "s");   // same def, read again
+            // (ii) the same three defs, operands read BEFORE the sum is parsed
+            reg((std::string("V") + n + "a = " + c.t1).c_str());
+            reg((std::string("V") + n + "b = " + c.t2).c_str());
+            R("V" + n + "a");
+            R("V" + n + "b");
+            reg((std::string("V") + n + "s = V" + n + "a + V" + n + "b").c_str());
+            const double readfirst = R("V" + n + "s");
+            // (iii) the inline spelling
+            reg((std::string("W") + n + "s = (" + c.t1 + ") + (" + c.t2 + ")").c_str());
+            const double inl = R("W" + n + "s");
+            const double truth = a + b;
+            const double sc = std::max(std::fabs(truth), 1e-30);
+            auto off = [&](double v) { return std::fabs(v - truth) / sc; };
+            const bool bad = off(unread) > 1e-10 || off(readfirst) > 1e-10
+                             || off(inl) > 1e-10 || off(reread) > 1e-10;
+            if (bad)
+                g_fail++;
+            std::cout << "  " << std::left << std::setw(32) << c.what
+                      << std::setprecision(12)
+                      << std::setw(20) << truth << std::setw(20) << unread
+                      << std::setw(20) << reread << std::setw(20) << readfirst
+                      << std::setw(20) << inl << (bad ? "  <-- DIFFER" : "")
+                      << "\n";
+        }
+        // ⚠ A PREDICTION, tested rather than asserted.  If a sum is evaluated in
+        // the space of its FIRST operand, then reading only the first should
+        // fix it and reading only the second should not -- which is also what
+        // round 106 saw and mis-attributed to NAMING the first operand.
+        {
+            const char* t1 = "-1 * (-1 * (multr(dr(F))))";
+            const char* t2 = "-1 * (multr(dt(G) + divr(F)))";
+            struct P { const char* what; bool r1, r2; };
+            for (const auto& pz : std::vector<P>{{"read neither", false, false},
+                                                 {"read FIRST only", true, false},
+                                                 {"read SECOND only", false, true},
+                                                 {"read both", true, true}}) {
+                static int t = 0;
+                const std::string n = "P" + std::to_string(t++);
+                reg((n + "a = " + t1).c_str());
+                reg((n + "b = " + t2).c_str());
+                if (pz.r1) rd((n + "a").c_str());
+                if (pz.r2) rd((n + "b").c_str());
+                reg((n + "s = " + n + "a + " + n + "b").c_str());
+                const double v = rd((n + "s").c_str());
+                const double a = rd((n + "a").c_str()), b = rd((n + "b").c_str());
+                const bool bad = std::fabs(v - (a + b)) / std::max(std::fabs(a + b), 1e-30) > 1e-10;
+                if (bad)
+                    g_fail++;
+                std::cout << "  " << std::left << std::setw(32) << pz.what
+                          << std::setprecision(12) << std::setw(20) << (a + b)
+                          << std::setw(20) << v << (bad ? "  <-- DIFFER" : "")
+                          << "\n";
+            }
+        }
+        std::cout << "  (columns: a+b read back | sum parsed with operands unread |\n"
+                     "   the SAME sum re-read after the operands were read |\n"
+                     "   sum parsed after the operands were read | inline)\n";
+    }
+
     std::cout << "\n  pairs that DIFFER: " << g_fail << "\n";
     std::cout << "RESULT REPRO_pairs_differing " << g_fail << "\n";
     MPI_Finalize();

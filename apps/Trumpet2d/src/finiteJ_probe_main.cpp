@@ -19,6 +19,8 @@
  * which is the control that stops this from being a test that cannot fail.
  */
 
+#include <algorithm>
+
 #include <mpi.h>
 
 #include "For_Kadath/Array/headcpp.hpp"
@@ -31,6 +33,7 @@
 #include "src/finiteJ_eqs.hpp"
 #include "Trumpet1d/src/table_io.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -64,11 +67,50 @@ int main(int argc, char** argv)
     int ntheta = 5;
     double perturb = 0.0;
     bool monolithic = false;
+    // --clean: register ONLY the emitted sub-defs and equations.  The smoke,
+    // vocabulary and parser-length batteries above them are diagnostics, not
+    // part of the object under test, and they put ~45 extra defs -- five of
+    // them 100 to 120 operations deep, at a stack limit known not to be
+    // reproducible -- into the same System_of_eqs before the acceptance test
+    // reads it.  Holding them out is the first thing a bisection on
+    // registration order has to do, or "order" and "what else is registered"
+    // are varied together.
+    bool clean = false;
+    // --extra-def "NAME = TEXT", repeatable: registered AFTER everything else
+    // and reported at the probe point.  A re-spelling of a sub-def that is
+    // already wrong, registered at a different position in the same system,
+    // separates "this text evaluates wrong" from "this text evaluates wrong
+    // HERE" -- which is the question a bisection on registration order asks.
+    std::vector<std::string> extra;
+    // --maxdefs K: register only the first K sub-defs (and no equations).  If a
+    // sub-def is right at K = its own index and wrong at K = 309, then a LATER
+    // registration changed it, and bisecting K names the one that did.
+    int maxdefs = -1;
+    // --extra-early: register the extras BEFORE anything is read back, instead
+    // of after.  The difference between the two isolates whether reading a
+    // def's operands is what makes a later sum of them come out right.
+    bool extra_early = false;
+    // --touch: read every sub-def back on every domain immediately after
+    // registering it.  Reading a def is supposed to be an observation; if it
+    // changes what a LATER def computes from it, it is not.
+    bool touch = false;
+    // --read-before NAME, repeatable: read exactly these defs, on the probe
+    // domain only, immediately before the --extra-early registrations.  Naming
+    // the reads one at a time is how the trigger gets isolated.
+    std::vector<std::string> readbefore;
+    bool readall = false;
     for (int i = 2; i < argc; i++) {
         const std::string k = argv[i];
         if (k == "--ntheta") ntheta = std::stoi(argv[++i]);
         else if (k == "--perturb") perturb = std::stod(argv[++i]);
         else if (k == "--try-monolithic") monolithic = true;
+        else if (k == "--clean") clean = true;
+        else if (k == "--extra-def") extra.push_back(argv[++i]);
+        else if (k == "--maxdefs") maxdefs = std::stoi(argv[++i]);
+        else if (k == "--extra-early") extra_early = true;
+        else if (k == "--touch") touch = true;
+        else if (k == "--read-before") readbefore.push_back(argv[++i]);
+        else if (k == "--read-all") readall = true;
     }
 
     TrumpetIO::Table t;
@@ -219,7 +261,7 @@ int main(int argc, char** argv)
     // ---- SMOKE: do the operators work at all, and where is the size limit? --
     // Two separate questions, and a 2254-character def failing answers neither
     // on its own.  Small defs with EXACT known answers first.
-    {
+    if (!clean) {
         struct Sm { const char* def; const char* what; };
         const std::vector<Sm> sm = {
             {"S1 = dr(RR)", "dr(r) = 1"},
@@ -316,7 +358,7 @@ int main(int argc, char** argv)
     }
     // ---- how long a def can the parser take?  Built from ONE repeated term,
     // so only the length varies.
-    {
+    if (!clean) {
         std::string acc = "PS";
         for (int k = 1; k <= 120; k++) {   // ~145 is where it dies, and NOT reproducibly
             acc = "(" + acc + " + PS)";
@@ -331,7 +373,11 @@ int main(int argc, char** argv)
     (void)monolithic;
     // ---- THE ACCEPTANCE TEST.  The sub-defs first, in dependency order, then
     // the six equations.  The J = 0 seed must drive every one to zero.
-    for (const auto& d : Trumpet::finiteJ_subdefs()) {
+    const auto& SUB = Trumpet::finiteJ_subdefs();
+    const int nsub = (maxdefs < 0) ? int(SUB.size())
+                                   : std::min<int>(maxdefs, int(SUB.size()));
+    for (int si = 0; si < nsub; si++) {
+        const auto& d = SUB[si];
         const std::string s = std::string(d.name) + " = " + d.def;
         try {
             syst.add_def(s.c_str());
@@ -342,9 +388,16 @@ int main(int argc, char** argv)
             MPI_Finalize();
             return 3;
         }
+        if (touch)
+            for (int dd = 0; dd <= dtop; dd++) {
+                const Val_domain& v = syst.give_val_def_scalar_domain(d.name, dd);
+                Index iq(space.get_domain(dd)->get_nbr_points());
+                (void)v(iq);
+            }
     }
-    emit("FJP_subdefs", static_cast<double>(Trumpet::finiteJ_subdefs().size()));
+    emit("FJP_subdefs", static_cast<double>(nsub));
     for (const auto& e : Trumpet::finiteJ_eqs()) {
+        if (maxdefs >= 0) break;
         const std::string s = std::string(e.name) + " = " + e.def;
         try {
             syst.add_def(s.c_str());
@@ -358,6 +411,33 @@ int main(int argc, char** argv)
     }
     if (rank == 0)
         std::cout << "# all six defs registered\n";
+
+    std::vector<std::string> extra_names;
+    // ⚠ The read has to INDEX the Val_domain, not just fetch the reference:
+    // operator()(Index) is what forces configuration space.  A fetch alone
+    // leaves the def in whatever space it was built in, which is why the first
+    // version of this probe found no trigger.
+    {
+        const int dR = (dtop >= 1) ? 1 : 0;
+        auto peek = [&](const char* nm) {
+            const Val_domain& v = syst.give_val_def_scalar_domain(nm, dR);
+            Index iq(space.get_domain(dR)->get_nbr_points());
+            (void)v(iq);
+        };
+        if (readall)
+            for (int si = 0; si < nsub; si++) peek(SUB[si].name);
+        for (const auto& nm : readbefore) peek(nm.c_str());
+    }
+    if (extra_early)
+        for (const auto& x : extra) {
+            const std::string nm = x.substr(0, x.find(' '));
+            try {
+                syst.add_def(x.c_str());
+                extra_names.push_back(nm);
+            } catch (const std::exception& ex) {
+                std::cout << "#   extra " << nm << " THREW " << ex.what() << "\n";
+            }
+        }
 
     // ---- SUB-DEF LOCALISATION (research round 301 item 1) -----------------
     // Equation-level residuals are the wrong granularity.  Every sub-def is
@@ -373,6 +453,7 @@ int main(int argc, char** argv)
         emit("FJP_pt_R", t.pts[dP][iP].Rr * t.pts[dP][iP].r);
         emit("FJP_pt_W", t.pts[dP][iP].W);
         emit("FJP_pt_th", dm->get_coloc(2)(jP));
+        if (!clean)
         for (const char* nm : {"P1", "P2", "P3", "P4", "P5", "P6", "P7",
                                "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7",
                                "Z1", "Z2", "Z3", "Z4", "Z5", "Z6", "Z7",
@@ -380,12 +461,30 @@ int main(int argc, char** argv)
                                "Z10", "Z11", "L1", "L2", "L3", "L4", "L5"})
             emit(std::string("FJP_val_") + nm,
                  syst.give_val_def_scalar_domain(nm, dP)(ix));
-        for (const auto& d : Trumpet::finiteJ_subdefs())
-            emit(std::string("FJP_val_") + d.name,
-                 syst.give_val_def_scalar_domain(d.name, dP)(ix));
-        for (const auto& e : Trumpet::finiteJ_eqs())
-            emit(std::string("FJP_val_") + e.name,
-                 syst.give_val_def_scalar_domain(e.name, dP)(ix));
+        for (int si = 0; si < nsub; si++)
+            emit(std::string("FJP_val_") + SUB[si].name,
+                 syst.give_val_def_scalar_domain(SUB[si].name, dP)(ix));
+        if (maxdefs < 0)
+            for (const auto& e : Trumpet::finiteJ_eqs())
+                emit(std::string("FJP_val_") + e.name,
+                     syst.give_val_def_scalar_domain(e.name, dP)(ix));
+        for (const auto& nm : extra_names)
+            emit(std::string("FJP_extra_") + nm,
+                 syst.give_val_def_scalar_domain(nm.c_str(), dP)(ix));
+        if (!extra_early) {
+            for (const auto& x : extra) {
+                const std::string nm = x.substr(0, x.find(' '));
+                try {
+                    syst.add_def(x.c_str());
+                } catch (const std::exception& ex) {
+                    std::cout << "#   extra " << nm << " THREW " << ex.what()
+                              << "\n";
+                    continue;
+                }
+                emit(std::string("FJP_extra_") + nm,
+                     syst.give_val_def_scalar_domain(nm.c_str(), dP)(ix));
+            }
+        }
     }
 
     // ⚠ Split AXIS from INTERIOR.  The cot(theta) construction is only valid
@@ -394,6 +493,7 @@ int main(int argc, char** argv)
     double worst = 0.0, worst_int = 0.0;
     std::cout << "#   equation      max|E| axis     max|E| interior\n";
     for (const auto& e : Trumpet::finiteJ_eqs()) {
+        if (maxdefs >= 0) break;
         double mx = 0.0, mxi = 0.0;
         for (int d = 0; d <= dtop; d++) {
             const Val_domain& v = syst.give_val_def_scalar_domain(e.name, d);

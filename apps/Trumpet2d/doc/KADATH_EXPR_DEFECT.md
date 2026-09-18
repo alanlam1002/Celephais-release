@@ -64,14 +64,52 @@ Celephais (`trumpet_bh` branch), GCC 13.1 / Intel MPI 2021.17, `-O3`,
 in the shell domain at an interior off-axis collocation point. The difference is
 far larger than any rounding effect and is stable across resolutions.
 
+## Amendment: the variable is the operands' EVALUATION STATE, not the spelling
+
+The scope table above was measured with a helper that registered each named def
+and **read it back immediately**. Reading a def indexes its `Val_domain`, which
+forces it into configuration space — so every "named" spelling in that table was
+a named *and already-evaluated* def, and the variable being compared was never
+isolated.
+
+Varying it directly, with the operands' own read-back values as the reference:
+
+```
+  A = -1 * (-1 * (multr(dr(F))))
+  B = -1 * (multr(dt(G) + divr(F)))
+
+  a + b, the operands read back individually       -0.00404762175904   (reference)
+  S = A + B, parsed while A and B are UNREAD        1.06494211083      DIFFERS
+  the same S, re-read after A and B are read        1.06494211083      DIFFERS
+  S = A + B, parsed after A and B are read         -0.00404762175904
+  (-1 * (-1 * (multr(dr(F))))) + (-1 * (multr(dt(G) + divr(F))))
+                                        inline      1.06494211083      DIFFERS
+```
+
+So a sum of two named definitions evaluates differently depending on whether
+those definitions had been read before the sum was parsed, and a definition
+parsed in the wrong state does not recover when its operands are read later.
+Reading **either** operand is enough to change the result; we tested the
+hypothesis that the first operand determines it, and it is wrong.
+
+This also means the report above under-states the scope: the rows marked AGREE
+were all measured in the read-first state, so they establish agreement in that
+state only.
+
 ## What we do not claim
 
 We have not identified the mechanism and have not looked in the parser or in
-`Ope_eq`. We do not know whether released applications are affected: the shape
-does not arise in the row construction we depend on — we checked our own five
-`O(j^2)` rows by registering each a second time with every term named and
-comparing pointwise, and all five agree exactly — but that is a statement about
-our expressions, not about Kadath's users generally.
+`Ope_eq`. We do not know whether released applications are affected. Our own five
+`O(j^2)` rows are unaffected: each is registered a second time with every term
+named **and read**, so the two spellings sit in the two different states, and
+all five agree exactly on every layout we run. That is a statement about our
+expressions, not about Kadath's users generally.
 
-A second anomaly we originally reported alongside this one did **not** reproduce
-here and turned out to be in our own code generator, so it is excluded.
+We have not identified which of the two values is the intended one beyond the
+pointwise argument in the amendment (the value of a sum of two fields at a grid
+point is the sum of their values there), and we have not determined whether the
+angular spectral basis is what differs between the two states.
+
+An earlier version of this report excluded a second anomaly as being in our own
+code generator. That was wrong and is withdrawn: with the operand-read variable
+varied, it reproduces here, and it is the amendment above.

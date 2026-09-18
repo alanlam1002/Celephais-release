@@ -99,6 +99,10 @@ int main(int argc, char** argv)
     // the reads one at a time is how the trigger gets isolated.
     std::vector<std::string> readbefore;
     bool readall = false;
+    // --break-contract: register the emission WITHOUT the reads the header
+    // requires.  It exists so finiteJ_check() can be shown to catch the breach;
+    // a control that has never been seen to fail is not a control.
+    bool breakcontract = false;
     for (int i = 2; i < argc; i++) {
         const std::string k = argv[i];
         if (k == "--ntheta") ntheta = std::stoi(argv[++i]);
@@ -111,6 +115,7 @@ int main(int argc, char** argv)
         else if (k == "--touch") touch = true;
         else if (k == "--read-before") readbefore.push_back(argv[++i]);
         else if (k == "--read-all") readall = true;
+        else if (k == "--break-contract") breakcontract = true;
     }
 
     TrumpetIO::Table t;
@@ -371,44 +376,61 @@ int main(int argc, char** argv)
     }
 
     (void)monolithic;
-    // ---- THE ACCEPTANCE TEST.  The sub-defs first, in dependency order, then
-    // the six equations.  The J = 0 seed must drive every one to zero.
-    const auto& SUB = Trumpet::finiteJ_subdefs();
+    // ---- THE ACCEPTANCE TEST.  finiteJ_register() owns the read-state
+    // contract -- it registers each def and reads it into configuration space,
+    // which is what the evaluator needs and what the probe must not be trusted
+    // to remember.  The emission is NOT registered by hand here.
+    //
+    // ⚠ finiteJ_detail::subdefs() is reached only by the bisection flags below,
+    // which break the contract on purpose.
+    const auto& SUB = Trumpet::finiteJ_detail::subdefs();
     const int nsub = (maxdefs < 0) ? int(SUB.size())
                                    : std::min<int>(maxdefs, int(SUB.size()));
-    for (int si = 0; si < nsub; si++) {
-        const auto& d = SUB[si];
-        const std::string s = std::string(d.name) + " = " + d.def;
-        try {
-            syst.add_def(s.c_str());
-        } catch (const std::exception& ex) {
-            if (rank == 0)
-                std::cerr << "FATAL: sub-def " << d.name << " threw: "
-                          << ex.what() << "\n";
-            MPI_Finalize();
-            return 3;
-        }
-        if (touch)
-            for (int dd = 0; dd <= dtop; dd++) {
-                const Val_domain& v = syst.give_val_def_scalar_domain(d.name, dd);
-                Index iq(space.get_domain(dd)->get_nbr_points());
-                (void)v(iq);
+    emit("FJP_axis_violations",
+         static_cast<double>(Trumpet::finiteJ_axis_violations().size()));
+    if (rank == 0)
+        for (const char* v : Trumpet::finiteJ_axis_violations())
+            std::cout << "#   axis violation carried by the emission: " << v
+                      << "\n";
+    try {
+        if (maxdefs < 0) {
+            Trumpet::finiteJ_register(syst, space, 0, dtop, !breakcontract);
+        } else {
+            // --maxdefs truncates the emission, so the header's registration
+            // cannot be used; this path is a diagnostic and says so.
+            for (int si = 0; si < nsub; si++) {
+                syst.add_def((std::string(SUB[si].name) + " = " + SUB[si].def)
+                                 .c_str());
+                if (touch)
+                    Trumpet::finiteJ_detail::read_def(syst, space, SUB[si].name,
+                                                      0, dtop);
             }
+        }
+    } catch (const std::exception& ex) {
+        if (rank == 0)
+            std::cerr << "FATAL: registration threw: " << ex.what() << "\n";
+        MPI_Finalize();
+        return 3;
     }
     emit("FJP_subdefs", static_cast<double>(nsub));
-    for (const auto& e : Trumpet::finiteJ_eqs()) {
-        if (maxdefs >= 0) break;
-        const std::string s = std::string(e.name) + " = " + e.def;
+
+    // ---- THE CONTROL.  Every sum re-expressed with its operands read first.
+    if (maxdefs < 0) {
+        double readchk = 0.0;
         try {
-            syst.add_def(s.c_str());
-        } catch (const std::exception& ex) {
+            readchk = Trumpet::finiteJ_check(syst, space, 0, dtop);
             if (rank == 0)
-                std::cerr << "FATAL: add_def(" << e.name << ") threw: "
-                          << ex.what() << "\n";
-            MPI_Finalize();
-            return 3;
+                std::cout << "# read-state contract kept; worst re-expression "
+                             "difference " << readchk << "\n";
+        } catch (const std::exception& ex) {
+            readchk = 1.0;
+            if (rank == 0)
+                std::cout << "# read-state contract BROKEN: " << ex.what()
+                          << "\n";
         }
+        emit("FJP_readcheck", readchk);
     }
+
     if (rank == 0)
         std::cout << "# all six defs registered\n";
 
@@ -465,9 +487,9 @@ int main(int argc, char** argv)
             emit(std::string("FJP_val_") + SUB[si].name,
                  syst.give_val_def_scalar_domain(SUB[si].name, dP)(ix));
         if (maxdefs < 0)
-            for (const auto& e : Trumpet::finiteJ_eqs())
-                emit(std::string("FJP_val_") + e.name,
-                     syst.give_val_def_scalar_domain(e.name, dP)(ix));
+            for (const char* nm : Trumpet::finiteJ_eq_names())
+                emit(std::string("FJP_val_") + nm,
+                     syst.give_val_def_scalar_domain(nm, dP)(ix));
         for (const auto& nm : extra_names)
             emit(std::string("FJP_extra_") + nm,
                  syst.give_val_def_scalar_domain(nm.c_str(), dP)(ix));
@@ -492,11 +514,11 @@ int main(int argc, char** argv)
     // idx(1) == 0 that is the cause, and if they are spread it is not.
     double worst = 0.0, worst_int = 0.0;
     std::cout << "#   equation      max|E| axis     max|E| interior\n";
-    for (const auto& e : Trumpet::finiteJ_eqs()) {
+    for (const char* ename : Trumpet::finiteJ_eq_names()) {
         if (maxdefs >= 0) break;
         double mx = 0.0, mxi = 0.0;
         for (int d = 0; d <= dtop; d++) {
-            const Val_domain& v = syst.give_val_def_scalar_domain(e.name, d);
+            const Val_domain& v = syst.give_val_def_scalar_domain(ename, d);
             const int nth = space.get_domain(d)->get_nbr_points()(1);
             Index idx(space.get_domain(d)->get_nbr_points());
             do {
@@ -507,10 +529,10 @@ int main(int argc, char** argv)
                     mxi = std::max(mxi, a);
             } while (idx.inc());
         }
-        std::cout << "#   " << std::left << std::setw(13) << e.name
+        std::cout << "#   " << std::left << std::setw(13) << ename
                   << std::setprecision(4) << std::setw(16) << mx << mxi << "\n";
-        emit(std::string("FJP_") + e.name, mx);
-        emit(std::string("FJP_int_") + e.name, mxi);
+        emit(std::string("FJP_") + ename, mx);
+        emit(std::string("FJP_int_") + ename, mxi);
         worst = std::max(worst, mx);
         worst_int = std::max(worst_int, mxi);
     }

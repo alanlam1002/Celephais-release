@@ -60,3 +60,10 @@ kadath_add_exec(trumpet2d_finiteJ_probe src/finiteJ_probe_main.cpp)
 set_target_properties(trumpet2d_finiteJ_probe PROPERTIES OUTPUT_NAME finiteJ_probe)
 target_include_directories(trumpet2d_finiteJ_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
+# Round 106: the minimal reproducer for round 105's two evaluator defects.
+# Stock Kadath only -- Space_polar, two add_cst fields, hand-typed expressions.
+# It depends on nothing of ours by design: a defect we cannot demonstrate
+# outside our own emitter is one we carry forever.
+kadath_add_exec(trumpet2d_expr_repro src/kadath_expr_repro_main.cpp)
+set_target_properties(trumpet2d_expr_repro PROPERTIES OUTPUT_NAME kadath_expr_repro)

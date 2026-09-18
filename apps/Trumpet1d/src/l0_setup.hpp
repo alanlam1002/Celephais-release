@@ -489,6 +489,42 @@ public:
     }
 
     /**
+     * ROW RE-EXPRESSION CHECK (research round 303 item 1).
+     *
+     * Round 106 found a Kadath evaluation defect: a sum whose FIRST operand is
+     * an inline operator application can evaluate differently from the same sum
+     * with that operand named.  The rows above are sums of PRODUCTS, which is
+     * not the shape the defect was found on -- but "not the shape" is a reading
+     * of the source, and the question is about the expression tree the parser
+     * builds.  So each row is registered a SECOND time with every term named,
+     * and the two are compared.  Identical means T2.1 certifies what we have
+     * been treating it as certifying; different means it does not.
+     *
+     * Returns the check-def names, parallel to row_defs().
+     */
+    std::vector<std::string> register_row_checks(Kadath::System_of_eqs& syst)
+    {
+        std::vector<std::string> checks;
+        for (int n = 0; n < 5; n++) {
+            std::string sum;
+            int k = 0;
+            for (const auto& jet : ct.jets[rows()[n]]) {
+                const std::string tn = std::string("RT") + row_defs()[n]
+                                       + std::to_string(k++);
+                syst.add_def((tn + " = "
+                              + nameof.at(std::string(rows()[n]) + "/" + jet)
+                              + " * " + apply_jet(jet, field_of(jet, ct.fields)))
+                                 .c_str());
+                sum += (sum.empty() ? "" : " + ") + tn;
+            }
+            const std::string cn = std::string("RC") + row_defs()[n];
+            syst.add_def((cn + " = " + sum).c_str());
+            checks.push_back(cn);
+        }
+        return checks;
+    }
+
+    /**
      * FAR-FIELD LOG ENRICHMENT (round-6 option (a)).
      *
      * The constraints source a ln(r) far field that no polynomial basis in 1/r

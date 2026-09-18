@@ -138,6 +138,7 @@ int main(int argc, char** argv)
     bool rownorm = false, manufactured = false, dumpresid = false;
     bool firstorder = false;
     std::string jacdump, pinat = "inner", horizonfix, hside = "left", horder;
+    bool rowcheck = false;
     double residfloor = 1e-12;
     bool additive = false;
     double addweight = 1.0;
@@ -310,6 +311,7 @@ int main(int argc, char** argv)
         else if (k == "--first-order") firstorder = true;
         else if (k == "--log-enrich") logenrich = next();
         else if (k == "--dump-jacobian") jacdump = next();
+        else if (k == "--rowcheck") rowcheck = true;
         else if (k == "--manufactured") {
             // MANUFACTURED-SOLUTION BVP (playbook rule 2).  The exact mass mode
             // U = (1-W)/2, Q = 0, G = F_M - 2 annihilates all five rows at
@@ -447,6 +449,37 @@ int main(int argc, char** argv)
     // ----------------------------------------------------------- system -----
     System_of_eqs syst(m.space, 0, dlast);
     const auto defs = m.register_rows(syst, j2);
+    // ---- ROW RE-EXPRESSION CHECK (research round 303 item 1) ---------------
+    // Does any l0 row present round 106's trigger?  Not decided by reading the
+    // source: each row is registered a second time with every term named and
+    // the two are compared pointwise over every domain.
+    if (rowcheck) {
+        const auto checks = m.register_row_checks(syst);
+        double worst = 0.0;
+        for (int n = 0; n < 5; n++) {
+            double mx = 0.0, scale = 0.0;
+            for (int d = 0; d <= dlast; d++) {
+                const Val_domain& a =
+                    syst.give_val_def_scalar_domain(Trumpet::row_defs()[n], d);
+                const Val_domain& b =
+                    syst.give_val_def_scalar_domain(checks[n].c_str(), d);
+                Index ix(m.space.get_domain(d)->get_nbr_points());
+                do {
+                    mx = std::max(mx, std::fabs(a(ix) - b(ix)));
+                    scale = std::max(scale, std::fabs(a(ix)));
+                } while (ix.inc());
+            }
+            const double rel = mx / std::max(scale, 1e-300);
+            if (rank == 0)
+                std::cout << "# rowcheck " << Trumpet::row_defs()[n]
+                          << "  max|row - named| " << mx << "  relative " << rel
+                          << "\n";
+            Trumpet::emit(std::string("ROWCHK_") + Trumpet::row_defs()[n], rel);
+            worst = std::max(worst, rel);
+        }
+        Trumpet::emit("ROWCHK_worst", worst);
+    }
+
     if (rank == 0)
         for (const auto& d : defs)
             std::cout << "# add_def  " << d << "\n";

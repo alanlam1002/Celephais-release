@@ -78,27 +78,40 @@ int main(int argc, char** argv)
     const int dom = 1;                       // the shell; domain 0 is the nucleus
 
     // Two add_cst fields, both representable: polynomial in r, COS_EVEN in theta.
-    Scalar F(space), G(space);
+    Scalar F(space), G(space), CA(space), CB(space), CC(space), CD(space), CE(space);
     for (int d = 0; d < space.get_nbr_domains(); d++) {
         const Domain* dm = space.get_domain(d);
         Val_domain& vf = F.set_domain(d);
         Val_domain& vg = G.set_domain(d);
+        Val_domain& va = CA.set_domain(d); Val_domain& vb = CB.set_domain(d);
+        Val_domain& vc = CC.set_domain(d); Val_domain& vd = CD.set_domain(d);
+        Val_domain& ve = CE.set_domain(d);
         vf.allocate_conf();
         vg.allocate_conf();
+        for (Val_domain* v : {&va, &vb, &vc, &vd, &ve}) v->allocate_conf();
         Index idx(dm->get_nbr_points());
         do {
             const double rr = dm->get_radius()(idx);
             const double th = dm->get_coloc(2)(idx(1));
             vf.set(idx) = 2.0 + 0.5 * rr * rr + 0.3 * rr * std::cos(2.0 * th);
             vg.set(idx) = 1.0 + 0.7 * rr + 0.4 * rr * rr * std::cos(2.0 * th);
+            // coefficient fields, the shape l0_setup.hpp's 39 csts have
+            va.set(idx) = 1.3 + 0.2 * rr;
+            vb.set(idx) = -0.7 + 0.5 * rr * rr;
+            vc.set(idx) = 0.9 - 0.3 * rr;
+            vd.set(idx) = 1.1 + 0.6 * rr * std::cos(2.0 * th);
+            ve.set(idx) = -1.4 + 0.8 * rr;
         } while (idx.inc());
     }
+    for (Scalar* z : {&CA, &CB, &CC, &CD, &CE}) z->std_base();
     F.std_base();
     G.std_base();
 
     System_of_eqs syst(space, dom, dom);
     syst.add_cst("F", F);
     syst.add_cst("G", G);
+    syst.add_cst("CA", CA); syst.add_cst("CB", CB); syst.add_cst("CC", CC);
+    syst.add_cst("CD", CD); syst.add_cst("CE", CE);
 
     syst.add_def("FG = F + G");
 
@@ -166,6 +179,29 @@ int main(int argc, char** argv)
          "C3 = A6 - A7", "C4 = dr(F) - 4 * dr(G)");
     check_pair(syst, space, dom, ix, "  named difference, plain fields",
          "C5 = F - G", "C6 = FG - G - G");
+
+    // --- ITEM 1: does l0_setup.hpp's ROW SHAPE present the trigger? ---------
+    // A row there is  c1*G + c2*dr(G) + c3*Q + c4*dr(Q) + ... + c8*jsrc :
+    // a SUM OF PRODUCTS whose first summand is a product of two plain fields.
+    // That is NOT the shape the trigger was found on, so it is measured rather
+    // than read off the source.
+    val(syst, space, "R1 = CA * F", dom, ix);
+    val(syst, space, "R2 = CB * dr(F)", dom, ix);
+    val(syst, space, "R3 = CC * ddr(F)", dom, ix);
+    val(syst, space, "R4 = CD * G", dom, ix);
+    val(syst, space, "R5 = CE * dr(G)", dom, ix);
+    check_pair(syst, space, dom, ix, "l0 row shape, 5 terms",
+         "R6 = CA * F + CB * dr(F) + CC * ddr(F) + CD * G + CE * dr(G)",
+         "R7 = R1 + R2 + R3 + R4 + R5");
+    check_pair(syst, space, dom, ix, "  same, DERIVATIVE term first",
+         "R8 = CB * dr(F) + CA * F + CC * ddr(F) + CD * G + CE * dr(G)",
+         "R9 = R2 + R1 + R3 + R4 + R5");
+    check_pair(syst, space, dom, ix, "  bare op first, no coefficient",
+         "R10 = dr(F) + CA * F + CC * ddr(F)",
+         "R11 = dr(F) + R1 + R3");
+    check_pair(syst, space, dom, ix, "  product of two plain fields first",
+         "R12 = CA * F + dr(F) + CC * ddr(F)",
+         "R13 = R1 + dr(F) + R3");
 
     std::cout << "\n  pairs that DIFFER: " << g_fail << "\n";
     std::cout << "RESULT REPRO_pairs_differing " << g_fail << "\n";

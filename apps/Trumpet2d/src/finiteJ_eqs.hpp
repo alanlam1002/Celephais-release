@@ -15,7 +15,7 @@
  *
  * which the probe verified to 2e-16 on a field vanishing on the axis.
  *
- * Registered as 23 named sub-defs then the six equations: the parser has a
+ * Registered as 309 named sub-defs then the six equations: the parser has a
  * STACK-depth limit near 1000 characters that was not reproducible run to
  * run, so every piece here is kept far below it.
  */
@@ -28,163 +28,936 @@ namespace Trumpet
 {
     struct FiniteJEq { const char* name; const char* def; };
 
-    /// T1..T23, in dependency order; register these FIRST.
+    /// T1..T309, in dependency order; register these FIRST.
     inline const std::vector<FiniteJEq>& finiteJ_subdefs()
     {
         static const std::vector<FiniteJEq> D = {
-            {"T1",
-             "multr(multr(multr(multr(((1 / 2) * (((PS * (1 / (PH))) * ((2 * (divr(divr(dt(BT) + "
-             "divr(BR))))) - divr(divr(dr(BR) + (dt(BT) + divr(BR)))))))) * ((1 / 2) * (((PS * (1 "
-             "/ (PH))) * ((2 * (divr(divr(dt(BT) + divr(BR))))) - divr(divr(dr(BR) + (dt(BT) + "
-             "divr(BR))))))))))))"
+            {"D0001",
+             "(2 * (QF))"
             },
-            {"T2",
-             "(((((1 / 2) * (((PS * (1 / (PH))) * ((2 * (dr(BR))) - (dr(BR) + (dt(BT) + "
-             "divr(BR))))))) * ((1 / 2) * (((PS * (1 / (PH))) * ((2 * (dr(BR))) - (dr(BR) + "
-             "(dt(BT) + divr(BR)))))))) + T1) + multr(multr(2 * ((((1 / 2) * (((PS * (1 / (PH))) * "
-             "(dr(BT) + divr(divr(dt(BR) + (-1 * (multr(BT))))))))) * ((1 / 2) * (((PS * (1 / "
-             "(PH))) * (dr(BT) + divr(divr(dt(BR) + (-1 * (multr(BT))))))))))))))"
+            {"D0002",
+             "(1 / (PS))"
             },
-            {"T3",
-             "((BR * dr(-1 * (((PS * (1 / (PH))) * ((BR * ((2 * (dr((1 / 2) * (log(PS))))) + "
-             "divr(ones))) + (BT * ((2 * (dt((1 / 2) * (log(PS))))) + (divsint(dt(multsint(ones))) "
-             "- dt(ones))))))))) + (BT * dt(-1 * (((PS * (1 / (PH))) * ((BR * ((2 * (dr((1 / 2) * "
-             "(log(PS))))) + divr(ones))) + (BT * ((2 * (dt((1 / 2) * (log(PS))))) + "
-             "(divsint(dt(multsint(ones))) - dt(ones))))))))))"
+            {"D0003",
+             "(1 / (PH))"
             },
-            {"T4",
-             "((PS * (1 / (PH))) * ((BR * dr(-1 * (((PS * (1 / (PH))) * ((BR * dr(QB)) + (BT * "
-             "(dt(QB) + (6*JJ * (multsint(multsint(multsint(ones)))))))))))) + (BT * dt(-1 * (((PS "
-             "* (1 / (PH))) * ((BR * dr(QB)) + (BT * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones))))))))))))))"
+            {"D0004",
+             "((1 / 2) * (log(PS)))"
             },
-            {"T5",
-             "((-1 * (((PS * (1 / (PH))) * ((BR * ((2 * (dr((1 / 2) * (log(PS))))) + divr(ones))) "
-             "+ (BT * ((2 * (dt((1 / 2) * (log(PS))))) + (divsint(dt(multsint(ones))) - "
-             "dt(ones)))))))) * (-1 * (((PS * (1 / (PH))) * ((BR * ((2 * (dr((1 / 2) * "
-             "(log(PS))))) + divr(ones))) + (BT * ((2 * (dt((1 / 2) * (log(PS))))) + "
-             "(divsint(dt(multsint(ones))) - dt(ones)))))))))"
+            {"D0005",
+             "dr(log(PH))"
             },
-            {"T6",
-             "(((lap2(QB) - (3 * ((divr(dr(QB)) + divr(divr(divsint(dt(multsint(dt(QB)))) - "
-             "dt(dt(QB)))))))) + (dr(QB) * (dr(log(PH)) - (4 * (dr(log(PS))))))) + "
-             "divr(divr(multr(multr(divr(divr(dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones))))))))) * (dt(log(PH)) - (4 * (dt(log(PS))))))))"
+            {"D0006",
+             "dr(log(PS))"
             },
-            {"T7",
-             "((-1 * (((PS * (1 / (PH))) * ((BR * dr(QB)) + (BT * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones))))))))))) * (-1 * (((PS * (1 / (PH))) * ((BR * ((2 "
-             "* (dr((1 / 2) * (log(PS))))) + divr(ones))) + (BT * ((2 * (dt((1 / 2) * (log(PS))))) "
-             "+ (divsint(dt(multsint(ones))) - dt(ones)))))))))"
+            {"D0007",
+             "(4 * (D0006))"
             },
-            {"T8",
-             "((dr(dr(BR)) + divr(divr(dt(dt(BR) + (-1 * (multr(BT)))) + ((-1 * (-1 * "
-             "(multr(dr(BR))))) + (-1 * (multr(dt(BT) + divr(BR)))))))) + (divr((2 * (dr(BR))) - "
-             "(dr(BR) + (dt(BT) + divr(BR)))) + divr(divr(divsint(dt(multsint(multr(multr(dr(BT) + "
-             "divr(divr(dt(BR) + (-1 * (multr(BT)))))))))) - dt(multr(multr(dr(BT) + "
-             "divr(divr(dt(BR) + (-1 * (multr(BT))))))))))))"
+            {"D0008",
+             "(D0005 - D0007)"
             },
-            {"T9",
-             "((T8 - ((((2 * (dr(BR))) - (dr(BR) + (dt(BT) + divr(BR)))) * ((dr(log(PH)) - (4 * "
-             "(dr(log(PS))))) - (2 * (dr(QF))))) + divr(divr(multr(multr(dr(BT) + divr(divr(dt(BR) "
-             "+ (-1 * (multr(BT))))))) * ((dt(log(PH)) - (4 * (dt(log(PS))))) - (2 * "
-             "(dt(QF)))))))) + divsint(divsint(divsint(divsint(divr(divr(divr(divr(((PH * (-1 * "
-             "(((PS * (1 / (PH))) * ((BR * dr(QB)) + (BT * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones)))))))))))) * dr(QB)) * (1 / ((((((PS * PS) * PS) * "
-             "PS) * PS) * PS) * PS)))))))))))"
+            {"D0009",
+             "dt(log(PH))"
             },
-            {"T10",
-             "((T9 + (3 * (divr((PH * (1 / (PS))) * (-1 * (((PS * (1 / (PH))) * ((BR * ((2 * "
-             "(dr((1 / 2) * (log(PS))))) + divr(ones))) + (BT * ((2 * (dt((1 / 2) * (log(PS))))) + "
-             "(divsint(dt(multsint(ones))) - dt(ones)))))))))))) + ((PH * (1 / (PS))) * dr(-1 * "
-             "(((PS * (1 / (PH))) * ((BR * ((2 * (dr((1 / 2) * (log(PS))))) + divr(ones))) + (BT * "
-             "((2 * (dt((1 / 2) * (log(PS))))) + (divsint(dt(multsint(ones))) - dt(ones))))))))))"
+            {"D0010",
+             "dt(log(PS))"
             },
-            {"T11",
-             "(divr(dr(BT) + divr(divr(dt(BR) + (-1 * (multr(BT)))))) + "
-             "divr(divr(divsint(dt(multsint(multr(multr((2 * (divr(divr(dt(BT) + divr(BR))))) - "
-             "divr(divr(dr(BR) + (dt(BT) + divr(BR))))))))) - dt(multr(multr((2 * "
-             "(divr(divr(dt(BT) + divr(BR))))) - divr(divr(dr(BR) + (dt(BT) + divr(BR))))))))))"
+            {"D0011",
+             "(4 * (D0010))"
             },
-            {"T12",
-             "(((dr(BT) + divr(divr(dt(BR) + (-1 * (multr(BT)))))) * ((dr(log(PH)) - (4 * "
-             "(dr(log(PS))))) - (2 * (dr(QF))))) + divr(divr(multr(multr((2 * (divr(divr(dt(BT) + "
-             "divr(BR))))) - divr(divr(dr(BR) + (dt(BT) + divr(BR)))))) * ((dt(log(PH)) - (4 * "
-             "(dt(log(PS))))) - (2 * (dt(QF)))))))"
+            {"D0012",
+             "(D0009 - D0011)"
             },
-            {"T13",
-             "divsint(divsint(divsint(divsint(divr(divr(divr(divr(((PH * (-1 * (((PS * (1 / (PH))) "
-             "* ((BR * dr(QB)) + (BT * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones)))))))))))) * divr(divr(dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones)))))))) * (1 / ((((((PS * PS) * PS) * PS) * PS) * "
-             "PS) * PS))))))))))"
+            {"D0013",
+             "dr(QF)"
             },
-            {"T14",
-             "(divsint(dt(multsint(divr(divr((PH * (1 / (PS))) * (-1 * (((PS * (1 / (PH))) * ((BR "
-             "* ((2 * (dr((1 / 2) * (log(PS))))) + divr(ones))) + (BT * ((2 * (dt((1 / 2) * "
-             "(log(PS))))) + (divsint(dt(multsint(ones))) - dt(ones))))))))))))) - "
-             "dt(divr(divr((PH * (1 / (PS))) * (-1 * (((PS * (1 / (PH))) * ((BR * ((2 * (dr((1 / "
-             "2) * (log(PS))))) + divr(ones))) + (BT * ((2 * (dt((1 / 2) * (log(PS))))) + "
-             "(divsint(dt(multsint(ones))) - dt(ones))))))))))))"
+            {"D0014",
+             "(2 * (D0013))"
             },
-            {"T15",
-             "(((((((dr(dr(BT)) + divr(dr(BT))) + divr(divr(dt(dt(BT) + divr(BR)) + (divr(dt(BR) + "
-             "(-1 * (multr(BT)))) - (-1 * (multr(dr(BT)))))))) + T11) - T12) + T13) + (3 * (T14))) "
-             "+ (divr(divr(PH * (1 / (PS)))) * dt(-1 * (((PS * (1 / (PH))) * ((BR * ((2 * (dr((1 / "
-             "2) * (log(PS))))) + divr(ones))) + (BT * ((2 * (dt((1 / 2) * (log(PS))))) + "
-             "(divsint(dt(multsint(ones))) - dt(ones))))))))))"
+            {"D0015",
+             "(D0008 - D0014)"
             },
-            {"T16",
-             "((PH * (((-1 * (((PS * (1 / (PH))) * ((BR * dr(QB)) + (BT * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones))))))))))) * (1 / (PS))) * exp(-1 * (QF)))) * (((-1 "
-             "* (((PS * (1 / (PH))) * ((BR * dr(QB)) + (BT * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones))))))))))) * (1 / (PS))) * exp(-1 * (QF))))"
+            {"D0016",
+             "dt(QF)"
             },
-            {"T17",
-             "(((lap(PH) + (divr(dr(PH)) + divr(divr(divsint(dt(multsint(dt(PH)))) - "
-             "dt(dt(PH)))))) - ((PH * ((PS * PS) * exp(2 * (QF)))) * ((T2 + ((3 / 2) * (T5))) - "
-             "((PS * (1 / (PH))) * T3)))) - (T16 * ((1 / 4) * "
-             "(divsint(divsint(divsint(divsint(divr(divr(divr(divr(1 / (((PS * PS) * PS) * "
-             "PS)))))))))))))"
+            {"D0017",
+             "(2 * (D0016))"
             },
-            {"T18",
-             "(((lap2(QF) + (4 * (((dr((1 / 2) * (log(PS))) * dr((1 / 2) * (log(PS)))) + "
-             "divr(divr(dt((1 / 2) * (log(PS))) * dt((1 / 2) * (log(PS))))))))) - (4 * (((dr((1 / "
-             "2) * (log(PS))) * dr(log(PH))) + divr(divr(dt((1 / 2) * (log(PS))) * "
-             "dt(log(PH)))))))) - (2 * ((divr(dr(log(PH))) + "
-             "divr(divr(divsint(dt(multsint(dt(log(PH))))) - dt(dt(log(PH)))))))))"
+            {"D0018",
+             "(D0012 - D0017)"
             },
-            {"T19",
-             "((((-1 * (((PS * (1 / (PH))) * ((BR * dr(QB)) + (BT * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones))))))))))) * (1 / (PS))) * exp(-1 * (QF))) * (((-1 "
-             "* (((PS * (1 / (PH))) * ((BR * dr(QB)) + (BT * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones))))))))))) * (1 / (PS))) * exp(-1 * (QF))))"
+            {"D0019",
+             "dr(QB)"
             },
-            {"T20",
-             "(((5 * (T19)) - (3 * (((dr(QB) * dr(QB)) + divr(divr((dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones)))))) * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones)))))))))))) * ((1 / 4) * "
-             "(divsint(divsint(divsint(divsint(divr(divr(divr(divr(1 / (((PS * PS) * PS) * "
-             "PS))))))))))))"
+            {"D0020",
+             "dt(QB)"
             },
-            {"T21",
-             "(((lap((1 / 2) * (log(PS))) + (((dr((1 / 2) * (log(PS))) * dr(PH)) + divr(divr(dt((1 "
-             "/ 2) * (log(PS))) * dt(PH)))) * (1 / (PH)))) + ((1 / 2) * (((divr(dr(PH)) + "
-             "divr(divr(divsint(dt(multsint(dt(PH)))) - dt(dt(PH))))) * (1 / (PH)))))) + ((1 / 2) "
-             "* ((((PS * PS) * exp(2 * (QF))) * ((PS * (1 / (PH))) * T3)))))"
+            {"D0021",
+             "(6*JJ * (multsint(multsint(multsint(ones)))))"
             },
-            {"T22",
-             "((((-1 * (((PS * (1 / (PH))) * ((BR * dr(QB)) + (BT * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones))))))))))) * (1 / (PS))) * exp(-1 * (QF))) * (((-1 "
-             "* (((PS * (1 / (PH))) * ((BR * dr(QB)) + (BT * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones))))))))))) * (1 / (PS))) * exp(-1 * (QF))))"
+            {"D0022",
+             "(D0020 + D0021)"
             },
-            {"T23",
-             "((((dr(QB) * dr(QB)) + divr(divr((dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones)))))) * (dt(QB) + (6*JJ * "
-             "(multsint(multsint(multsint(ones))))))))) - T22) * ((1 / 4) * "
-             "(divsint(divsint(divsint(divsint(divr(divr(divr(divr(1 / (((PS * PS) * PS) * "
-             "PS))))))))))))"
+            {"D0023",
+             "divr(divr(D0022))"
+            },
+            {"D0024",
+             "(PS * D0003)"
+            },
+            {"D0025",
+             "(BR * D0019)"
+            },
+            {"D0026",
+             "(BT * D0022)"
+            },
+            {"D0027",
+             "(D0025 + D0026)"
+            },
+            {"D0028",
+             "(D0024 * D0027)"
+            },
+            {"D0029",
+             "(-1 * (D0028))"
+            },
+            {"D0030",
+             "(D0029 * D0002)"
+            },
+            {"D0031",
+             "(-1 * (QF))"
+            },
+            {"D0032",
+             "(D0030 * exp(D0031))"
+            },
+            {"D0033",
+             "dr(D0004)"
+            },
+            {"D0034",
+             "dt(D0004)"
+            },
+            {"D0035",
+             "(PS * D0003)"
+            },
+            {"D0036",
+             "(2 * (D0033))"
+            },
+            {"D0037",
+             "divr(ones)"
+            },
+            {"D0038",
+             "(D0036 + D0037)"
+            },
+            {"D0039",
+             "(BR * D0038)"
+            },
+            {"D0040",
+             "(2 * (D0034))"
+            },
+            {"D0041",
+             "(divsint(dt(multsint(ones))) - dt(ones))"
+            },
+            {"D0042",
+             "D0041"
+            },
+            {"D0043",
+             "(D0040 + D0042)"
+            },
+            {"D0044",
+             "(BT * D0043)"
+            },
+            {"D0045",
+             "(D0039 + D0044)"
+            },
+            {"D0046",
+             "(D0035 * D0045)"
+            },
+            {"D0047",
+             "(-1 * (D0046))"
+            },
+            {"D0048",
+             "dr(BR)"
+            },
+            {"D0049",
+             "dr(BT)"
+            },
+            {"D0050",
+             "dt(BR)"
+            },
+            {"D0051",
+             "(-1 * (multr(BT)))"
+            },
+            {"D0052",
+             "(D0050 + D0051)"
+            },
+            {"D0053",
+             "dt(BT)"
+            },
+            {"D0054",
+             "divr(BR)"
+            },
+            {"D0055",
+             "(D0053 + D0054)"
+            },
+            {"D0056",
+             "(D0048 + D0055)"
+            },
+            {"D0057",
+             "(2 * (D0048))"
+            },
+            {"D0058",
+             "(D0057 - D0056)"
+            },
+            {"D0059",
+             "divr(divr(D0055))"
+            },
+            {"D0060",
+             "(2 * (D0059))"
+            },
+            {"D0061",
+             "divr(divr(D0056))"
+            },
+            {"D0062",
+             "(D0060 - D0061)"
+            },
+            {"D0063",
+             "divr(divr(D0052))"
+            },
+            {"D0064",
+             "(D0049 + D0063)"
+            },
+            {"D0065",
+             "(PS * D0003)"
+            },
+            {"D0066",
+             "(D0065 * D0058)"
+            },
+            {"D0067",
+             "(PS * D0003)"
+            },
+            {"D0068",
+             "(D0067 * D0062)"
+            },
+            {"D0069",
+             "(PS * D0003)"
+            },
+            {"D0070",
+             "(D0069 * D0064)"
+            },
+            {"D0071",
+             "((1 / 2) * (D0066))"
+            },
+            {"D0072",
+             "((1 / 2) * (D0068))"
+            },
+            {"D0073",
+             "((1 / 2) * (D0070))"
+            },
+            {"D0074",
+             "(D0071 * D0071)"
+            },
+            {"D0075",
+             "(D0072 * D0072)"
+            },
+            {"D0076",
+             "D0075"
+            },
+            {"D0077",
+             "multr(multr(multr(multr(D0076))))"
+            },
+            {"D0078",
+             "(D0074 + D0077)"
+            },
+            {"D0079",
+             "(D0073 * D0073)"
+            },
+            {"D0080",
+             "(2 * (D0079))"
+            },
+            {"D0081",
+             "multr(multr(D0080))"
+            },
+            {"D0082",
+             "(D0078 + D0081)"
+            },
+            {"D0083",
+             "(PS * D0003)"
+            },
+            {"D0084",
+             "dr(D0047)"
+            },
+            {"D0085",
+             "(BR * D0084)"
+            },
+            {"D0086",
+             "dt(D0047)"
+            },
+            {"D0087",
+             "(BT * D0086)"
+            },
+            {"D0088",
+             "(D0085 + D0087)"
+            },
+            {"D0089",
+             "(D0083 * D0088)"
+            },
+            {"D0090",
+             "(PS * D0003)"
+            },
+            {"D0091",
+             "dr(D0029)"
+            },
+            {"D0092",
+             "(BR * D0091)"
+            },
+            {"D0093",
+             "dt(D0029)"
+            },
+            {"D0094",
+             "(BT * D0093)"
+            },
+            {"D0095",
+             "(D0092 + D0094)"
+            },
+            {"D0096",
+             "(D0090 * D0095)"
+            },
+            {"D0097",
+             "(D0047 * D0047)"
+            },
+            {"D0098",
+             "((3 / 2) * (D0097))"
+            },
+            {"D0099",
+             "(D0082 + D0098)"
+            },
+            {"D0100",
+             "(PS * PS)"
+            },
+            {"D0101",
+             "(D0100 * PS)"
+            },
+            {"D0102",
+             "(D0101 * PS)"
+            },
+            {"D0103",
+             "(1 / (D0102))"
+            },
+            {"D0104",
+             "((1 / 4) * (divsint(divsint(divsint(divsint(divr(divr(divr(divr(D0103))))))))))"
+            },
+            {"D0105",
+             "(PS * PS)"
+            },
+            {"D0106",
+             "(D0105 * exp(D0001))"
+            },
+            {"D0107",
+             "lap2(QB)"
+            },
+            {"D0108",
+             "dr(QB)"
+            },
+            {"D0109",
+             "divr(D0108)"
+            },
+            {"D0110",
+             "dt(QB)"
+            },
+            {"D0111",
+             "(divsint(dt(multsint(D0110))) - dt(D0110))"
+            },
+            {"D0112",
+             "D0111"
+            },
+            {"D0113",
+             "divr(divr(D0112))"
+            },
+            {"D0114",
+             "(D0109 + D0113)"
+            },
+            {"D0115",
+             "(3 * (D0114))"
+            },
+            {"D0116",
+             "(D0107 - D0115)"
+            },
+            {"D0117",
+             "(D0019 * D0008)"
+            },
+            {"D0118",
+             "(D0116 + D0117)"
+            },
+            {"D0119",
+             "multr(multr(D0023))"
+            },
+            {"D0120",
+             "(D0119 * D0012)"
+            },
+            {"D0121",
+             "divr(divr(D0120))"
+            },
+            {"D0122",
+             "(D0118 + D0121)"
+            },
+            {"D0123",
+             "(D0029 * D0047)"
+            },
+            {"D0124",
+             "(4 * (D0123))"
+            },
+            {"D0125",
+             "(D0124 + D0096)"
+            },
+            {"D0126",
+             "(D0106 * D0125)"
+            },
+            {"D0127",
+             "(D0122 + D0126)"
+            },
+            {"D0128",
+             "dr(D0048)"
+            },
+            {"D0129",
+             "dt(D0052)"
+            },
+            {"D0130",
+             "(-1 * (multr(D0048)))"
+            },
+            {"D0131",
+             "(-1 * D0130)"
+            },
+            {"D0132",
+             "(-1 * (multr(D0055)))"
+            },
+            {"D0133",
+             "(D0131 + D0132)"
+            },
+            {"D0134",
+             "(D0129 + D0133)"
+            },
+            {"D0135",
+             "divr(divr(D0134))"
+            },
+            {"D0136",
+             "(D0128 + D0135)"
+            },
+            {"D0137",
+             "dr(D0049)"
+            },
+            {"D0138",
+             "divr(D0049)"
+            },
+            {"D0139",
+             "(D0137 + D0138)"
+            },
+            {"D0140",
+             "dt(D0055)"
+            },
+            {"D0141",
+             "divr(D0052)"
+            },
+            {"D0142",
+             "(-1 * (multr(D0049)))"
+            },
+            {"D0143",
+             "(D0141 - D0142)"
+            },
+            {"D0144",
+             "(D0140 + D0143)"
+            },
+            {"D0145",
+             "divr(divr(D0144))"
+            },
+            {"D0146",
+             "(D0139 + D0145)"
+            },
+            {"D0147",
+             "divr(D0058)"
+            },
+            {"D0148",
+             "multr(multr(D0064))"
+            },
+            {"D0149",
+             "(divsint(dt(multsint(D0148))) - dt(D0148))"
+            },
+            {"D0150",
+             "D0149"
+            },
+            {"D0151",
+             "divr(divr(D0150))"
+            },
+            {"D0152",
+             "(D0147 + D0151)"
+            },
+            {"D0153",
+             "(D0136 + D0152)"
+            },
+            {"D0154",
+             "(D0058 * D0015)"
+            },
+            {"D0155",
+             "multr(multr(D0064))"
+            },
+            {"D0156",
+             "(D0155 * D0018)"
+            },
+            {"D0157",
+             "divr(divr(D0156))"
+            },
+            {"D0158",
+             "(D0154 + D0157)"
+            },
+            {"D0159",
+             "(D0153 - D0158)"
+            },
+            {"D0160",
+             "(PH * D0029)"
+            },
+            {"D0161",
+             "(D0160 * D0019)"
+            },
+            {"D0162",
+             "(PS * PS)"
+            },
+            {"D0163",
+             "(D0162 * PS)"
+            },
+            {"D0164",
+             "(D0163 * PS)"
+            },
+            {"D0165",
+             "(D0164 * PS)"
+            },
+            {"D0166",
+             "(D0165 * PS)"
+            },
+            {"D0167",
+             "(D0166 * PS)"
+            },
+            {"D0168",
+             "(1 / (D0167))"
+            },
+            {"D0169",
+             "(D0161 * D0168)"
+            },
+            {"D0170",
+             "divsint(divsint(divsint(divsint(divr(divr(divr(divr(D0169))))))))"
+            },
+            {"D0171",
+             "(D0159 + D0170)"
+            },
+            {"D0172",
+             "(PH * D0002)"
+            },
+            {"D0173",
+             "(D0172 * D0047)"
+            },
+            {"D0174",
+             "D0173"
+            },
+            {"D0175",
+             "divr(D0174)"
+            },
+            {"D0176",
+             "(3 * (D0175))"
+            },
+            {"D0177",
+             "(D0171 + D0176)"
+            },
+            {"D0178",
+             "D0172"
+            },
+            {"D0179",
+             "dr(D0047)"
+            },
+            {"D0180",
+             "(D0178 * D0179)"
+            },
+            {"D0181",
+             "(D0177 + D0180)"
+            },
+            {"D0182",
+             "(D0172 * D0047)"
+            },
+            {"D0183",
+             "D0182"
+            },
+            {"D0184",
+             "(D0183 * D0033)"
+            },
+            {"D0185",
+             "(6 * (D0184))"
+            },
+            {"D0186",
+             "(D0181 + D0185)"
+            },
+            {"D0187",
+             "divr(D0064)"
+            },
+            {"D0188",
+             "multr(multr(D0062))"
+            },
+            {"D0189",
+             "(divsint(dt(multsint(D0188))) - dt(D0188))"
+            },
+            {"D0190",
+             "D0189"
+            },
+            {"D0191",
+             "divr(divr(D0190))"
+            },
+            {"D0192",
+             "(D0187 + D0191)"
+            },
+            {"D0193",
+             "(D0146 + D0192)"
+            },
+            {"D0194",
+             "(D0064 * D0015)"
+            },
+            {"D0195",
+             "multr(multr(D0062))"
+            },
+            {"D0196",
+             "(D0195 * D0018)"
+            },
+            {"D0197",
+             "divr(divr(D0196))"
+            },
+            {"D0198",
+             "(D0194 + D0197)"
+            },
+            {"D0199",
+             "(D0193 - D0198)"
+            },
+            {"D0200",
+             "(PH * D0029)"
+            },
+            {"D0201",
+             "(D0200 * D0023)"
+            },
+            {"D0202",
+             "(PS * PS)"
+            },
+            {"D0203",
+             "(D0202 * PS)"
+            },
+            {"D0204",
+             "(D0203 * PS)"
+            },
+            {"D0205",
+             "(D0204 * PS)"
+            },
+            {"D0206",
+             "(D0205 * PS)"
+            },
+            {"D0207",
+             "(D0206 * PS)"
+            },
+            {"D0208",
+             "(1 / (D0207))"
+            },
+            {"D0209",
+             "(D0201 * D0208)"
+            },
+            {"D0210",
+             "divsint(divsint(divsint(divsint(divr(divr(divr(divr(D0209))))))))"
+            },
+            {"D0211",
+             "(D0199 + D0210)"
+            },
+            {"D0212",
+             "(PH * D0002)"
+            },
+            {"D0213",
+             "(D0212 * D0047)"
+            },
+            {"D0214",
+             "divr(divr(D0213))"
+            },
+            {"D0215",
+             "(divsint(dt(multsint(D0214))) - dt(D0214))"
+            },
+            {"D0216",
+             "D0215"
+            },
+            {"D0217",
+             "(3 * (D0216))"
+            },
+            {"D0218",
+             "(D0211 + D0217)"
+            },
+            {"D0219",
+             "divr(divr(D0212))"
+            },
+            {"D0220",
+             "dt(D0047)"
+            },
+            {"D0221",
+             "(D0219 * D0220)"
+            },
+            {"D0222",
+             "(D0218 + D0221)"
+            },
+            {"D0223",
+             "(D0212 * D0047)"
+            },
+            {"D0224",
+             "divr(divr(D0223))"
+            },
+            {"D0225",
+             "(D0224 * D0034)"
+            },
+            {"D0226",
+             "(6 * (D0225))"
+            },
+            {"D0227",
+             "(D0222 + D0226)"
+            },
+            {"D0228",
+             "lap(PH)"
+            },
+            {"D0229",
+             "dr(PH)"
+            },
+            {"D0230",
+             "divr(D0229)"
+            },
+            {"D0231",
+             "dt(PH)"
+            },
+            {"D0232",
+             "(divsint(dt(multsint(D0231))) - dt(D0231))"
+            },
+            {"D0233",
+             "D0232"
+            },
+            {"D0234",
+             "divr(divr(D0233))"
+            },
+            {"D0235",
+             "(D0230 + D0234)"
+            },
+            {"D0236",
+             "(D0228 + D0235)"
+            },
+            {"D0237",
+             "(PH * D0106)"
+            },
+            {"D0238",
+             "(D0099 - D0089)"
+            },
+            {"D0239",
+             "(D0237 * D0238)"
+            },
+            {"D0240",
+             "(D0236 - D0239)"
+            },
+            {"D0241",
+             "(PH * D0032)"
+            },
+            {"D0242",
+             "(D0241 * D0032)"
+            },
+            {"D0243",
+             "(D0242 * D0104)"
+            },
+            {"D0244",
+             "(D0240 - D0243)"
+            },
+            {"D0245",
+             "(D0019 * D0019)"
+            },
+            {"D0246",
+             "(D0022 * D0022)"
+            },
+            {"D0247",
+             "divr(divr(D0246))"
+            },
+            {"D0248",
+             "(D0245 + D0247)"
+            },
+            {"D0249",
+             "lap2(QF)"
+            },
+            {"D0250",
+             "(D0033 * D0033)"
+            },
+            {"D0251",
+             "(D0034 * D0034)"
+            },
+            {"D0252",
+             "divr(divr(D0251))"
+            },
+            {"D0253",
+             "(D0250 + D0252)"
+            },
+            {"D0254",
+             "(4 * (D0253))"
+            },
+            {"D0255",
+             "(D0249 + D0254)"
+            },
+            {"D0256",
+             "dr(log(PH))"
+            },
+            {"D0257",
+             "(D0033 * D0256)"
+            },
+            {"D0258",
+             "dt(log(PH))"
+            },
+            {"D0259",
+             "(D0034 * D0258)"
+            },
+            {"D0260",
+             "divr(divr(D0259))"
+            },
+            {"D0261",
+             "(D0257 + D0260)"
+            },
+            {"D0262",
+             "(4 * (D0261))"
+            },
+            {"D0263",
+             "(D0255 - D0262)"
+            },
+            {"D0264",
+             "dr(log(PH))"
+            },
+            {"D0265",
+             "divr(D0264)"
+            },
+            {"D0266",
+             "dt(log(PH))"
+            },
+            {"D0267",
+             "(divsint(dt(multsint(D0266))) - dt(D0266))"
+            },
+            {"D0268",
+             "D0267"
+            },
+            {"D0269",
+             "divr(divr(D0268))"
+            },
+            {"D0270",
+             "(D0265 + D0269)"
+            },
+            {"D0271",
+             "(2 * (D0270))"
+            },
+            {"D0272",
+             "(D0263 - D0271)"
+            },
+            {"D0273",
+             "(4 * (D0089))"
+            },
+            {"D0274",
+             "(D0099 - D0273)"
+            },
+            {"D0275",
+             "(D0106 * D0274)"
+            },
+            {"D0276",
+             "((1 / 2) * (D0275))"
+            },
+            {"D0277",
+             "(D0272 + D0276)"
+            },
+            {"D0278",
+             "(D0032 * D0032)"
+            },
+            {"D0279",
+             "(5 * (D0278))"
+            },
+            {"D0280",
+             "(3 * (D0248))"
+            },
+            {"D0281",
+             "(D0279 - D0280)"
+            },
+            {"D0282",
+             "(D0281 * D0104)"
+            },
+            {"D0283",
+             "(D0277 + D0282)"
+            },
+            {"D0284",
+             "lap(D0004)"
+            },
+            {"D0285",
+             "dr(PH)"
+            },
+            {"D0286",
+             "(D0033 * D0285)"
+            },
+            {"D0287",
+             "dt(PH)"
+            },
+            {"D0288",
+             "(D0034 * D0287)"
+            },
+            {"D0289",
+             "divr(divr(D0288))"
+            },
+            {"D0290",
+             "(D0286 + D0289)"
+            },
+            {"D0291",
+             "(D0290 * D0003)"
+            },
+            {"D0292",
+             "(D0284 + D0291)"
+            },
+            {"D0293",
+             "dr(PH)"
+            },
+            {"D0294",
+             "divr(D0293)"
+            },
+            {"D0295",
+             "dt(PH)"
+            },
+            {"D0296",
+             "(divsint(dt(multsint(D0295))) - dt(D0295))"
+            },
+            {"D0297",
+             "D0296"
+            },
+            {"D0298",
+             "divr(divr(D0297))"
+            },
+            {"D0299",
+             "(D0294 + D0298)"
+            },
+            {"D0300",
+             "(D0299 * D0003)"
+            },
+            {"D0301",
+             "((1 / 2) * (D0300))"
+            },
+            {"D0302",
+             "(D0292 + D0301)"
+            },
+            {"D0303",
+             "(D0106 * D0089)"
+            },
+            {"D0304",
+             "((1 / 2) * (D0303))"
+            },
+            {"D0305",
+             "(D0302 + D0304)"
+            },
+            {"D0306",
+             "(D0032 * D0032)"
+            },
+            {"D0307",
+             "(D0248 - D0306)"
+            },
+            {"D0308",
+             "(D0307 * D0104)"
+            },
+            {"D0309",
+             "(D0305 + D0308)"
             },
         };
         return D;
@@ -194,27 +967,22 @@ namespace Trumpet
     {
         static const std::vector<FiniteJEq> E = {
             {"EQTW",
-             "(T6 + (((PS * PS) * exp(2 * (QF))) * ((4 * (T7)) + T4)))"
+             "D0127"
             },
             {"ESHR",
-             "(T10 + (6 * ((((PH * (1 / (PS))) * (-1 * (((PS * (1 / (PH))) * ((BR * ((2 * (dr((1 / "
-             "2) * (log(PS))))) + divr(ones))) + (BT * ((2 * (dt((1 / 2) * (log(PS))))) + "
-             "(divsint(dt(multsint(ones))) - dt(ones))))))))) * dr((1 / 2) * (log(PS)))))))"
+             "D0186"
             },
             {"ESHT",
-             "(T15 + (6 * ((divr(divr((PH * (1 / (PS))) * (-1 * (((PS * (1 / (PH))) * ((BR * ((2 * "
-             "(dr((1 / 2) * (log(PS))))) + divr(ones))) + (BT * ((2 * (dt((1 / 2) * (log(PS))))) + "
-             "(divsint(dt(multsint(ones))) - dt(ones)))))))))) * dt((1 / 2) * (log(PS)))))))"
+             "D0227"
             },
             {"EPHI",
-             "T17"
+             "D0244"
             },
             {"EQFN",
-             "((T18 + ((1 / 2) * ((((PS * PS) * exp(2 * (QF))) * ((T2 + ((3 / 2) * (T5))) - (4 * "
-             "(((PS * (1 / (PH))) * T3)))))))) + T20)"
+             "D0283"
             },
             {"ESIG",
-             "(T21 + T23)"
+             "D0309"
             },
         };
         return E;

@@ -247,6 +247,46 @@ int main(int argc, char** argv)
             // same shape as L0ModelT's 39 coefficient fields.
             {"S8 = dt(PS)", "dt of a theta-independent add_cst field = 0"},
             {"S9 = dt(dt(PS))", "ddt of the same = 0"},
+            // ---- T8 bisection: with BT = 0 and BR theta-independent, only
+            // these survive.  Each is compared with sympy at the probe point.
+            {"P1 = dr(dr(BR))",                   "P1"},
+            {"P2 = divr(divr(multr(dr(BR))))",    "P2 = dr(BR)/r"},
+            {"P3 = divr(divr(multr(divr(BR))))",  "P3 = BR/r^2"},
+            {"P4 = divr(dr(BR))",                 "P4 = dr(BR)/r"},
+            {"P5 = divr(divr(BR))",               "P5 = BR/r^2"},
+            {"P6 = multr(divr(BR)) - BR",         "P6 = 0"},
+            {"P7 = divr(multr(BR)) - BR",         "P7 = 0"},
+            // the T8 terms that MUST vanish on this seed (BT = 0, BR theta-indep)
+            {"Q1 = dt(dt(BR) + (-1 * (multr(BT))))",   "Q1 = 0"},
+            {"Q2 = multr(dt(BT) + divr(BR)) - BR",     "Q2 = 0"},
+            {"Q3 = dr(BT) + divr(divr(dt(BR) + (-1 * (multr(BT)))))", "Q3 = Lrt = 0"},
+            {"Q4 = divsint(BT)",                       "Q4 = divsint of a zero field"},
+            {"Q5 = divsint(dt(multsint(BT))) - dt(BT)", "Q5 = cot(BT) = 0"},
+            {"Q6 = dt(BR)",                            "Q6 = 0"},
+            {"Q7 = multr(BT)",                         "Q7 = 0"},
+            // A1's inner terms, one at a time
+            {"Z1 = (-1 * (-1 * (multr(dr(BR))))) - multr(dr(BR))", "Z1 = 0?"},
+            {"Z2 = multr(dr(BR))",                     "Z2 = r dr(BR)"},
+            {"Z3 = multr(dt(BT) + divr(BR))",          "Z3 = BR"},
+            {"Z4 = dt(dt(BR) + (-1 * (multr(BT)))) + ((-1 * (-1 * (multr(dr(BR))))) + (-1 * (multr(dt(BT) + divr(BR)))))", "Z4 = A1 inner"},
+            {"Z6 = (-1 * (-1 * (multr(dr(BR))))) + (-1 * (multr(dt(BT) + divr(BR))))", "Z6 = Z2 - Z3"},
+            {"Z7 = dt(BR) + BR - BR",   "Z7 = dt(BR) = 0, added to a COS_EVEN field"},
+            {"Z8 = dt(BR) + multr(dr(BR)) - multr(dr(BR))", "Z8 = 0, mixing dt into a sum"},
+            {"Z9 = dt(PS) + PS - PS",   "Z9 = 0, same with a nonzero smooth field"},
+            {"Y1 = (-1 * (multr(dt(BT) + divr(BR)))) + multr(dt(BT) + divr(BR))", "Y1: -1*(op(a+b))"},
+            {"Y2 = (0 - (multr(dt(BT) + divr(BR)))) + multr(dt(BT) + divr(BR))", "Y2: 0-(op(a+b))"},
+            {"Y3 = ((-1) * (multr(dt(BT) + divr(BR)))) + multr(dt(BT) + divr(BR))", "Y3: (-1)*(op(a+b))"},
+            {"Y4 = (-1 * (multr(divr(BR)))) + multr(divr(BR))", "Y4: -1*(op(simple))"},
+            {"Y5 = (-1 * (dt(BT) + divr(BR))) + (dt(BT) + divr(BR))", "Y5: -1*(a+b) no op"},
+            {"Z10 = Z2 - Z3",  "Z10: the SAME sum via NAMED sub-defs"},
+            // ⚠ log inside an expression: each operand right, difference wrong
+            {"L1 = dr(log(PS)) - dr(log(PS))",   "L1 = 0?"},
+            {"L2 = log(PS) - log(PS)",           "L2 = 0?"},
+            {"L3 = dr(log(PH)) - dr(log(PH))",   "L3 = 0?"},
+            {"L4 = dr(log(PH)) - 4 * dr(log(PS))", "L4 = the T8 combination inline"},
+            {"L5 = log(PS) * PS - log(PS) * PS", "L5 = 0?"},
+            {"Z11 = (-1 * (-1 * (multr(dr(BR))))) + (-1 * Z3)", "Z11: one named"},
+            {"Z5 = divr(divr(dt(dt(BR) + (-1 * (multr(BT)))) + ((-1 * (-1 * (multr(dr(BR))))) + (-1 * (multr(dt(BT) + divr(BR)))))))", "Z5 = A1 second term"},
             // ---- which EXPRESSION SHAPES does the parser accept? ----
         };
         for (const auto& x : sm) {
@@ -304,21 +344,6 @@ int main(int argc, char** argv)
         }
     }
     emit("FJP_subdefs", static_cast<double>(Trumpet::finiteJ_subdefs().size()));
-    // localise the failure: which sub-def first goes large on a seed where the
-    // scalar sector already evaluates to 1e-8
-    std::cout << "#   sub-def magnitudes on the seed:\n#   ";
-    for (const auto& d : Trumpet::finiteJ_subdefs()) {
-        double mx = 0.0;
-        for (int dd = 0; dd <= dtop; dd++) {
-            const Val_domain& v = syst.give_val_def_scalar_domain(d.name, dd);
-            Index ix(space.get_domain(dd)->get_nbr_points());
-            do { const double x = v(ix);
-                 mx = std::max(mx, std::isfinite(x) ? std::fabs(x) : 1e300);
-            } while (ix.inc());
-        }
-        std::cout << d.name << "=" << std::setprecision(2) << mx << "  ";
-    }
-    std::cout << std::endl;
     for (const auto& e : Trumpet::finiteJ_eqs()) {
         const std::string s = std::string(e.name) + " = " + e.def;
         try {
@@ -333,6 +358,35 @@ int main(int argc, char** argv)
     }
     if (rank == 0)
         std::cout << "# all six defs registered\n";
+
+    // ---- SUB-DEF LOCALISATION (research round 301 item 1) -----------------
+    // Equation-level residuals are the wrong granularity.  Every sub-def is
+    // reported AT ONE POINT so the same quantity can be evaluated through sympy
+    // on the same seed and the FIRST disagreement found.
+    {
+        const int dP = (dtop >= 1) ? 1 : 0, iP = 3, jP = 2;
+        const Kadath::Domain* dm = space.get_domain(dP);
+        Index ix(dm->get_nbr_points());
+        for (int k = 0; k < iP + jP * dm->get_nbr_points()(0); k++) ix.inc();
+        emit("FJP_pt_dom", dP);
+        emit("FJP_pt_r", t.pts[dP][iP].r);
+        emit("FJP_pt_R", t.pts[dP][iP].Rr * t.pts[dP][iP].r);
+        emit("FJP_pt_W", t.pts[dP][iP].W);
+        emit("FJP_pt_th", dm->get_coloc(2)(jP));
+        for (const char* nm : {"P1", "P2", "P3", "P4", "P5", "P6", "P7",
+                               "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7",
+                               "Z1", "Z2", "Z3", "Z4", "Z5", "Z6", "Z7",
+                               "Z8", "Z9", "Y1", "Y2", "Y3", "Y4", "Y5",
+                               "Z10", "Z11", "L1", "L2", "L3", "L4", "L5"})
+            emit(std::string("FJP_val_") + nm,
+                 syst.give_val_def_scalar_domain(nm, dP)(ix));
+        for (const auto& d : Trumpet::finiteJ_subdefs())
+            emit(std::string("FJP_val_") + d.name,
+                 syst.give_val_def_scalar_domain(d.name, dP)(ix));
+        for (const auto& e : Trumpet::finiteJ_eqs())
+            emit(std::string("FJP_val_") + e.name,
+                 syst.give_val_def_scalar_domain(e.name, dP)(ix));
+    }
 
     // ⚠ Split AXIS from INTERIOR.  The cot(theta) construction is only valid
     // on an operand that vanishes on the axis; if the failures sit at

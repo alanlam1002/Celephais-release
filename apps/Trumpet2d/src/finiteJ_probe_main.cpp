@@ -112,7 +112,8 @@ int main(int argc, char** argv)
     const double C = 3.0 * std::sqrt(3.0) * M * M / 4.0;
 
     Scalar PS(space), PH(space), QF(space), BR(space), BT(space), QB(space);
-    Scalar RR(space), ST(space), CT(space), C2(space);
+    Scalar RR(space), ST(space), CT(space), C2(space), H2(space), L2(space),
+           CX(space), SQ(space), T7(space), ONE(space);
     // Every domain must be allocated even though the system covers only the
     // shells: a Scalar with an unallocated domain segfaults inside add_cst.
     for (int d = 0; d < ndom; d++) {
@@ -127,14 +128,20 @@ int main(int argc, char** argv)
         Val_domain& vst = ST.set_domain(d);
         Val_domain& vct = CT.set_domain(d);
         Val_domain& vc2 = C2.set_domain(d);
-        for (Val_domain* v : {&vps, &vph, &vqf, &vbr, &vbt, &vqb, &vrr, &vst, &vct, &vc2})
+        Val_domain& vh2 = H2.set_domain(d);
+        Val_domain& vl2 = L2.set_domain(d);
+        Val_domain& vcx = CX.set_domain(d);
+        Val_domain& vsq = SQ.set_domain(d);
+        Val_domain& vt7 = T7.set_domain(d);
+        Val_domain& von = ONE.set_domain(d);
+        for (Val_domain* v : {&vps, &vph, &vqf, &vbr, &vbt, &vqb, &vrr, &vst, &vct, &vc2, &vh2, &vl2, &vcx, &vsq, &vt7, &von})
             v->allocate_conf();
         Index idx(dm->get_nbr_points());
         do {
             const int i = idx(0);
             if (d > dtop) {                      // the compact domain: r = infinity
                 for (Val_domain* v : {&vps, &vph, &vqf, &vbr, &vbt, &vqb,
-                                      &vrr, &vst, &vct, &vc2})
+                                      &vrr, &vst, &vct, &vc2, &vh2, &vl2, &vcx, &vsq, &vt7, &von})
                     v->set(idx) = 0.0;
                 continue;
             }
@@ -153,6 +160,19 @@ int main(int argc, char** argv)
             vst.set(idx) = std::sin(th);
             vct.set(idx) = std::cos(th);
             vc2.set(idx) = std::cos(2.0 * th);
+            // lap2(r^2 cos2th) = (n^2 - m^2) r^{n-2} cos = 0 exactly
+            vh2.set(idx) = rr * rr * std::cos(2.0 * th);
+            // lap(r^2 P_2(cos th)) = 0 exactly;  P_2 = (1 + 3cos2th)/4
+            vl2.set(idx) = rr * rr * (1.0 + 3.0 * std::cos(2.0 * th)) / 4.0;
+            // the TARGET of the cot-theta construction, built pointwise purely
+            // as a comparison value -- it is never differentiated
+            vcx.set(idx) = (std::sin(th) == 0.0) ? 0.0
+                           : (std::cos(th) / std::sin(th)) * std::cos(2.0 * th);
+            // A field that VANISHES on the axis, so cot(theta)*X is finite
+            // there: X = sin^2 = (1 - cos2th)/2, and cot*X = sin(2th)/2.
+            vsq.set(idx) = (1.0 - std::cos(2.0 * th)) / 2.0;
+            vt7.set(idx) = std::sin(2.0 * th) / 2.0;
+            von.set(idx) = 1.0;
         } while (idx.inc());
     }
     // the control: a perturbation of the seed must NOT annihilate the equations
@@ -160,7 +180,7 @@ int main(int argc, char** argv)
         for (int d = 0; d <= dtop; d++)
             PH.set_domain(d) = PH(d) * (1.0 + perturb);
     }
-    for (Scalar* s : {&PS, &PH, &QF, &BR, &BT, &QB, &RR, &ST, &CT, &C2})
+    for (Scalar* s : {&PS, &PH, &QF, &BR, &BT, &QB, &RR, &ST, &CT, &C2, &H2, &L2, &CX, &SQ, &T7, &ONE})
         s->std_base();
 
     // is the seed the one that was verified?  R(throat) must be 3M/2.
@@ -185,6 +205,14 @@ int main(int argc, char** argv)
     syst.add_cst("ST", ST);
     syst.add_cst("CT", CT);
     syst.add_cst("C2", C2);
+    syst.add_cst("H2", H2);
+    syst.add_cst("L2", L2);
+    syst.add_cst("CX", CX);
+    syst.add_cst("SQ", SQ);
+    syst.add_cst("T7", T7);
+    // `ones` is a field the apps register themselves (BH2d/NS2d do the same);
+    // the emitted monomials materialise against it.
+    syst.add_cst("ones", ONE);
     syst.add_cst("JJ", 0.0);
     std::cout << "# csts registered" << std::endl;
 
@@ -201,6 +229,25 @@ int main(int argc, char** argv)
             {"S5 = dt(dt(CT)) + CT", "ddt(cos) + cos = 0"},
             {"S6 = dt(dt(C2)) + 4 * C2", "ddt(cos2th) + 4cos2th = 0  <- IS representable"},
             {"S7 = dt(C2)", "dt(cos2th) = -2 sin2th, max |.| = 2"},
+            // ---- THE VOCABULARY BATTERY: which constructs are usable? ----
+            {"V1 = divsint(multsint(C2)) - C2", "divsint . multsint = id"},
+            {"V2 = divr(multr(C2)) - C2",       "divr . multr = id"},
+            {"V3 = lap2(H2)",                   "lap2(r^2 cos2th) = 0 EXACT"},
+            {"V4 = lap(L2)",                    "lap(r^2 P_2) = 0 EXACT"},
+            {"V5 = multr(divr(C2)) - C2",       "multr . divr = id"},
+            {"V6 = lap2(C2) * (RR)^2 + 4 * C2", "lap2(cos2th) = -4cos2th/r^2"},
+            // ---- cot(theta) WITHOUT a cos(theta) field.  There is no
+            // Ope_mult_cost, but d_th(sin X) = cos X + sin d_th X gives
+            //     cot(theta) X = divsint(dt(multsint(X))) - dt(X)
+            // in operators that have just been verified individually.
+            {"V7 = divsint(dt(multsint(SQ))) - dt(SQ) - T7", "cot(th)*sin^2 = sin2th/2, built"},
+            {"V8 = divrsint(multrsint(C2)) - C2", "divrsint . multrsint = id"},
+            // ---- research round 297 ruling (3): measure the add_cst exposure
+            // rather than argue it.  PS is theta-INDEPENDENT in the seed, the
+            // same shape as L0ModelT's 39 coefficient fields.
+            {"S8 = dt(PS)", "dt of a theta-independent add_cst field = 0"},
+            {"S9 = dt(dt(PS))", "ddt of the same = 0"},
+            // ---- which EXPRESSION SHAPES does the parser accept? ----
         };
         for (const auto& x : sm) {
             try {
@@ -241,16 +288,38 @@ int main(int argc, char** argv)
         }
     }
 
-    if (!monolithic) {
-        std::cout << "# the six monolithic defs are 1234..3613 chars and are NOT\n"
-                     "# attempted: the parser dies above ~1.0k.  --try-monolithic\n"
-                     "# reproduces the crash.\n";
-        emit("FJP_monolithic_attempted", 0);
-        MPI_Finalize();
-        return 0;
+    (void)monolithic;
+    // ---- THE ACCEPTANCE TEST.  The sub-defs first, in dependency order, then
+    // the six equations.  The J = 0 seed must drive every one to zero.
+    for (const auto& d : Trumpet::finiteJ_subdefs()) {
+        const std::string s = std::string(d.name) + " = " + d.def;
+        try {
+            syst.add_def(s.c_str());
+        } catch (const std::exception& ex) {
+            if (rank == 0)
+                std::cerr << "FATAL: sub-def " << d.name << " threw: "
+                          << ex.what() << "\n";
+            MPI_Finalize();
+            return 3;
+        }
     }
+    emit("FJP_subdefs", static_cast<double>(Trumpet::finiteJ_subdefs().size()));
+    // localise the failure: which sub-def first goes large on a seed where the
+    // scalar sector already evaluates to 1e-8
+    std::cout << "#   sub-def magnitudes on the seed:\n#   ";
+    for (const auto& d : Trumpet::finiteJ_subdefs()) {
+        double mx = 0.0;
+        for (int dd = 0; dd <= dtop; dd++) {
+            const Val_domain& v = syst.give_val_def_scalar_domain(d.name, dd);
+            Index ix(space.get_domain(dd)->get_nbr_points());
+            do { const double x = v(ix);
+                 mx = std::max(mx, std::isfinite(x) ? std::fabs(x) : 1e300);
+            } while (ix.inc());
+        }
+        std::cout << d.name << "=" << std::setprecision(2) << mx << "  ";
+    }
+    std::cout << std::endl;
     for (const auto& e : Trumpet::finiteJ_eqs()) {
-        std::cout << "# add_def " << e.name << std::endl;
         const std::string s = std::string(e.name) + " = " + e.def;
         try {
             syst.add_def(s.c_str());
@@ -265,23 +334,33 @@ int main(int argc, char** argv)
     if (rank == 0)
         std::cout << "# all six defs registered\n";
 
-    double worst = 0.0;
+    // ⚠ Split AXIS from INTERIOR.  The cot(theta) construction is only valid
+    // on an operand that vanishes on the axis; if the failures sit at
+    // idx(1) == 0 that is the cause, and if they are spread it is not.
+    double worst = 0.0, worst_int = 0.0;
+    std::cout << "#   equation      max|E| axis     max|E| interior\n";
     for (const auto& e : Trumpet::finiteJ_eqs()) {
-        double mx = 0.0;
+        double mx = 0.0, mxi = 0.0;
         for (int d = 0; d <= dtop; d++) {
             const Val_domain& v = syst.give_val_def_scalar_domain(e.name, d);
+            const int nth = space.get_domain(d)->get_nbr_points()(1);
             Index idx(space.get_domain(d)->get_nbr_points());
             do {
                 const double x = v(idx);
-                if (std::isfinite(x))
-                    mx = std::max(mx, std::fabs(x));
-                else
-                    mx = 1e300;
+                const double a = std::isfinite(x) ? std::fabs(x) : 1e300;
+                mx = std::max(mx, a);
+                if (idx(1) != 0 && idx(1) != nth - 1)
+                    mxi = std::max(mxi, a);
             } while (idx.inc());
         }
+        std::cout << "#   " << std::left << std::setw(13) << e.name
+                  << std::setprecision(4) << std::setw(16) << mx << mxi << "\n";
         emit(std::string("FJP_") + e.name, mx);
+        emit(std::string("FJP_int_") + e.name, mxi);
         worst = std::max(worst, mx);
+        worst_int = std::max(worst_int, mxi);
     }
+    emit("FJP_worst_interior", worst_int);
     emit("FJP_worst", worst);
 
     MPI_Finalize();

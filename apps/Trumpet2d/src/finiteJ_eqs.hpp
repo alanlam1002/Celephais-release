@@ -30,6 +30,24 @@
  * prose gets transcribed wrongly; this one is in the only function that can
  * reach the text.
  *
+ * ⚠ WRITTEN UNDER --order-sums, WHICH IS SEED-SPECIFIC.  Kadath tags a
+ * sum with its FIRST operand's theta basis, unchecked, so a mixed sum
+ * whose first operand is SIN_EVEN is tagged SIN_EVEN and every
+ * coefficient-space operation taken of it afterwards is wrong.  These
+ * sums were reordered to put the COS_EVEN operand first:
+ *
+ *     D0022    LEFT: neither operand is COS_EVEN      SIN_EVEN / SIN_ODD
+ *     D0052    swapped                                SIN_EVEN / COS_EVEN
+ *     D0055    swapped                                SIN_EVEN / COS_EVEN
+ *     D0134    swapped                                SIN_EVEN / COS_EVEN
+ *     D0144    swapped                                SIN_EVEN / COS_EVEN
+ *
+ * That is right ONLY on the J = 0 seed, where every field is
+ * theta-independent or identically zero so COS_EVEN is the true tag.
+ * The general fix is to REGISTER the six unknowns in bases that leave no
+ * mixed sum at all -- scripts/finiteJ_emit.py basis_solve() reports which
+ * assignments do -- and then there is nothing to order.
+ *
  * ⚠ WRITTEN UNDER --allow-axis-violations.  20 divsint application(s)
  * in 11 def(s) are applied to an operand the emitter could NOT show
  * vanishes on the axis, which is the precondition divsint and the cot
@@ -243,7 +261,7 @@ namespace Trumpet
                  "(-1 * (multr(BT)))"
                 },
                 {"D0052",
-                 "(D0050 + D0051)"
+                 "(D0051 + D0050)"
                 },
                 {"D0053",
                  "dt(BT)"
@@ -252,7 +270,7 @@ namespace Trumpet
                  "divr(BR)"
                 },
                 {"D0055",
-                 "(D0053 + D0054)"
+                 "(D0054 + D0053)"
                 },
                 {"D0056",
                  "(D0048 + D0055)"
@@ -489,7 +507,7 @@ namespace Trumpet
                  "(D0131 + D0132)"
                 },
                 {"D0134",
-                 "(D0129 + D0133)"
+                 "(D0133 + D0129)"
                 },
                 {"D0135",
                  "divr(divr(D0134))"
@@ -519,7 +537,7 @@ namespace Trumpet
                  "(D0141 - D0142)"
                 },
                 {"D0144",
-                 "(D0140 + D0143)"
+                 "(D0143 + D0140)"
                 },
                 {"D0145",
                  "divr(divr(D0144))"
@@ -1079,10 +1097,10 @@ namespace Trumpet
                  "(D0039 + D0044)"
                 },
                 {"CK0052", "D0052", "D0050 D0051",
-                 "(D0050 + D0051)"
+                 "(D0051 + D0050)"
                 },
                 {"CK0055", "D0055", "D0053 D0054",
-                 "(D0053 + D0054)"
+                 "(D0054 + D0053)"
                 },
                 {"CK0056", "D0056", "D0048 D0055",
                  "(D0048 + D0055)"
@@ -1136,7 +1154,7 @@ namespace Trumpet
                  "(D0131 + D0132)"
                 },
                 {"CK0134", "D0134", "D0129 D0133",
-                 "(D0129 + D0133)"
+                 "(D0133 + D0129)"
                 },
                 {"CK0136", "D0136", "D0128 D0135",
                  "(D0128 + D0135)"
@@ -1148,7 +1166,7 @@ namespace Trumpet
                  "(D0141 - D0142)"
                 },
                 {"CK0144", "D0144", "D0140 D0143",
-                 "(D0140 + D0143)"
+                 "(D0143 + D0140)"
                 },
                 {"CK0146", "D0146", "D0139 D0145",
                  "(D0139 + D0145)"
@@ -1328,6 +1346,20 @@ namespace Trumpet
             return v;
         }();
         return N;
+    }
+
+    /// Sums reordered by --order-sums, which is seed-specific: see the
+    /// header comment.  Empty means the emission was written without it.
+    inline const std::vector<const char*>& finiteJ_ordered_sums()
+    {
+        static const std::vector<const char*> O = {
+            "D0022: LEFT: neither operand is COS_EVEN (SIN_EVEN / SIN_ODD)",
+            "D0052: swapped (SIN_EVEN / COS_EVEN)",
+            "D0055: swapped (SIN_EVEN / COS_EVEN)",
+            "D0134: swapped (SIN_EVEN / COS_EVEN)",
+            "D0144: swapped (SIN_EVEN / COS_EVEN)",
+        };
+        return O;
     }
 
     /// Emission-time AXIS PRECONDITION violations carried into the

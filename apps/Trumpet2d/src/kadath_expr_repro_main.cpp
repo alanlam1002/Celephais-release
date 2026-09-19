@@ -451,6 +451,112 @@ int main(int argc, char** argv)
             }
         }
 
+        // ⚠ THE OPERATOR x BASIS TABLE, measured before anything is built on it.
+        // The emitter needs to know each node's theta basis in order to order a
+        // sum, and a table of what each operator does to a basis is the input to
+        // that.  Reading it off get_base() costs one run; assuming it is how the
+        // last three rounds each went wrong.  CE (COS_EVEN) and dt(CE)
+        // (SIN_EVEN) are the two sources.
+        {
+            auto bname = [](int b) {
+                switch (b) {
+                    case COS_EVEN: return "COS_EVEN";
+                    case COS_ODD: return "COS_ODD";
+                    case SIN_EVEN: return "SIN_EVEN";
+                    case SIN_ODD: return "SIN_ODD";
+                    case COSSIN_EVEN: return "COSSIN_EVEN";
+                    case COSSIN_ODD: return "COSSIN_ODD";
+                    case COS: return "COS";
+                    case SIN: return "SIN";
+                    case COSSIN: return "COSSIN";
+                    default: return "other";
+                }
+            };
+            auto tbase = [&](const std::string& nm) {
+                const Val_domain& v =
+                    syst.give_val_def_scalar_domain(nm.c_str(), dom);
+                Index iq(space.get_domain(dom)->get_nbr_points());
+                (void)v(iq);
+                const Array<int>* b1 = v.get_base().get_base_1d(1);
+                return std::string(b1 ? bname((*b1)(0)) : "none");
+            };
+            reg("SRCE = F");                      // COS_EVEN
+            reg("SRCO = dt(G)");                  // SIN_EVEN
+            reg("SRCP = multsint(F)");            // SIN_ODD
+            reg("SRCQ = dt(multsint(F))");        // COS_ODD, if the table holds
+            std::cout << "\n  operator x basis, measured\n";
+            std::cout << "    " << std::left << std::setw(14) << "operator"
+                      << std::setw(14) << "on " + tbase("SRCE")
+                      << std::setw(14) << "on " + tbase("SRCO")
+                      << std::setw(14) << "on " + tbase("SRCP")
+                      << std::setw(14) << "on " + tbase("SRCQ") << "\n";
+            int t = 0;
+            for (const char* op : {"dr", "dt", "ddr", "multr", "divr", "multsint",
+                                   "divsint", "multrsint", "divrsint", "lap",
+                                   "lap2"}) {
+                const std::string n = "BT" + std::to_string(t++);
+                reg(n + "e = " + op + "(SRCE)");
+                reg(n + "o = " + op + "(SRCO)");
+                reg(n + "p = " + op + "(SRCP)");
+                reg(n + "q = " + op + "(SRCQ)");
+                std::cout << "    " << std::left << std::setw(14) << op
+                          << std::setw(14) << tbase(n + "e")
+                          << std::setw(14) << tbase(n + "o")
+                          << std::setw(14) << tbase(n + "p")
+                          << std::setw(14) << tbase(n + "q") << "\n";
+            }
+            // the scalar functions, which the emitter only ever applies to a
+            // COS_EVEN operand, and the products
+            for (const char* op : {"exp", "log", "sqrt"}) {
+                const std::string n = "BU" + std::to_string(t++);
+                reg(n + "e = " + op + "(SRCE)");
+                std::cout << "    " << std::left << std::setw(14) << op
+                          << std::setw(14) << tbase(n + "e") << "\n";
+            }
+            // ⚠ which std_base_* gives which theta basis, measured.  The
+            // lattice says the emission is homogeneous only for particular
+            // declarations; this says which call produces each of them.
+            {
+                Scalar P(space);
+                struct Nb { const char* what; void (Scalar::*fn)(); };
+                const std::vector<Nb> nb = {
+                    {"std_base", &Scalar::std_base},
+                    {"std_anti_base", &Scalar::std_anti_base},
+                    // std_base_*_spher throw "Cheb base r not implemented"
+                    // on the polar nucleus, so COS_EVEN and COS_ODD are the
+                    // only theta bases a std_base_* call reaches here.
+                };
+                std::cout << "\n  std_base_* -> theta basis, measured\n";
+                for (const auto& x : nb) {
+                    P = F;
+                    (P.*(x.fn))();
+                    const Array<int>* b1 =
+                        P(dom).get_base().get_base_1d(1);
+                    std::cout << "    " << std::left << std::setw(20) << x.what
+                              << (b1 ? bname((*b1)(0)) : "none") << "\n";
+                }
+            }
+            reg("BP1 = SRCE * SRCE");
+            reg("BP2 = SRCE * SRCO");
+            reg("BP3 = SRCO * SRCE");
+            reg("BP4 = SRCO * SRCO");
+            reg("BP5 = 1 / (SRCE)");
+            reg("BP6 = 3 * SRCO");
+            reg("BP7 = SRCE * SRCP");
+            reg("BP8 = SRCO * SRCP");
+            reg("BP9 = SRCP * SRCP");
+            reg("BQ1 = SRCP * SRCQ");
+            reg("BQ2 = SRCQ * SRCQ");
+            reg("BQ3 = SRCE * SRCQ");
+            for (const auto& pr : std::vector<std::pair<const char*, const char*>>{
+                     {"E * E", "BP1"}, {"E * O", "BP2"}, {"O * E", "BP3"},
+                     {"O * O", "BP4"}, {"1 / E", "BP5"}, {"3 * O", "BP6"},
+                     {"E * P", "BP7"}, {"O * P", "BP8"}, {"P * P", "BP9"},
+                     {"P * Q", "BQ1"}, {"Q * Q", "BQ2"}, {"E * Q", "BQ3"}})
+                std::cout << "    " << std::left << std::setw(14) << pr.first
+                          << std::setw(14) << tbase(pr.second) << "\n";
+        }
+
         // and the same expression written INLINE, which has no name to be in a
         // state at all
         reg("WI1 = dt(dt(G) + divr(F))");

@@ -388,6 +388,21 @@ int main(int argc, char** argv)
                                    : std::min<int>(maxdefs, int(SUB.size()));
     emit("FJP_axis_violations",
          static_cast<double>(Trumpet::finiteJ_axis_violations().size()));
+    // ⚠ the list holds every mixed sum the ordering pass CONSIDERED, and says
+    // of each whether it was swapped or left; counting the list as "reordered"
+    // would claim more than it shows.
+    {
+        int nswap = 0;
+        for (const char* o : Trumpet::finiteJ_ordered_sums()) {
+            if (std::string(o).find("swapped") != std::string::npos)
+                nswap++;
+            if (rank == 0)
+                std::cout << "#   sum ordering (seed-specific): " << o << "\n";
+        }
+        emit("FJP_ordered_sums_considered",
+             static_cast<double>(Trumpet::finiteJ_ordered_sums().size()));
+        emit("FJP_ordered_sums_swapped", static_cast<double>(nswap));
+    }
     if (rank == 0)
         for (const char* v : Trumpet::finiteJ_axis_violations())
             std::cout << "#   axis violation carried by the emission: " << v

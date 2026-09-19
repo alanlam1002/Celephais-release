@@ -96,6 +96,49 @@ This also means the report above under-states the scope: the rows marked AGREE
 were all measured in the read-first state, so they establish agreement in that
 state only.
 
+## Third finding: a sum takes its FIRST operand's angular basis, unchecked
+
+A separate symptom, reproduced in the same file. With `G` a `COS_EVEN` scalar,
+`dt(G)` is `SIN_EVEN` while `divr(F)` and `F` stay `COS_EVEN`. Summing across
+that boundary gives correct configuration-space **values** and a wrong recorded
+**basis**, so the next coefficient-space operation is wrong:
+
+```
+  expression                      truth (analytic)   Kadath
+  dt( dt(G) + divr(F) )              -1.91126983722   -1.59561077145   DIFFERS
+  dt( divr(F) + dt(G) )   swapped    -1.91126983722   -1.54036723481   DIFFERS
+  dt( dt(G) + dt(G) )                -2.97401153702   -2.97401153702
+  dt( divr(F) + divr(F) )            -0.84852813742   -0.84852813742
+  dt( dr(G) + divr(F) )              -1.72132034356   -1.72132034356
+  the inner sum's own values          1.78637329301    1.78637329301
+```
+
+The two spellings of the first row are wrong by *different* amounts, and reading
+the basis off `Val_domain::get_base()` says why:
+
+```
+  dt(G)                     SIN_EVEN        dt(G) + divr(F)     SIN_EVEN
+  divr(F)                   COS_EVEN        divr(F) + dt(G)     COS_EVEN
+  dr(G)                     COS_EVEN        dr(G) + divr(F)     COS_EVEN
+```
+
+**The sum records the first operand's basis with no check that the two agree.**
+Every row above that disagrees is a sum across two different bases; every row
+that agrees is a like-with-like sum. A degenerate case makes the point: with `Z`
+identically zero, `dt(Z) + divr(RO)` is tagged `SIN_EVEN` and its `dt` reads
+-1.33 instead of 0, while `divr(RO) + dt(Z)` is tagged `COS_EVEN` and reads 0 —
+the same expression, right or wrong according to which summand came first.
+
+This symptom is independent of the read state above: every row is identical
+whether the operands were read before the outer `dt` was parsed or not.
+
+The operands of the amendment's failing pair are also a mixed-basis sum
+(`-1 * (-1 * (multr(dr(F))))` is `COS_EVEN`, `-1 * (multr(dt(G) + divr(F)))` is
+`SIN_EVEN`), so the two findings occur under the same structural condition. We
+are not claiming they are one mechanism: a mixed-basis sum is not sufficient for
+the read-state symptom — `dt(G) + divr(F)` is mixed and shows none of it — and
+we have not looked at the code.
+
 ## What we do not claim
 
 We have not identified the mechanism and have not looked in the parser or in

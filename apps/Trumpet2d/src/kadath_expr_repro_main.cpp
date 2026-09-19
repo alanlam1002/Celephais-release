@@ -19,12 +19,14 @@
 #include <mpi.h>
 
 #include "For_Kadath/Array/headcpp.hpp"
+#include "For_Kadath/Base_spectral/base_spectral.hpp"
 #include "For_Kadath/Domain/polar.hpp"
 #include "For_Kadath/Scalar/scalar.hpp"
 #include "For_Kadath/Space/space.hpp"
 #include "For_Kadath/System_of_eqs/system_of_eqs.hpp"
 
 #include <cmath>
+#include <cstdio>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -79,6 +81,9 @@ int main(int argc, char** argv)
 
     // Two add_cst fields, both representable: polynomial in r, COS_EVEN in theta.
     Scalar F(space), G(space), CA(space), CB(space), CC(space), CD(space), CE(space);
+    // ZZ is identically zero and RO depends on r alone: between them they are the
+    // J = 0 seed's beta~^theta and beta~^r, which is the shape D0140 sits on.
+    Scalar ZZ(space), RO(space);
     for (int d = 0; d < space.get_nbr_domains(); d++) {
         const Domain* dm = space.get_domain(d);
         Val_domain& vf = F.set_domain(d);
@@ -86,9 +91,11 @@ int main(int argc, char** argv)
         Val_domain& va = CA.set_domain(d); Val_domain& vb = CB.set_domain(d);
         Val_domain& vc = CC.set_domain(d); Val_domain& vd = CD.set_domain(d);
         Val_domain& ve = CE.set_domain(d);
+        Val_domain& vz = ZZ.set_domain(d);
+        Val_domain& vo = RO.set_domain(d);
         vf.allocate_conf();
         vg.allocate_conf();
-        for (Val_domain* v : {&va, &vb, &vc, &vd, &ve}) v->allocate_conf();
+        for (Val_domain* v : {&va, &vb, &vc, &vd, &ve, &vz, &vo}) v->allocate_conf();
         Index idx(dm->get_nbr_points());
         do {
             const double rr = dm->get_radius()(idx);
@@ -101,9 +108,11 @@ int main(int argc, char** argv)
             vc.set(idx) = 0.9 - 0.3 * rr;
             vd.set(idx) = 1.1 + 0.6 * rr * std::cos(2.0 * th);
             ve.set(idx) = -1.4 + 0.8 * rr;
+            vz.set(idx) = 0.0;
+            vo.set(idx) = 1.7 + 0.9 * rr + 0.25 * rr * rr;
         } while (idx.inc());
     }
-    for (Scalar* z : {&CA, &CB, &CC, &CD, &CE}) z->std_base();
+    for (Scalar* z : {&CA, &CB, &CC, &CD, &CE, &ZZ, &RO}) z->std_base();
     F.std_base();
     G.std_base();
 
@@ -112,6 +121,7 @@ int main(int argc, char** argv)
     syst.add_cst("G", G);
     syst.add_cst("CA", CA); syst.add_cst("CB", CB); syst.add_cst("CC", CC);
     syst.add_cst("CD", CD); syst.add_cst("CE", CE);
+    syst.add_cst("ZZ", ZZ); syst.add_cst("RO", RO);
 
     syst.add_def("FG = F + G");
 
@@ -302,6 +312,155 @@ int main(int argc, char** argv)
         std::cout << "  (columns: a+b read back | sum parsed with operands unread |\n"
                      "   the SAME sum re-read after the operands were read |\n"
                      "   sum parsed after the operands were read | inline)\n";
+    }
+
+    // --- DEFECT 3: dt() of a NAMED def whose own values read CORRECT --------
+    //
+    // Round 108 localised D0140 = dt(D0055), with D0055 = dt(BT) + divr(BR).
+    // On the J = 0 seed BT is identically zero and BR depends on r alone, so
+    // D0055 is theta-independent and its dt must vanish -- and D0055 reads back
+    // correct while dt(D0055) does not.  Forcing a def into configuration space
+    // fixes its VALUES and evidently not what a derivative of it gives.
+    //
+    // ⚠ THE EVALUATOR STATE IS DECLARED, NOT ASSUMED.  Round 106's reproducer
+    // missed a defect because every named def in it was read the instant it was
+    // registered, so the whole table sat in one state.  The emitter runs under
+    // the round-109 read contract: each def is registered and then read on every
+    // domain before the next is registered -- the "read first" column.  The
+    // "unread" column is the state where nothing is read until the end.  Both
+    // are measured, because if the fault survives the read it is not round
+    // 108's defect.
+    //
+    // ⚠ Every truth below is analytic, from the closed forms the add_cst fields
+    // were filled with, and the first draft of this table had two of them wrong
+    // (d_th(F/r) written as d_th F).  They are computed in one place now and the
+    // point's r and theta are printed so the arithmetic can be checked.
+    {
+        auto reg = [&](const std::string& d) { syst.add_def(d.c_str()); };
+        auto rd = [&](const std::string& nm) {
+            return syst.give_val_def_scalar_domain(nm.c_str(), dom)(ix);
+        };
+        const double rr = space.get_domain(dom)->get_radius()(ix);
+        const double tt = space.get_domain(dom)->get_coloc(2)(ix(1));
+        const double c2 = std::cos(2.0 * tt), s2 = std::sin(2.0 * tt);
+        const double vF = 2.0 + 0.5 * rr * rr + 0.3 * rr * c2;
+        const double vRO = 1.7 + 0.9 * rr + 0.25 * rr * rr;
+        const double dtF = -0.6 * rr * s2, dtG = -0.8 * rr * rr * s2;
+        const double ddtF = -1.2 * rr * c2, ddtG = -1.6 * rr * rr * c2;
+        const double dtdrG = -1.6 * rr * s2;          // dr(G) = 0.7 + 0.8 r c2
+
+        std::cout << "\n  DEFECT 3 -- dt() of a named def.  r = " << rr
+                  << ", theta = " << tt << "\n";
+        std::cout << "  " << std::left << std::setw(42) << "expression"
+                  << std::setw(22) << "truth (analytic)" << std::setw(22)
+                  << "unread" << std::setw(22) << "read first" << "\n";
+        struct Row { const char* what; const char* inner; bool dt; double truth; };
+        const std::vector<Row> rows = {
+            {"dt( dt(ZZ) + divr(RO) )   D0140's shape", "dt(ZZ) + divr(RO)", true, 0.0},
+            {"dt( divr(RO) + dt(ZZ) )   swapped", "divr(RO) + dt(ZZ)", true, 0.0},
+            {"  control dt( divr(RO) )", "divr(RO)", true, 0.0},
+            {"  control dt( dt(ZZ) )", "dt(ZZ)", true, 0.0},
+            {"  the inner def itself, no dt", "dt(ZZ) + divr(RO)", false, vRO / rr},
+            {"dt( dt(G) + divr(F) )", "dt(G) + divr(F)", true, ddtG + dtF / rr},
+            {"dt( divr(F) + dt(G) )     swapped", "divr(F) + dt(G)", true, ddtG + dtF / rr},
+            {"  that inner def itself, no dt", "dt(G) + divr(F)", false, dtG + vF / rr},
+            {"dt( dt(G) + F )", "dt(G) + F", true, ddtG + dtF},
+            {"dt( F + dt(G) )           swapped", "F + dt(G)", true, ddtG + dtF},
+            {"dt( dt(G) + dt(G) )       both dt", "dt(G) + dt(G)", true, 2 * ddtG},
+            {"dt( divr(F) + divr(F) )   neither dt", "divr(F) + divr(F)", true,
+             2 * dtF / rr},
+            {"dt( dr(G) + divr(F) )     dr first", "dr(G) + divr(F)", true,
+             dtdrG + dtF / rr},
+            {"  control dt( dt(G) )", "dt(G)", true, ddtG},
+            {"  control dt( divr(F) )", "divr(F)", true, dtF / rr},
+            {"  control dt( F )", "F", true, dtF},
+        };
+        int t = 0;
+        for (const auto& row : rows) {
+            const std::string n = "W" + std::to_string(t++);
+            const std::string outer = row.dt ? "dt(%s)" : "%s";
+            // (i) outer def registered while the inner has never been read
+            reg(n + "ai = " + row.inner);
+            reg(n + "au = " + (row.dt ? "dt(" + n + "ai)" : n + "ai"));
+            const double unread = rd(n + "au");
+            // (ii) the same, with the inner read first: the contract's state
+            reg(n + "bi = " + row.inner);
+            rd(n + "bi");
+            reg(n + "br = " + (row.dt ? "dt(" + n + "bi)" : n + "bi"));
+            const double readfirst = rd(n + "br");
+            const double sc = std::max(std::fabs(row.truth), 1.0);
+            const bool bad = std::fabs(unread - row.truth) / sc > 1e-10
+                             || std::fabs(readfirst - row.truth) / sc > 1e-10;
+            if (bad)
+                g_fail++;
+            std::cout << "  " << std::left << std::setw(42) << row.what
+                      << std::setprecision(12) << std::setw(22) << row.truth
+                      << std::setw(22) << unread << std::setw(22) << readfirst
+                      << (bad ? "  <-- DIFFER" : "") << "\n";
+            (void)outer;
+        }
+        // ⚠ THE HYPOTHESIS, MEASURED.  The values are right in every row and
+        // only the derivative is wrong, which points at the recorded angular
+        // BASIS rather than at the arithmetic.  Read it off instead of
+        // inferring it: dt(G) of a COS_EVEN field is SIN_EVEN, divr(F) and F
+        // stay COS_EVEN, and the rows that agree are exactly the like-with-like
+        // sums.  basis_name() prints the theta basis of each def's Val_domain
+        // on the shell.
+        {
+            auto bname = [](int b) {
+                switch (b) {
+                    case COS_EVEN: return "COS_EVEN";
+                    case COS_ODD: return "COS_ODD";
+                    case SIN_EVEN: return "SIN_EVEN";
+                    case SIN_ODD: return "SIN_ODD";
+                    case COSSIN_EVEN: return "COSSIN_EVEN";
+                    case COSSIN_ODD: return "COSSIN_ODD";
+                    case COS: return "COS";
+                    case COSSIN: return "COSSIN";
+                    default: return "other";
+                }
+            };
+            auto tbase = [&](const char* nm) {
+                const Val_domain& v = syst.give_val_def_scalar_domain(nm, dom);
+                Index iq(space.get_domain(dom)->get_nbr_points());
+                (void)v(iq);                       // force it to have one
+                const Array<int>* b1 = v.get_base().get_base_1d(1);
+                return b1 ? bname((*b1)(0)) : "none";
+            };
+            std::cout << "\n  theta basis recorded for each piece\n";
+            struct BR { const char* nm; const char* txt; };
+            const std::vector<BR> br = {
+                {"BA1", "dt(G)"}, {"BA2", "divr(F)"}, {"BA3", "F"},
+                {"BA4", "dr(G)"}, {"BA5", "dt(ZZ)"}, {"BA6", "divr(RO)"},
+                {"BA7", "dt(G) + divr(F)"}, {"BA8", "divr(F) + dt(G)"},
+                {"BA9", "dt(ZZ) + divr(RO)"}, {"BB1", "divr(RO) + dt(ZZ)"},
+                {"BB2", "dt(G) + dt(G)"}, {"BB3", "divr(F) + divr(F)"},
+                {"BB4", "dr(G) + divr(F)"},
+                // ⚠ and the operands of ROUND 108's pair, to find out whether
+                // that defect is a mixed-basis sum too.  Measured, not assumed:
+                // the two were found on different shapes and the claim that
+                // they are one mechanism has been withheld twice.
+                {"BB5", "-1 * (-1 * (multr(dr(F))))"},
+                {"BB6", "-1 * (multr(dt(G) + divr(F)))"},
+                {"BB7", "dt(G) + divr(F)"},
+            };
+            for (const auto& x : br) {
+                reg(std::string(x.nm) + " = " + x.txt);
+                std::cout << "    " << std::left << std::setw(26) << x.txt
+                          << tbase(x.nm) << "\n";
+            }
+        }
+
+        // and the same expression written INLINE, which has no name to be in a
+        // state at all
+        reg("WI1 = dt(dt(G) + divr(F))");
+        reg("WI2 = dt(dt(ZZ) + divr(RO))");
+        std::cout << "  " << std::left << std::setw(42) << "INLINE dt(dt(G) + divr(F))"
+                  << std::setprecision(12) << std::setw(22) << (ddtG + dtF / rr)
+                  << std::setw(22) << rd("WI1") << "\n";
+        std::cout << "  " << std::left << std::setw(42) << "INLINE dt(dt(ZZ) + divr(RO))"
+                  << std::setprecision(12) << std::setw(22) << 0.0
+                  << std::setw(22) << rd("WI2") << "\n";
     }
 
     std::cout << "\n  pairs that DIFFER: " << g_fail << "\n";

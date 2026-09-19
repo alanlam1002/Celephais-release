@@ -36,9 +36,10 @@
  * coefficient-space operation taken of it afterwards is wrong.  These
  * sums were reordered to put the COS_EVEN operand first:
  *
- *     D0022    LEFT: neither operand is COS_EVEN      SIN_EVEN / SIN_ODD
+ *     D0027    LEFT: neither operand is COS_EVEN      COS_ODD / SIN_ODD
  *     D0052    swapped                                SIN_EVEN / COS_EVEN
  *     D0055    swapped                                SIN_EVEN / COS_EVEN
+ *     D0095    LEFT: neither operand is COS_EVEN      COS_ODD / SIN_ODD
  *     D0134    swapped                                SIN_EVEN / COS_EVEN
  *     D0144    swapped                                SIN_EVEN / COS_EVEN
  *
@@ -88,6 +89,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Trumpet
@@ -1348,14 +1350,35 @@ namespace Trumpet
         return N;
     }
 
+    /// The angular bases this emission was analysed under.  The caller
+    /// MUST register the six unknowns in these bases: the basis lattice
+    /// that decided every sum ordering assumed them, and if the run
+    /// registers something else the analysis describes a different
+    /// system.  Names, not integers, so a renumbering in the library
+    /// cannot silently reinterpret them.
+    inline const std::vector<std::pair<const char*, const char*>>&
+    finiteJ_declared_basis()
+    {
+        static const std::vector<std::pair<const char*, const char*>> B = {
+            {"PS", "COS_EVEN"},
+            {"PH", "COS_EVEN"},
+            {"QF", "COS_EVEN"},
+            {"BR", "COS_EVEN"},
+            {"BT", "COS_EVEN"},
+            {"QB", "COS_ODD"},
+        };
+        return B;
+    }
+
     /// Sums reordered by --order-sums, which is seed-specific: see the
     /// header comment.  Empty means the emission was written without it.
     inline const std::vector<const char*>& finiteJ_ordered_sums()
     {
         static const std::vector<const char*> O = {
-            "D0022: LEFT: neither operand is COS_EVEN (SIN_EVEN / SIN_ODD)",
+            "D0027: LEFT: neither operand is COS_EVEN (COS_ODD / SIN_ODD)",
             "D0052: swapped (SIN_EVEN / COS_EVEN)",
             "D0055: swapped (SIN_EVEN / COS_EVEN)",
+            "D0095: LEFT: neither operand is COS_EVEN (COS_ODD / SIN_ODD)",
             "D0134: swapped (SIN_EVEN / COS_EVEN)",
             "D0144: swapped (SIN_EVEN / COS_EVEN)",
         };

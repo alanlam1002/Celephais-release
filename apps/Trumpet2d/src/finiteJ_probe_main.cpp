@@ -24,6 +24,7 @@
 #include <mpi.h>
 
 #include "For_Kadath/Array/headcpp.hpp"
+#include "For_Kadath/Base_spectral/base_spectral.hpp"
 #include "For_Kadath/Domain/polar.hpp"
 #include "For_Kadath/Scalar/scalar.hpp"
 #include "For_Kadath/Space/space.hpp"
@@ -40,6 +41,7 @@
 #include <string>
 #include <vector>
 
+using Kadath::Array;
 using Kadath::Dim_array;
 using Kadath::Index;
 using Kadath::Point;
@@ -103,6 +105,12 @@ int main(int argc, char** argv)
     // requires.  It exists so finiteJ_check() can be shown to catch the breach;
     // a control that has never been seen to fail is not a control.
     bool breakcontract = false;
+    // --break-basis: register QB in the basis the emission was NOT analysed
+    // under, so the declaration check can be seen to refuse.  --no-basis-check
+    // then skips the refusal, which is the only way to read the residuals under
+    // the wrong basis; the two together say both what the check does and what
+    // the seed can see.
+    bool breakbasis = false, nobasischeck = false;
     for (int i = 2; i < argc; i++) {
         const std::string k = argv[i];
         if (k == "--ntheta") ntheta = std::stoi(argv[++i]);
@@ -116,6 +124,8 @@ int main(int argc, char** argv)
         else if (k == "--read-before") readbefore.push_back(argv[++i]);
         else if (k == "--read-all") readall = true;
         else if (k == "--break-contract") breakcontract = true;
+        else if (k == "--break-basis") breakbasis = true;
+        else if (k == "--no-basis-check") nobasischeck = true;
     }
 
     TrumpetIO::Table t;
@@ -227,8 +237,28 @@ int main(int argc, char** argv)
         for (int d = 0; d <= dtop; d++)
             PH.set_domain(d) = PH(d) * (1.0 + perturb);
     }
-    for (Scalar* s : {&PS, &PH, &QF, &BR, &BT, &QB, &RR, &ST, &CT, &C2, &H2, &L2, &CX, &SQ, &T7, &ONE})
+    // ---- THE DECLARED ANGULAR BASES (research round 313 ruling 1) ---------
+    //
+    // Kadath tags a sum with its FIRST operand's theta basis without checking
+    // that the two agree (round 111), so a sum of unlike bases is silently
+    // mistagged and every coefficient-space operation taken of it afterwards is
+    // wrong.  The emitter's basis lattice sweeps all 4096 declarations of the
+    // six unknowns and reports which leave NO mixed sum: QF = COS_EVEN and
+    // QB = COS_ODD are forced by the emitted structure alone.
+    //
+    // ⚠ (BR, BT) is HELD.  The lattice locks BT to BR with the trig flipped and
+    // the seed's own beta~^r is theta-independent -- which would give
+    // BR = COS_EVEN, BT = SIN_EVEN -- but ERRATA_AND_STATE.md records COS_ODD
+    // for beta~^theta from round 285, and two of our own records disagree.  The
+    // note is the authority and the question is open, so both stay at
+    // std_base() and nothing here depends on guessing.
+    for (Scalar* s : {&PS, &PH, &QF, &BR, &BT, &RR, &ST, &CT, &C2, &H2, &L2,
+                      &CX, &SQ, &T7, &ONE})
         s->std_base();
+    if (breakbasis)
+        QB.std_base();                         // deliberately not the declared one
+    else
+        QB.std_anti_base();                    // COS_ODD, read back below
 
     // is the seed the one that was verified?  R(throat) must be 3M/2.
     {
@@ -237,6 +267,59 @@ int main(int argc, char** argv)
             if (t.pts[0][i].r < rmin) { rmin = t.pts[0][i].r; Rmin = t.pts[0][i].Rr * rmin; }
         emit("FJP_R_at_inner", Rmin);
         emit("FJP_R_over_1p5M", Rmin / (1.5 * M));
+    }
+
+    // ⚠ Read the bases back rather than trusting the std_base_* call: the
+    // whole round turns on which basis each field actually carries, and
+    // std_base_*_spher() throws on this space, so "the call exists" is not
+    // evidence that it did what is wanted.
+    {
+        auto bname = [](int b) {
+            switch (b) {
+                case COS_EVEN: return "COS_EVEN";
+                case COS_ODD: return "COS_ODD";
+                case SIN_EVEN: return "SIN_EVEN";
+                case SIN_ODD: return "SIN_ODD";
+                default: return "other";
+            }
+        };
+        const std::pair<const char*, Scalar*> fl[] = {
+            {"PS", &PS}, {"PH", &PH}, {"QF", &QF},
+            {"BR", &BR}, {"BT", &BT}, {"QB", &QB}, {"ones", &ONE}};
+        int mismatch = 0;
+        for (const auto& f : fl) {
+            const Array<int>* b1 =
+                (*f.second)(dtop).get_base().get_base_1d(1);
+            const std::string got = b1 ? bname((*b1)(0)) : "none";
+            // ⚠ and it must be what the emitter's basis lattice ASSUMED.  That
+            // analysis decided every sum ordering in the header; if the run
+            // registers a different basis the analysis describes a different
+            // system, and nothing downstream means what it says.
+            std::string want;
+            for (const auto& d : Trumpet::finiteJ_declared_basis())
+                if (std::string(d.first) == f.first)
+                    want = d.second;
+            const bool bad = !want.empty() && want != got;
+            if (bad)
+                mismatch++;
+            if (rank == 0)
+                std::cout << "#   registered basis  " << std::left
+                          << std::setw(6) << f.first << std::setw(10) << got
+                          << (want.empty() ? "" : "declared " + want)
+                          << (bad ? "   <-- MISMATCH" : "") << "\n";
+        }
+        emit("FJP_basis_mismatch", static_cast<double>(mismatch));
+        if (mismatch && !nobasischeck) {
+            if (rank == 0)
+                std::cerr << "FATAL: " << mismatch
+                          << " field(s) registered in a basis the emission was "
+                             "not analysed under\n";
+            MPI_Finalize();
+            return 4;
+        }
+        if (mismatch && rank == 0)
+            std::cout << "#   --no-basis-check: continuing under the WRONG "
+                         "basis so the residuals can be read there too\n";
     }
 
     std::cout << "# building system" << std::endl;

@@ -111,6 +111,12 @@ int main(int argc, char** argv)
     // the wrong basis; the two together say both what the check does and what
     // the seed can see.
     bool breakbasis = false, nobasischeck = false;
+    // --table-noise EPS: multiply the tabulated R and W by 1 + EPS*u, u a
+    // deterministic pseudo-random number in [-1, 1].  The residual's response
+    // to a perturbation of KNOWN size is the amplification factor, and the
+    // floor is then predicted rather than attributed: A times the table's own
+    // error, which a 50-digit recomputation puts at 1e-15.
+    double tablenoise = 0.0;
     for (int i = 2; i < argc; i++) {
         const std::string k = argv[i];
         if (k == "--ntheta") ntheta = std::stoi(argv[++i]);
@@ -126,6 +132,7 @@ int main(int argc, char** argv)
         else if (k == "--break-contract") breakcontract = true;
         else if (k == "--break-basis") breakbasis = true;
         else if (k == "--no-basis-check") nobasischeck = true;
+        else if (k == "--table-noise") tablenoise = std::stod(argv[++i]);
     }
 
     TrumpetIO::Table t;
@@ -164,6 +171,7 @@ int main(int argc, char** argv)
     emit("FJP_ntheta", ntheta);
     emit("FJP_domains_probed", dtop + 1);
     emit("FJP_perturb", perturb);
+    emit("FJP_table_noise", tablenoise);
 
     const double M = t.M;
     const double C = 3.0 * std::sqrt(3.0) * M * M / 4.0;
@@ -203,8 +211,20 @@ int main(int argc, char** argv)
                 continue;
             }
             const double rr = t.pts[d][i].r;
-            const double W = t.pts[d][i].W;
-            const double R = t.pts[d][i].Rr * rr;        // Rr is R/r
+            // a fixed hash of (d, i) so the pattern is identical run to run and
+            // the only thing varying between runs is the amplitude
+            auto jitter = [&](int salt) {
+                if (tablenoise == 0.0)
+                    return 1.0;
+                unsigned h = 2166136261u;
+                for (int x : {d, i, salt}) {
+                    h ^= static_cast<unsigned>(x);
+                    h *= 16777619u;
+                }
+                return 1.0 + tablenoise * (2.0 * (h / 4294967296.0) - 1.0);
+            };
+            const double W = t.pts[d][i].W * jitter(1);
+            const double R = t.pts[d][i].Rr * rr * jitter(2);   // Rr is R/r
             const double th = dm->get_coloc(2)(idx(1));
             // the J = 0 seed, exactly as round 102 verified it symbolically
             vps.set(idx) = R / rr;
@@ -635,6 +655,18 @@ int main(int argc, char** argv)
         }
         std::cout << "#   " << std::left << std::setw(13) << ename
                   << std::setprecision(4) << std::setw(16) << mx << mxi << "\n";
+        // per-domain, so the floor can be LOCALISED rather than attributed to
+        // "the discretisation" as a whole
+        for (int d = 0; d <= dtop; d++) {
+            const Val_domain& v = syst.give_val_def_scalar_domain(ename, d);
+            double md = 0.0;
+            Index jd(space.get_domain(d)->get_nbr_points());
+            do {
+                const double x = v(jd);
+                md = std::max(md, std::isfinite(x) ? std::fabs(x) : 1e300);
+            } while (jd.inc());
+            emit(std::string("FJP_") + ename + "_d" + std::to_string(d), md);
+        }
         emit(std::string("FJP_") + ename, mx);
         emit(std::string("FJP_int_") + ename, mxi);
         worst = std::max(worst, mx);

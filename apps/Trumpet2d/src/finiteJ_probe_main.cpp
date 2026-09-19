@@ -246,15 +246,21 @@ int main(int argc, char** argv)
     // six unknowns and reports which leave NO mixed sum: QF = COS_EVEN and
     // QB = COS_ODD are forced by the emitted structure alone.
     //
-    // ⚠ (BR, BT) is HELD.  The lattice locks BT to BR with the trig flipped and
-    // the seed's own beta~^r is theta-independent -- which would give
-    // BR = COS_EVEN, BT = SIN_EVEN -- but ERRATA_AND_STATE.md records COS_ODD
-    // for beta~^theta from round 285, and two of our own records disagree.  The
-    // note is the authority and the question is open, so both stay at
-    // std_base() and nothing here depends on guessing.
-    for (Scalar* s : {&PS, &PH, &QF, &BR, &BT, &RR, &ST, &CT, &C2, &H2, &L2,
+    // beta~^theta is SIN_EVEN (round 314): it carries one theta index, so it is
+    // odd under theta -> pi - theta (round 219 S9/S13), and it vanishes on the
+    // axis (rounds 247-255), which is a SIN basis; sin(2k theta) is the odd one
+    // of the two.  That is the lattice's row 1, reached from a premise the
+    // lattice does not share.  beta~^r keeps std_base().
+    //
+    // ⚠ The J = 0 seed is BLIND to this: beta~^theta = 0 there, so the
+    // residuals cannot distinguish it from any other choice.  The derivation
+    // and the lattice carry it; the acceptance test does not.  The header
+    // records which, and the declaration check below is what keeps the run and
+    // the analysis in step.
+    for (Scalar* s : {&PS, &PH, &QF, &BR, &RR, &ST, &CT, &C2, &H2, &L2,
                       &CX, &SQ, &T7, &ONE})
         s->std_base();
+    BT.std_anti_base(1);                       // SIN_EVEN, read back below
     if (breakbasis)
         QB.std_base();                         // deliberately not the declared one
     else

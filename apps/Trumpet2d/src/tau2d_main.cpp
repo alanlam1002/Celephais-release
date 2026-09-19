@@ -55,6 +55,7 @@
 #include <string>
 #include <vector>
 
+using Kadath::Array;
 using Kadath::Dim_array;
 using Kadath::Index;
 using Kadath::Point;
@@ -192,8 +193,19 @@ int main(int argc, char** argv)
     // round 90 hit when the odd alias formula broke at k = P.
     //
     // So the prediction is
-    //     COS_EVEN (scalars)          ntheta       x (nr - order)
-    //     COS_ODD  (beta^theta, Qbar) (ntheta - 1) x (nr - order)
+    //     COS_EVEN   ntheta       x (nr - order)
+    //     COS_ODD    (ntheta - 1) x (nr - order)
+    //
+    // ⚠ An earlier version of this comment labelled the COS_ODD row
+    // "(beta^theta, Qbar)".  The COUNT was measured; the OCCUPANCY was not, and
+    // half of it is wrong: Qbar is COS_ODD but beta~^theta is SIN_EVEN (round
+    // 314 -- one theta index makes it odd under theta -> pi - theta, and it
+    // vanishes on the axis).  Nor can the r factor reconcile them: multr is
+    // measured to leave the theta class alone, so beta^hat^theta = r beta~^theta
+    // is SIN_EVEN as well.  The l0 field set here is (U, Q, G) and has no
+    // beta^theta unknown at all, so nothing in this file ever tested the label.
+    // Counts are measured below for all four classes; occupancy is not this
+    // file's to assert.
     // and it is checked here on BOTH mappings, since tau bookkeeping is the
     // layout-adjacent part.
     {
@@ -228,6 +240,105 @@ int main(int argc, char** argv)
             }
         }
         emit("T_cnt_worst_mismatch", worst);
+    }
+
+    // ---- THE THIRD CLASS (research round 314) ------------------------------
+    //
+    // The finite-J system needs three angular classes, not two: beta~^theta is
+    // SIN_EVEN.  Round 285 measured COS_EVEN and COS_ODD and its prediction for
+    // each rested on which modes the fold k -> 2P-k leaves independent -- so
+    // taking SIN_EVEN's count by analogy with either would be assuming exactly
+    // what round 285 measured.
+    //
+    // ⚠ So the fold is measured for each class DIRECTLY, and independently of
+    // nbr_conditions: set one angular coefficient slot to 1 at a time, read the
+    // resulting configuration-space profile along theta, and count how many of
+    // those profiles are linearly independent on the grid.  That is the number
+    // of usable conditions per radial slot, arrived at without asking Kadath's
+    // bookkeeping.  The two are then compared.
+    {
+        const auto* ps =
+            dynamic_cast<const Kadath::Domain_polar_shell*>(space.get_domain(0));
+        const int nr = ps->get_nbr_coefs()(0);
+        const int nt = ps->get_nbr_coefs()(1);
+        struct Cls { const char* name; int which; };
+        const std::vector<Cls> cls = {{"COS_EVEN", 0}, {"COS_ODD", 1},
+                                      {"SIN_EVEN", 2}, {"SIN_ODD", 3}};
+        std::cout << "\n# angular class  independent   nbr_cond/(nr-o)  code"
+                     "      which slots the fold kills\n";
+        for (const auto& c : cls) {
+            Val_domain v(ps);
+            v.allocate_conf();
+            v = 1.0;
+            switch (c.which) {
+                case 0: v.std_base(); break;
+                case 1: v.std_anti_base(); break;
+                case 2: v.std_anti_base(1); break;
+                default: v.std_base(1); break;
+            }
+            const Array<int>* b1 = v.get_base().get_base_1d(1);
+            const int code = b1 ? (*b1)(0) : -1;
+
+            // the profiles, one per angular coefficient slot
+            std::vector<std::vector<double>> prof;
+            for (int j = 0; j < nt; j++) {
+                Val_domain w(ps);
+                w.set_base() = v.get_base();
+                w.allocate_coef();
+                Index ic(ps->get_nbr_coefs());
+                do { w.set_coef(ic) = 0.0; } while (ic.inc());
+                Index one(ps->get_nbr_coefs());
+                one.set(0) = 0;
+                one.set(1) = j;
+                w.set_coef(one) = 1.0;
+                std::vector<double> row;
+                Index ix(ps->get_nbr_points());
+                for (int q = 0; q < ps->get_nbr_points()(1); q++) {
+                    ix.set(0) = 0;
+                    ix.set(1) = q;
+                    row.push_back(w(ix));
+                }
+                prof.push_back(row);
+            }
+            // modified Gram-Schmidt rank, with a tolerance far above roundoff
+            int rank = 0;
+            std::vector<std::vector<double>> basis;
+            std::string dead;
+            int jslot = -1;
+            for (auto row : prof) {
+                jslot++;
+                for (const auto& b : basis) {
+                    double dp = 0.0;
+                    for (std::size_t i = 0; i < row.size(); i++) dp += row[i] * b[i];
+                    for (std::size_t i = 0; i < row.size(); i++) row[i] -= dp * b[i];
+                }
+                double n2 = 0.0;
+                for (double x : row) n2 += x * x;
+                if (std::sqrt(n2) > 1e-8) {
+                    for (double& x : row) x /= std::sqrt(n2);
+                    basis.push_back(row);
+                    rank++;
+                } else {
+                    // ⚠ WHICH slots are dependent, not just how many.  A count
+                    // alone is a number to be believed; the slot indices say
+                    // what the fold actually did and can be checked by hand.
+                    dead += (dead.empty() ? "" : ",") + std::to_string(jslot);
+                }
+            }
+            const int cond0 = ps->nbr_conditions_val_domain(v, 0, 0);
+            std::cout << "#   " << std::left << std::setw(12) << c.name
+                      << std::setw(14) << rank
+                      << std::setw(14) << (cond0 / nr)
+                      << std::setw(10) << code
+                      << "dependent slots: " << (dead.empty() ? "none" : dead)
+                      << "\n";
+            emit(std::string("T_modes_") + c.name, rank);
+            emit(std::string("T_cond_per_r_") + c.name, cond0 / nr);
+            emit(std::string("T_agree_") + c.name,
+                 (rank == cond0 / nr) ? 1 : 0);
+        }
+        emit("T_ntheta", nt);
+        (void)nr;
     }
 
     // ------------------------------------------------------------ the system --

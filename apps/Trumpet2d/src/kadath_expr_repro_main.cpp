@@ -536,6 +536,31 @@ int main(int argc, char** argv)
                               << (b1 ? bname((*b1)(0)) : "none") << "\n";
                 }
             }
+            // ⚠ DOES THE r FACTOR MOVE THE CLASS?  Round 314's reading of the
+            // ERRATA conflict was that round 285's (beta^theta, Qbar) label
+            // refers to beta^hat^theta = r beta~^theta rather than to
+            // beta~^theta.  That only reconciles the two records if multr
+            // changes the theta class.  Measured on a field registered SIN_EVEN
+            // directly, rather than on one produced by dt().
+            {
+                Scalar SE(space);
+                SE = F;
+                SE.std_anti_base(1);                   // SIN_EVEN
+                syst.add_cst("SE", SE);
+                reg("BR1 = SE");
+                reg("BR2 = multr(SE)");
+                reg("BR3 = multr(multr(SE))");
+                reg("BR4 = divr(SE)");
+                std::cout << "\n  does the r factor move the theta class?\n";
+                for (const auto& pr :
+                     std::vector<std::pair<const char*, const char*>>{
+                         {"a field registered SIN_EVEN", "BR1"},
+                         {"multr of it", "BR2"},
+                         {"multr twice", "BR3"},
+                         {"divr of it", "BR4"}})
+                    std::cout << "    " << std::left << std::setw(30) << pr.first
+                              << tbase(pr.second) << "\n";
+            }
             reg("BP1 = SRCE * SRCE");
             reg("BP2 = SRCE * SRCO");
             reg("BP3 = SRCO * SRCE");

@@ -39,6 +39,7 @@
 #include <iomanip>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -170,6 +171,46 @@ int main(int argc, char** argv)
         else if (k == "--manufactured") manfile = argv[++i];
     }
 
+    // ---- A1's manufactured data (round 125) -------------------------------
+    // The generator writes, per collocation point, the six FIELD values and the
+    // exact value of each emitted EQUATION on them.  Filling the fields from
+    // the table and comparing Kadath's residual against the tabulated source
+    // measures the evaluation error and nothing else: the fields are not a
+    // solution, and the source is what makes them one.
+    std::map<long long, std::vector<double> > mandata;
+    long man_installed = 0, man_missing = 0;
+    std::vector<std::string> manfields, maneqs;
+    double man_n = 0.0, man_J = 0.0;
+    if (!manfile.empty()) {
+        std::ifstream mf(manfile);
+        if (!mf) {
+            if (rank == 0) std::cerr << "FATAL: cannot open " << manfile << "\n";
+            MPI_Finalize();
+            return 1;
+        }
+        std::string line;
+        while (std::getline(mf, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream is(line);
+            std::string key; is >> key;
+            if (key == "fields") { std::string w; while (is >> w) manfields.push_back(w); }
+            else if (key == "eqs") { std::string w; while (is >> w) maneqs.push_back(w); }
+            else if (key == "n") is >> man_n;
+            else if (key == "J") is >> man_J;
+            else if (key == "val") {
+                int d, i, jj; is >> d >> i >> jj;
+                std::vector<double> v; double x;
+                while (is >> x) v.push_back(x);
+                mandata[(static_cast<long long>(d) * 100000LL
+                         + static_cast<long long>(i) * 1000LL + jj)] = v;
+            }
+        }
+        if (rank == 0)
+            std::cout << "#   manufactured: " << mandata.size() << " points, "
+                      << manfields.size() << " fields, " << maneqs.size()
+                      << " equations, n = " << man_n << ", J = " << man_J << "\n";
+    }
+
     TrumpetIO::Table t;
     try {
         t = TrumpetIO::read_table(argv[1]);
@@ -285,6 +326,23 @@ int main(int argc, char** argv)
             vsq.set(idx) = (1.0 - std::cos(2.0 * th)) / 2.0;
             vt7.set(idx) = std::sin(2.0 * th) / 2.0;
             von.set(idx) = 1.0;
+            if (!mandata.empty()) {
+                // ⚠ the SIX UNKNOWNS only.  RR/ST/CT/... are the probe's own
+                // comparison scaffolding and stay as built; overwriting them
+                // would change what the diagnostics mean.
+                auto it = mandata.find(static_cast<long long>(d) * 100000LL
+                                       + static_cast<long long>(i) * 1000LL
+                                       + idx(1));
+                if (it != mandata.end() && it->second.size() >= 6) {
+                    const std::vector<double>& v = it->second;
+                    vps.set(idx) = v[0];  vph.set(idx) = v[1];
+                    vqf.set(idx) = v[2];  vbr.set(idx) = v[3];
+                    vbt.set(idx) = v[4];  vqb.set(idx) = v[5];
+                    man_installed++;
+                } else {
+                    man_missing++;
+                }
+            }
         } while (idx.inc());
     }
     // the control: a perturbation of the seed must NOT annihilate the equations
@@ -818,6 +876,107 @@ int main(int argc, char** argv)
     }
     emit("FJP_worst_interior", worst_int);
     emit("FJP_worst", worst);
+
+    // ---- A1: did the manufactured fields actually go IN? -------------------
+    // ⚠ Separates "the data never arrived" from "the formulas disagree".  Read
+    // back through the same operator()(Index) that forces configuration space,
+    // because FETCHING IS NOT READING (round 108).
+    if (!mandata.empty()) {
+        emit("FJP_man_installed", static_cast<double>(man_installed));
+        emit("FJP_man_missing", static_cast<double>(man_missing));
+        const char* fnm[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+        Scalar* fp[6] = {&PS, &PH, &QF, &BR, &BT, &QB};
+        double fworst = 0.0;
+        for (int q = 0; q < 6; q++) {
+            double mx = 0.0;
+            for (int d = 0; d <= dtop; d++) {
+                const Val_domain& v = (*fp[q])(d);
+                Index idx(space.get_domain(d)->get_nbr_points());
+                do {
+                    auto it = mandata.find(static_cast<long long>(d) * 100000LL
+                                           + static_cast<long long>(idx(0)) * 1000LL
+                                           + idx(1));
+                    if (it == mandata.end() || it->second.size() < 6) continue;
+                    const double want = it->second[q];
+                    if (!std::isfinite(want)) continue;
+                    mx = std::max(mx, std::fabs(v(idx) - want));
+                } while (idx.inc());
+            }
+            emit(std::string("FJP_manfield_") + fnm[q], mx);
+            fworst = std::max(fworst, mx);
+        }
+        emit("FJP_manfield_worst", fworst);
+    }
+
+    // ---- A1: Kadath's residual against the exact manufactured source -------
+    if (!mandata.empty() && maxdefs < 0) {
+        std::cout << "#\n#   A1: |E_kadath - E_exact| on the manufactured "
+                     "fields\n";
+        std::cout << "#   equation      max abs          max abs (interior)   "
+                     "points\n";
+        double wa = 0.0, wi = 0.0;
+        for (size_t q = 0; q < maneqs.size(); q++) {
+            const std::string& ename = maneqs[q];
+            double mx = 0.0, mxi = 0.0;
+            long npt = 0, nskip = 0;
+            for (int d = 0; d <= dtop; d++) {
+                const Val_domain& v =
+                    syst.give_val_def_scalar_domain(ename.c_str(), d);
+                const int nth = space.get_domain(d)->get_nbr_points()(1);
+                Index idx(space.get_domain(d)->get_nbr_points());
+                do {
+                    auto it = mandata.find(static_cast<long long>(d) * 100000LL
+                                           + static_cast<long long>(idx(0)) * 1000LL
+                                           + idx(1));
+                    if (it == mandata.end()
+                        || it->second.size() < manfields.size() + maneqs.size()) {
+                        nskip++;
+                        continue;
+                    }
+                    const double ex = it->second[manfields.size() + q];
+                    const double got = v(idx);
+                    // ⚠ a source the generator recorded as non-finite is the
+                    // emitted system being singular at that point, not a
+                    // missing datum: counted, never silently averaged in.
+                    if (!std::isfinite(ex) || !std::isfinite(got)) { nskip++; continue; }
+                    const double a = std::fabs(got - ex);
+                    mx = std::max(mx, a);
+                    if (idx(1) != 0 && idx(1) != nth - 1) mxi = std::max(mxi, a);
+                    npt++;
+                } while (idx.inc());
+            }
+            std::cout << "#   " << std::left << std::setw(13) << ename
+                      << std::setprecision(6) << std::setw(17) << mx
+                      << std::setw(21) << mxi
+                      << npt << " used, " << nskip << " skipped\n";
+            for (int d = 0; d <= dtop; d++) {
+                const Val_domain& v =
+                    syst.give_val_def_scalar_domain(ename.c_str(), d);
+                double md = 0.0;
+                Index jd(space.get_domain(d)->get_nbr_points());
+                do {
+                    auto it = mandata.find(static_cast<long long>(d) * 100000LL
+                                           + static_cast<long long>(jd(0)) * 1000LL
+                                           + jd(1));
+                    if (it == mandata.end()
+                        || it->second.size() < manfields.size() + maneqs.size())
+                        continue;
+                    const double ex = it->second[manfields.size() + q];
+                    const double got = v(jd);
+                    if (!std::isfinite(ex) || !std::isfinite(got)) continue;
+                    md = std::max(md, std::fabs(got - ex));
+                } while (jd.inc());
+                emit(std::string("FJP_man_") + ename + "_d" + std::to_string(d), md);
+            }
+            emit(std::string("FJP_man_") + ename, mx);
+            emit(std::string("FJP_manint_") + ename, mxi);
+            emit(std::string("FJP_manskip_") + ename, static_cast<double>(nskip));
+            wa = std::max(wa, mx);
+            wi = std::max(wi, mxi);
+        }
+        emit("FJP_man_worst", wa);
+        emit("FJP_man_worst_interior", wi);
+    }
 
     MPI_Finalize();
     return 0;

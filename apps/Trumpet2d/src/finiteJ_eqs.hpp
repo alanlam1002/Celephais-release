@@ -30,21 +30,16 @@
  * prose gets transcribed wrongly; this one is in the only function that can
  * reach the text.
  *
- * ⚠ WRITTEN UNDER --allow-axis-violations.  9 divsint application(s)
- * in 6 def(s) are applied to an operand the emitter could NOT show
+ * ⚠ WRITTEN UNDER --allow-axis-violations.  4 divsint application(s)
+ * in 1 def(s) are applied to an operand the emitter could NOT show
  * vanishes on the axis, which is the precondition divsint and the cot
  * construction need.  Those defs are wrong and the emission is not
  * accepted:
  *
- *     D0043  divsint at guaranteed sin-order 0
  *     D0105  divsint at guaranteed sin-order 0
  *     D0105  divsint at guaranteed sin-order -1
  *     D0105  divsint at guaranteed sin-order -2
  *     D0105  divsint at guaranteed sin-order -3
- *     D0150  divsint at guaranteed sin-order 0
- *     D0233  divsint at guaranteed sin-order 0
- *     D0268  divsint at guaranteed sin-order 0
- *     D0297  divsint at guaranteed sin-order 0
  *
  * finiteJ_axis_violations() carries the same list at run time.
  */
@@ -1441,15 +1436,10 @@ namespace Trumpet
     inline const std::vector<const char*>& finiteJ_axis_violations()
     {
         static const std::vector<const char*> V = {
-            "D0043: divsint applied at guaranteed sin-order 0",
             "D0105: divsint applied at guaranteed sin-order 0",
             "D0105: divsint applied at guaranteed sin-order -1",
             "D0105: divsint applied at guaranteed sin-order -2",
             "D0105: divsint applied at guaranteed sin-order -3",
-            "D0150: divsint applied at guaranteed sin-order 0",
-            "D0233: divsint applied at guaranteed sin-order 0",
-            "D0268: divsint applied at guaranteed sin-order 0",
-            "D0297: divsint applied at guaranteed sin-order 0",
         };
         return V;
     }

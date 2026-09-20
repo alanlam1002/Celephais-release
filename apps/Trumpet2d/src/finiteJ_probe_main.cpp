@@ -475,6 +475,20 @@ int main(int argc, char** argv)
             // in operators that have just been verified individually.
             {"V7 = divsint(dt(multsint(SQ))) - dt(SQ) - T7", "cot(th)*sin^2 = sin2th/2, built"},
             {"V8 = divrsint(multrsint(C2)) - C2", "divrsint . multrsint = id"},
+            // ---- cos(theta) * X WITHOUT a division, and so without the axis
+            // precondition the cot construction carries.  From
+            //     d_th(sin X) = cos X + sin d_th X
+            //     =>  cos(theta) X == dt(multsint(X)) - multsint(dt(X))
+            // Distribution (round 317) makes monomials combine, so a term can
+            // acquire cos with no matching 1/sin, and this is the only way to
+            // emit that in a vocabulary with no Ope_mult_cost.
+            //
+            // ⚠ It is NOT checked against the CT field: round 103 measured that
+            // cos(theta) is outside the scalar COS_EVEN span, so CT holds an
+            // alias and the comparison would be against garbage.  The check is
+            // pointwise against a value computed here, below.
+            {"V9 = dt(multsint(ones)) - multsint(dt(ones))", "cos(th) * 1, built"},
+            {"V10 = dt(multsint(C2)) - multsint(dt(C2))", "cos(th) * cos2th, built"},
             // ---- research round 297 ruling (3): measure the add_cst exposure
             // rather than argue it.  PS is theta-INDEPENDENT in the seed, the
             // same shape as L0ModelT's 39 coefficient fields.
@@ -547,6 +561,29 @@ int main(int argc, char** argv)
             (void)nm;
         }
     }
+    // ---- the built cos(theta)*X against a value computed HERE ------------
+    if (!clean) {
+        double w9 = 0.0, w10 = 0.0;
+        for (int d = 0; d <= dtop; d++) {
+            const Val_domain& a = syst.give_val_def_scalar_domain("V9", d);
+            const Val_domain& b = syst.give_val_def_scalar_domain("V10", d);
+            const Kadath::Domain* dm = space.get_domain(d);
+            Index ix(dm->get_nbr_points());
+            do {
+                const double th = dm->get_coloc(2)(ix(1));
+                w9 = std::max(w9, std::fabs(a(ix) - std::cos(th)));
+                w10 = std::max(w10,
+                               std::fabs(b(ix) - std::cos(th) * std::cos(2 * th)));
+            } while (ix.inc());
+        }
+        emit("FJP_multcost_ones", w9);
+        emit("FJP_multcost_cos2th", w10);
+        if (rank == 0)
+            std::cout << "#   cos(th)*X built from dt/multsint, vs cos(th)*X "
+                         "computed here:  X=1 " << w9 << "   X=cos2th " << w10
+                      << "\n";
+    }
+
     // ---- how long a def can the parser take?  Built from ONE repeated term,
     // so only the length varies.
     if (!clean) {

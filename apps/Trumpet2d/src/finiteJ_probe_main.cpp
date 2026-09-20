@@ -38,6 +38,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -117,6 +118,24 @@ int main(int argc, char** argv)
     // floor is then predicted rather than attributed: A times the table's own
     // error, which a 50-digit recomputation puts at 1e-15.
     double tablenoise = 0.0;
+    // --seed-perturb EPS --pfield NAME: add a perturbation of KNOWN sup-norm EPS
+    // to one unknown (or to all six), in that field's own angular basis, and
+    // report the residual it produces.  The ratio is the operator's gain in
+    // that direction, and 1/gain turns a residual into a solution-error bound.
+    //
+    // ⚠ The profile is generic in BOTH directions -- r-dependent and
+    // theta-dependent, several harmonics -- because round 103's constant
+    // coefficients made every r-derivative vacuous and round 93's unphysical
+    // field gave the opposite answer.  And it is built in the field's DECLARED
+    // basis: a perturbation in the wrong one would re-create a mixed-basis sum
+    // and measure round 111's defect instead of the conditioning.
+    double seedperturb = 0.0;
+    std::string pfield = "all";
+    // --pmix "w1,..,w6": weight the six fields' perturbations independently.
+    // Six single-field gains bound the operator's gain from ABOVE; a
+    // combination can cancel and be much smaller, and a near-null direction
+    // would void any residual-to-solution bound.  This samples combinations.
+    std::string pmix;
     for (int i = 2; i < argc; i++) {
         const std::string k = argv[i];
         if (k == "--ntheta") ntheta = std::stoi(argv[++i]);
@@ -133,6 +152,9 @@ int main(int argc, char** argv)
         else if (k == "--break-basis") breakbasis = true;
         else if (k == "--no-basis-check") nobasischeck = true;
         else if (k == "--table-noise") tablenoise = std::stod(argv[++i]);
+        else if (k == "--seed-perturb") seedperturb = std::stod(argv[++i]);
+        else if (k == "--pfield") pfield = argv[++i];
+        else if (k == "--pmix") pmix = argv[++i];
     }
 
     TrumpetIO::Table t;
@@ -293,6 +315,61 @@ int main(int argc, char** argv)
             if (t.pts[0][i].r < rmin) { rmin = t.pts[0][i].r; Rmin = t.pts[0][i].Rr * rmin; }
         emit("FJP_R_at_inner", Rmin);
         emit("FJP_R_over_1p5M", Rmin / (1.5 * M));
+    }
+
+    // ---- THE SEED PERTURBATION -------------------------------------------
+    if (seedperturb != 0.0) {
+        const std::pair<const char*, Scalar*> unk[] = {
+            {"PS", &PS}, {"PH", &PH}, {"QF", &QF},
+            {"BR", &BR}, {"BT", &BT}, {"QB", &QB}};
+        double supmax = 0.0;
+        // pass 1: the raw profile's sup norm over the probed domains
+        for (int pass = 0; pass < 2; pass++) {
+            for (const auto& f : unk) {
+                if (pfield != "all" && pfield != f.first)
+                    continue;
+                double wgt = 1.0;
+                if (!pmix.empty()) {
+                    std::stringstream ss(pmix);
+                    std::string tok;
+                    for (int q = 0; q <= (&f - unk); q++)
+                        if (!std::getline(ss, tok, ','))
+                            tok = "1";
+                    wgt = std::stod(tok);
+                }
+                const bool isBT = std::string(f.first) == "BT";
+                const bool isQB = std::string(f.first) == "QB";
+                for (int d = 0; d <= dtop; d++) {
+                    const Kadath::Domain* dm = space.get_domain(d);
+                    Index ix(dm->get_nbr_points());
+                    do {
+                        const double rr = t.pts[d][ix(0)].r;
+                        const double th = dm->get_coloc(2)(ix(1));
+                        const double rad = 0.5 + 0.35 * rr + 0.15 * rr * rr;
+                        double ang;
+                        if (isBT)                       // SIN_EVEN
+                            ang = std::sin(2.0 * th) + 0.4 * std::sin(4.0 * th);
+                        else if (isQB)                  // COS_ODD
+                            ang = std::cos(th) + 0.3 * std::cos(3.0 * th);
+                        else                            // COS_EVEN
+                            ang = 0.6 + 0.3 * std::cos(2.0 * th)
+                                  + 0.1 * std::cos(4.0 * th);
+                        const double v = rad * ang;
+                        if (pass == 0)
+                            supmax = std::max(supmax, std::fabs(v));
+                        else
+                            f.second->set_domain(d).set(ix) +=
+                                wgt * seedperturb * v / supmax;
+                    } while (ix.inc());
+                }
+            }
+            if (pass == 0 && supmax == 0.0)
+                break;
+        }
+        emit("FJP_seed_perturb", seedperturb);
+        if (rank == 0)
+            std::cout << "#   seed perturbed: field " << pfield
+                      << ", sup-norm " << seedperturb << "\n";
     }
 
     // ⚠ Read the bases back rather than trusting the std_base_* call: the

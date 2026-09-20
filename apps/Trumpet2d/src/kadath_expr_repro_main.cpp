@@ -594,6 +594,61 @@ int main(int argc, char** argv)
                   << std::setw(22) << rd("WI2") << "\n";
     }
 
+    // ---------------------------------------------------------------------
+    // ROUND 126: is divsint on a NON-VANISHING operand a library defect, or us?
+    //
+    // A1's bisection localised the one structural disagreement between the
+    // emitted text and its sympy twin to D0105 = (1/4) divsint^4(divr^4(1/psi^8)),
+    // the single site the static axis check still flags.  Every other
+    // disagreement converges spectrally.  So the question is whether divsint
+    // misbehaves, or whether we asked it for something outside its contract.
+    {
+        std::cout << "\n  divsint against the pointwise quotient X/sin(theta)\n";
+        std::cout << "    " << std::left << std::setw(34) << "operand"
+                  << std::setw(22) << "X/sin at a point"
+                  << std::setw(22) << "divsint(X)" << "rel\n";
+        Scalar VAN(space), NOV(space);
+        VAN = F; NOV = F;
+        {   // VAN vanishes on the axis (SIN_EVEN); NOV does not (COS_EVEN)
+            for (int d = 0; d < space.get_nbr_domains(); d++) {
+                Val_domain& a = VAN.set_domain(d);
+                Val_domain& b = NOV.set_domain(d);
+                a.allocate_conf(); b.allocate_conf();
+                Index ix(space.get_domain(d)->get_nbr_points());
+                do {
+                    const double tt = space.get_domain(d)->get_coloc(2)(ix(1));
+                    a.set(ix) = std::sin(2.0 * tt);
+                    b.set(ix) = 1.0 + std::cos(2.0 * tt) / 3.0;
+                } while (ix.inc());
+            }
+            VAN.std_anti_base(1);
+            NOV.std_base();
+            syst.add_cst("VAN", VAN);
+            syst.add_cst("NOV", NOV);
+        }
+        auto reg = [&](const std::string& d) { syst.add_def(d.c_str()); };
+        auto rd = [&](const std::string& nm) {
+            return syst.give_val_def_scalar_domain(nm.c_str(), dom)(ix);
+        };
+        reg("DV1 = divsint(VAN)");
+        reg("DV2 = divsint(NOV)");
+        const double tt = space.get_domain(dom)->get_coloc(2)(ix(1));
+        const double want_v = std::sin(2.0 * tt) / std::sin(tt);
+        const double want_n = (1.0 + std::cos(2.0 * tt) / 3.0) / std::sin(tt);
+        for (const auto& row : std::vector<std::tuple<const char*, double, const char*>>{
+                 {"VANISHES on the axis  sin2t", want_v, "DV1"},
+                 {"does NOT vanish  1 + cos2t/3", want_n, "DV2"}}) {
+            const double got = rd(std::get<2>(row));
+            const double w = std::get<1>(row);
+            const double rel = std::fabs(w) > 0 ? std::fabs(got - w) / std::fabs(w) : 0.0;
+            std::cout << "    " << std::left << std::setw(34) << std::get<0>(row)
+                      << std::setprecision(12) << std::setw(22) << w
+                      << std::setw(22) << got << rel << "\n";
+            std::cout << "RESULT REPRO_divsint_" << std::get<2>(row) << "_rel "
+                      << rel << "\n";
+        }
+    }
+
     std::cout << "\n  pairs that DIFFER: " << g_fail << "\n";
     std::cout << "RESULT REPRO_pairs_differing " << g_fail << "\n";
     MPI_Finalize();

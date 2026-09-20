@@ -143,6 +143,7 @@ int main(int argc, char** argv)
     // duplicated formula is a second place to be wrong, and this one would be
     // wrong silently.
     std::string gridout;
+    std::string defsout;   // --dump-defs FILE
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -168,6 +169,7 @@ int main(int argc, char** argv)
         else if (k == "--pfield") pfield = argv[++i];
         else if (k == "--pmix") pmix = argv[++i];
         else if (k == "--dump-grid") gridout = argv[++i];
+        else if (k == "--dump-defs") defsout = argv[++i];
         else if (k == "--manufactured") manfile = argv[++i];
     }
 
@@ -534,7 +536,16 @@ int main(int argc, char** argv)
     // `ones` is a field the apps register themselves (BH2d/NS2d do the same);
     // the emitted monomials materialise against it.
     syst.add_cst("ones", ONE);
-    syst.add_cst("JJ", 0.0);
+    // ⚠ JJ MUST MATCH THE DATA.  This was hardcoded to 0.0 -- correct for the
+    // J = 0 seed, and silently wrong for manufactured data, which is generated
+    // at J = 0.1.  Round 126 measured the consequence: D0022 = 6*JJ*sin^3, a def
+    // containing NO field at all, disagreed with its twin by its entire value,
+    // and that is what a constant mismatch looks like rather than a defect.
+    // Round 125 read the whole effect as the emitted text and the twin
+    // computing different functions; it was this.
+    syst.add_cst("JJ", mandata.empty() ? 0.0 : man_J);
+    if (rank == 0 && !mandata.empty())
+        std::cout << "#   JJ set from the manufactured data: " << man_J << "\n";
     std::cout << "# csts registered" << std::endl;
 
     // ---- SMOKE: do the operators work at all, and where is the size limit? --
@@ -739,6 +750,31 @@ int main(int argc, char** argv)
         return 3;
     }
     emit("FJP_subdefs", static_cast<double>(nsub));
+
+    // ---- --dump-defs FILE: every sub-def's value at every collocation point.
+    // The bisection instrument (round 126).  Written from Kadath so the
+    // comparison against the emitter's sympy twins happens offline, in one
+    // place, in topological order.
+    //
+    // ⚠ FETCHING IS NOT READING (round 108).  give_val_def_scalar_domain alone
+    // forces nothing; the value only exists once operator()(Index) has been
+    // called, which the write below does for every point.
+    if (!defsout.empty() && rank == 0) {
+        std::ofstream df(defsout);
+        df << "# sub-def values written by finiteJ_probe --dump-defs\n";
+        df << std::setprecision(17);
+        for (const char* nm : Trumpet::finiteJ_names()) {
+            for (int d = 0; d <= dtop; d++) {
+                const Val_domain& v = syst.give_val_def_scalar_domain(nm, d);
+                Index idx(space.get_domain(d)->get_nbr_points());
+                do {
+                    df << "def " << nm << ' ' << d << ' ' << idx(0) << ' '
+                       << idx(1) << ' ' << v(idx) << '\n';
+                } while (idx.inc());
+            }
+        }
+        std::cout << "# sub-def values written to " << defsout << "\n";
+    }
 
     // ---- THE CONTROL.  Every sum re-expressed with its operands read first.
     if (maxdefs < 0) {

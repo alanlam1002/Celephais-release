@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -136,6 +137,16 @@ int main(int argc, char** argv)
     // combination can cancel and be much smaller, and a near-null direction
     // would void any residual-to-solution bound.  This samples combinations.
     std::string pmix;
+    // --dump-grid FILE: write the collocation grid Kadath actually built, so
+    // the manufactured generator never re-derives a collocation formula.  A
+    // duplicated formula is a second place to be wrong, and this one would be
+    // wrong silently.
+    std::string gridout;
+    // --manufactured FILE: fill the six unknowns from a table and compare the
+    // equations against the sources tabulated beside them.  The FIELD SET and
+    // the EQUATION NAMES are read from the file's header, so changing either
+    // costs a re-run of the generator and no edit here.
+    std::string manfile;
     for (int i = 2; i < argc; i++) {
         const std::string k = argv[i];
         if (k == "--ntheta") ntheta = std::stoi(argv[++i]);
@@ -155,6 +166,8 @@ int main(int argc, char** argv)
         else if (k == "--seed-perturb") seedperturb = std::stod(argv[++i]);
         else if (k == "--pfield") pfield = argv[++i];
         else if (k == "--pmix") pmix = argv[++i];
+        else if (k == "--dump-grid") gridout = argv[++i];
+        else if (k == "--manufactured") manfile = argv[++i];
     }
 
     TrumpetIO::Table t;
@@ -423,6 +436,23 @@ int main(int argc, char** argv)
         if (mismatch && rank == 0)
             std::cout << "#   --no-basis-check: continuing under the WRONG "
                          "basis so the residuals can be read there too\n";
+    }
+
+    if (!gridout.empty() && rank == 0) {
+        std::ofstream g(gridout);
+        g << "# collocation grid written by finiteJ_probe --dump-grid\n";
+        g << "version 1\nntheta " << ntheta << "\nndom " << ndom
+          << "\ndtop " << dtop << "\n";
+        g << std::setprecision(17);
+        for (int d = 0; d <= dtop; d++) {
+            const Kadath::Domain* dm = space.get_domain(d);
+            Index ix(dm->get_nbr_points());
+            do {
+                g << "grid " << d << " " << ix(0) << " " << ix(1) << " "
+                  << t.pts[d][ix(0)].r << " " << dm->get_coloc(2)(ix(1)) << "\n";
+            } while (ix.inc());
+        }
+        std::cout << "# grid written to " << gridout << "\n";
     }
 
     std::cout << "# building system" << std::endl;

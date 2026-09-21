@@ -183,7 +183,11 @@ int main(int argc, char** argv)
     // ⚠ It is NOT another weight: round 104 measured multsint . divsint = id at
     // 1.1e-16 and the operand here is a finished, pole-free row, so nothing
     // about the divsint contract changes.  What changes is the projection.
-    bool eshtnt2 = false;            // --esht-nt2
+    // ⚠ ADOPTED, research round 366 ruling 2: this is ON, and --no-esht-nt2
+    // turns it off for an A/B.  Absent means the ADOPTED value, never the
+    // permissive one -- rounds 125, 143 and 144 each cost a round to a flag
+    // whose absence meant False, and the convention is now the project's.
+    bool eshtnt2 = true;             // --esht-nt2 / --no-esht-nt2
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -221,6 +225,7 @@ int main(int argc, char** argv)
         else if (k == "--scale-ph") scalePH = std::stod(argv[++i]);
         else if (k == "--scale-br") scaleBR = std::stod(argv[++i]);
         else if (k == "--esht-nt2") eshtnt2 = true;
+        else if (k == "--no-esht-nt2") eshtnt2 = false;
         else if (k == "--manufactured") manfile = argv[++i];
     }
 

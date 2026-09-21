@@ -158,6 +158,12 @@ int main(int argc, char** argv)
     // known in advance -- 3 interfaces x 2 (value and derivative) x the field
     // angular modes 6*ntheta - 3 = 36*ntheta - 18.
     bool jacinterfaces = false;      // --jac-interfaces
+    // ⚠ STEP 3 (round 136): the two outer rows, t_Q = 0 and 2 t_U + t_G = 0.
+    // Prediction, stated before running: Phb and qf are both COS_EVEN, so
+    // ntheta modes each and 2*ntheta rows.
+    bool jacouter = false;           // --jac-outer
+    double outerpert = 0.0;          // --outer-perturb DELTA: add DELTA/r^p to PH
+    int outerpow = 1;                // --outer-perturb-pow p
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -188,6 +194,9 @@ int main(int argc, char** argv)
         else if (k == "--jac-fields") jacfields = argv[++i];
         else if (k == "--jac-eqs") jaceqs = argv[++i];
         else if (k == "--jac-interfaces") jacinterfaces = true;
+        else if (k == "--jac-outer") jacouter = true;
+        else if (k == "--outer-perturb") outerpert = std::stod(argv[++i]);
+        else if (k == "--outer-perturb-pow") outerpow = std::stoi(argv[++i]);
         else if (k == "--manufactured") manfile = argv[++i];
     }
 
@@ -536,6 +545,35 @@ int main(int argc, char** argv)
     std::cout << "# building system" << std::endl;
     System_of_eqs syst(space, 0, dtop);
     std::cout << "# system built" << std::endl;
+    // ⚠ THE BACKBONE'S OWN TAIL, kept as a CONSTANT so the outer row can
+    // subtract it.  Research round 345: the row is not "Phb has no 1/r tail" but
+    // "Phb's 1/r tail equals Phb_P's", because psi^2 = (R/r)e^{2 eps U} and
+    // R -> r + M_P + ..., so R/r carries its own 1/r piece.  Writing the first
+    // imposes a condition wrong by exactly the backbone's mass term -- and it
+    // would assemble cleanly and solve a different problem.  PHP is filled from
+    // the same W*R/r the seed uses, BEFORE any perturbation touches PH.
+    Scalar PHP(space);
+    for (int d = 0; d < ndom; d++) {
+        Val_domain& v = PHP.set_domain(d);
+        v.allocate_conf();
+        Index ix(space.get_domain(d)->get_nbr_points());
+        do { v.set(ix) = (d > dtop) ? 0.0 : PH(d)(ix); } while (ix.inc());
+    }
+    PHP.std_base();
+    if (outerpert != 0.0) {
+        // a KNOWN 1/r perturbation on top of the backbone tail
+        for (int d = 0; d <= dtop; d++) {
+            Val_domain& v = PH.set_domain(d);
+            Index ix(space.get_domain(d)->get_nbr_points());
+            do {
+                double rr = t.pts[d][ix(0)].r, den = 1.0;
+                for (int k = 0; k < outerpow; k++) den *= rr;
+                v.set(ix) += outerpert / den;
+            } while (ix.inc());
+        }
+        PH.std_base();
+    }
+
     // ⚠ THE SIX UNKNOWNS ARE CONSTANTS FOR EVERY DIAGNOSTIC AND VARIABLES FOR
     // THE JACOBIAN.  add_cst is what makes the residual diagnostics a pure
     // evaluation -- nothing is solved for, so nothing can be silently adjusted.
@@ -574,6 +612,7 @@ int main(int argc, char** argv)
     // `ones` is a field the apps register themselves (BH2d/NS2d do the same);
     // the emitted monomials materialise against it.
     syst.add_cst("ones", ONE);
+    syst.add_cst("PHP", PHP);
     // ⚠ JJ MUST MATCH THE DATA.  This was hardcoded to 0.0 -- correct for the
     // J = 0 seed, and silently wrong for manufactured data, which is generated
     // at J = 0.1.  Round 126 measured the consequence: D0022 = 6*JJ*sin^3, a def
@@ -834,9 +873,28 @@ int main(int argc, char** argv)
                 }
             emit("FJPJ_interface_conditions", nif);
         }
+        if (jacouter) {
+            // t_Q = 0: qf's own tail, no subtraction -- q_P = 0 exactly, a
+            // theorem of the conformal gauge.
+            syst.add_eq_bc(dtop, OUTER_BC, "multr(QF) = 0");
+            // 2 t_U + t_G = 0: Phi-bar = alpha psi^2, so the 1/r coefficient of
+            // ln Phi-bar is the sum of the lapse and psi^2 coefficients.  The
+            // backbone subtraction is EXPLICIT.
+            syst.add_eq_bc(dtop, OUTER_BC, "multr(PH) = multr(PHP)");
+            emit("FJPJ_outer_conditions", 2);
+        }
         Kadath::Array<double> bb(syst.sec_member());
         const int nrow = syst.get_nbr_conditions();
         const int ncol = syst.get_nbr_unknowns();
+        {   // ⚠ the RHS is what distinguishes "no tail" from "the backbone's
+            // tail": a row imposing SOME falloff assembles and counts exactly
+            // like the right one, and only the residual tells them apart.
+            double bmax = 0.0;
+            for (int r = 0; r < nrow; r++) bmax = std::max(bmax, std::fabs(bb(r)));
+            emit("FJPJ_rhs_max", bmax);
+            emit("FJPJ_outer_perturb", outerpert);
+            emit("FJPJ_outer_perturb_pow", outerpow);
+        }
         emit("FJPJ_rows", nrow);
         emit("FJPJ_cols", ncol);
         emit("FJPJ_m_minus_n", nrow - ncol);

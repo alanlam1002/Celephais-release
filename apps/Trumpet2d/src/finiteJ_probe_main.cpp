@@ -152,6 +152,12 @@ int main(int argc, char** argv)
     // of 528*ntheta - 176, which is not even divisible by six.
     std::string jacfields = "all";   // --jac-fields PS,PH,...
     std::string jaceqs = "all";      // --jac-eqs EQTW,ESHR,...
+    // ⚠ STEP 2 OF THE BVP BUILD (round 135): interface matching rows ONLY, no
+    // physics boundary row.  The system stays RECTANGULAR and nothing is
+    // claimed; the point is to exercise the interface machinery against a count
+    // known in advance -- 3 interfaces x 2 (value and derivative) x the field
+    // angular modes 6*ntheta - 3 = 36*ntheta - 18.
+    bool jacinterfaces = false;      // --jac-interfaces
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -181,6 +187,7 @@ int main(int argc, char** argv)
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--jac-fields") jacfields = argv[++i];
         else if (k == "--jac-eqs") jaceqs = argv[++i];
+        else if (k == "--jac-interfaces") jacinterfaces = true;
         else if (k == "--manufactured") manfile = argv[++i];
     }
 
@@ -805,6 +812,28 @@ int main(int argc, char** argv)
             for (const char* ename : Trumpet::finiteJ_eq_names())
                 if (wanted_eq(ename))
                     syst.add_eq_inside(d, (std::string(ename) + " = 0").c_str());
+        if (jacinterfaces) {
+            // value and radial derivative of every field, at the outer face of
+            // every domain but the last: three interfaces on this layout.
+            // ⚠ MUST RESPECT --jac-fields.  Round 135's first per-field check
+            // registered all six interfaces whatever was asked for, so every
+            // field returned the same 162/306 and the "isolation" isolated
+            // nothing.  A test that cannot vary its input reads as agreement.
+            const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+            int nif = 0;
+            for (int d = 0; d < dtop; d++)
+                for (int q = 0; q < 6; q++) {
+                    if (!(jacfields == "all"
+                          || (',' + jacfields + ',').find(std::string(",") + fn[q] + ",")
+                             != std::string::npos))
+                        continue;
+                    syst.add_eq_matching(d, OUTER_BC, fn[q]);
+                    syst.add_eq_matching(d, OUTER_BC,
+                                         (std::string("dr(") + fn[q] + ")").c_str());
+                    nif += 2;
+                }
+            emit("FJPJ_interface_conditions", nif);
+        }
         Kadath::Array<double> bb(syst.sec_member());
         const int nrow = syst.get_nbr_conditions();
         const int ncol = syst.get_nbr_unknowns();

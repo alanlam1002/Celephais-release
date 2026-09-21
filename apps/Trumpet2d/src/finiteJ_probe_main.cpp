@@ -164,6 +164,13 @@ int main(int argc, char** argv)
     bool jacouter = false;           // --jac-outer
     double outerpert = 0.0;          // --outer-perturb DELTA: add DELTA/r^p to PH
     int outerpow = 1;                // --outer-perturb-pow p
+    // ⚠ ROUND 137: the constant gauge family, as MULTIPLICATIVE scalings.
+    // CONVENTIONS l.16 absorbs a two-parameter constant family with
+    // U(inf) = Q(inf) = F(inf) = 0.  psi^2 = (R/r)e^{2 eps U} and
+    // alpha = W e^{eps F}, so a constant U shift scales PS and a constant F
+    // shift scales alpha -- and Phb = alpha psi^2 carries both.  These two
+    // apply the scalings directly so the family can be walked.
+    double scalePS = 1.0, scalePH = 1.0, scaleBR = 1.0;  // --scale-ps/-ph/-br F
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -197,6 +204,9 @@ int main(int argc, char** argv)
         else if (k == "--jac-outer") jacouter = true;
         else if (k == "--outer-perturb") outerpert = std::stod(argv[++i]);
         else if (k == "--outer-perturb-pow") outerpow = std::stoi(argv[++i]);
+        else if (k == "--scale-ps") scalePS = std::stod(argv[++i]);
+        else if (k == "--scale-ph") scalePH = std::stod(argv[++i]);
+        else if (k == "--scale-br") scaleBR = std::stod(argv[++i]);
         else if (k == "--manufactured") manfile = argv[++i];
     }
 
@@ -552,6 +562,10 @@ int main(int argc, char** argv)
     // imposes a condition wrong by exactly the backbone's mass term -- and it
     // would assemble cleanly and solve a different problem.  PHP is filled from
     // the same W*R/r the seed uses, BEFORE any perturbation touches PH.
+    // ⚠ PHP IS FILLED BEFORE ANY SCALING TOUCHES PH.  Ordering is the whole
+    // point: if PHP were copied afterwards it would capture the scaled field
+    // and the outer row's backbone subtraction would silently cancel whatever
+    // the scaling did.  Round 137's first version did exactly that.
     Scalar PHP(space);
     for (int d = 0; d < ndom; d++) {
         Val_domain& v = PHP.set_domain(d);
@@ -560,6 +574,19 @@ int main(int argc, char** argv)
         do { v.set(ix) = (d > dtop) ? 0.0 : PH(d)(ix); } while (ix.inc());
     }
     PHP.std_base();
+
+    // the constant-family walk (round 137), AFTER PHP is safe
+    if (scalePS != 1.0 || scalePH != 1.0 || scaleBR != 1.0) {
+        for (int d = 0; d <= dtop; d++) {
+            Val_domain& a = PS.set_domain(d);
+            Val_domain& b = PH.set_domain(d);
+            Val_domain& c = BR.set_domain(d);
+            Index ix(space.get_domain(d)->get_nbr_points());
+            do { a.set(ix) *= scalePS; b.set(ix) *= scalePH;
+                 c.set(ix) *= scaleBR; } while (ix.inc());
+        }
+        PS.std_base(); PH.std_base(); BR.std_base();
+    }
     if (outerpert != 0.0) {
         // a KNOWN 1/r perturbation on top of the backbone tail
         for (int d = 0; d <= dtop; d++) {

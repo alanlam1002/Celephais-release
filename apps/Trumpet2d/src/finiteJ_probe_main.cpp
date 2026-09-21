@@ -171,6 +171,19 @@ int main(int argc, char** argv)
     // shift scales alpha -- and Phb = alpha psi^2 carries both.  These two
     // apply the scalings directly so the family can be walked.
     double scalePS = 1.0, scalePH = 1.0, scaleBR = 1.0;  // --scale-ps/-ph/-br F
+    // ⚠ ROUND 146: --esht-nt2 registers the weighted E_sh^theta through one
+    // multsint, so its TAU PROJECTION drops from ntheta-1 to ntheta-2.
+    // Research round 365's count: the weighted row is COS_ODD and carries
+    // ntheta-1 angular modes, while BT -- the field it is paired with -- is
+    // SIN_EVEN and carries ntheta-2.  The system imposes one more mode of
+    // equation than the field has, once per radial slot, which is the 88.
+    // multsint takes COS_ODD to SIN_EVEN (the measured operator/basis lattice),
+    // so sin(theta) * E_sh^theta is the SAME equation away from the axis,
+    // projected onto ntheta-2 modes, and it imposes nothing at theta = 0.
+    // ⚠ It is NOT another weight: round 104 measured multsint . divsint = id at
+    // 1.1e-16 and the operand here is a finished, pole-free row, so nothing
+    // about the divsint contract changes.  What changes is the projection.
+    bool eshtnt2 = false;            // --esht-nt2
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -207,6 +220,7 @@ int main(int argc, char** argv)
         else if (k == "--scale-ps") scalePS = std::stod(argv[++i]);
         else if (k == "--scale-ph") scalePH = std::stod(argv[++i]);
         else if (k == "--scale-br") scaleBR = std::stod(argv[++i]);
+        else if (k == "--esht-nt2") eshtnt2 = true;
         else if (k == "--manufactured") manfile = argv[++i];
     }
 
@@ -876,8 +890,14 @@ int main(int argc, char** argv)
         };
         for (int d = 0; d <= dtop; d++)
             for (const char* ename : Trumpet::finiteJ_eq_names())
-                if (wanted_eq(ename))
-                    syst.add_eq_inside(d, (std::string(ename) + " = 0").c_str());
+                if (wanted_eq(ename)) {
+                    const bool proj = eshtnt2
+                                      && std::string(ename) == "ESHT";
+                    const std::string lhs = proj
+                        ? "multsint(" + std::string(ename) + ")"
+                        : std::string(ename);
+                    syst.add_eq_inside(d, (lhs + " = 0").c_str());
+                }
         if (jacinterfaces) {
             // value and radial derivative of every field, at the outer face of
             // every domain but the last: three interfaces on this layout.

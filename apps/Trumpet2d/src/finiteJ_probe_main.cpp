@@ -145,6 +145,13 @@ int main(int argc, char** argv)
     std::string gridout;
     std::string defsout;   // --dump-defs FILE
     std::string jacdump;   // --dump-jacobian FILE (BULK rows only)
+    // ⚠ STEP 1 OF THE BVP BUILD (round 134): the row/column counts must be
+    // ATTRIBUTED to named fields and equations, not inferred from the total.
+    // These two let a SUBSET be registered, so the per-field column count and
+    // the per-equation row count are read off directly instead of divided out
+    // of 528*ntheta - 176, which is not even divisible by six.
+    std::string jacfields = "all";   // --jac-fields PS,PH,...
+    std::string jaceqs = "all";      // --jac-eqs EQTW,ESHR,...
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -172,6 +179,8 @@ int main(int argc, char** argv)
         else if (k == "--dump-grid") gridout = argv[++i];
         else if (k == "--dump-defs") defsout = argv[++i];
         else if (k == "--dump-jacobian") jacdump = argv[++i];
+        else if (k == "--jac-fields") jacfields = argv[++i];
+        else if (k == "--jac-eqs") jaceqs = argv[++i];
         else if (k == "--manufactured") manfile = argv[++i];
     }
 
@@ -534,12 +543,17 @@ int main(int argc, char** argv)
         syst.add_cst("BT", BT);
         syst.add_cst("QB", QB);
     } else {
-        syst.add_var("PS", PS);
-        syst.add_var("PH", PH);
-        syst.add_var("QF", QF);
-        syst.add_var("BR", BR);
-        syst.add_var("BT", BT);
-        syst.add_var("QB", QB);
+        auto wanted = [](const std::string& list, const char* nm) {
+            if (list == "all") return true;
+            return (',' + list + ',').find(std::string(",") + nm + ",")
+                   != std::string::npos;
+        };
+        const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+        Scalar* fp[6] = {&PS, &PH, &QF, &BR, &BT, &QB};
+        for (int q = 0; q < 6; q++) {
+            if (wanted(jacfields, fn[q])) syst.add_var(fn[q], *fp[q]);
+            else                          syst.add_cst(fn[q], *fp[q]);
+        }
     }
     syst.add_cst("RR", RR);
     syst.add_cst("ST", ST);
@@ -782,9 +796,15 @@ int main(int argc, char** argv)
     // left null space is empty and it contributes no obstruction at all, which
     // would put the whole compatibility question in the BC rows.
     if (!jacdump.empty()) {
+        auto wanted_eq = [&](const char* nm) {
+            if (jaceqs == "all") return true;
+            return (',' + jaceqs + ',').find(std::string(",") + nm + ",")
+                   != std::string::npos;
+        };
         for (int d = 0; d <= dtop; d++)
             for (const char* ename : Trumpet::finiteJ_eq_names())
-                syst.add_eq_inside(d, (std::string(ename) + " = 0").c_str());
+                if (wanted_eq(ename))
+                    syst.add_eq_inside(d, (std::string(ename) + " = 0").c_str());
         Kadath::Array<double> bb(syst.sec_member());
         const int nrow = syst.get_nbr_conditions();
         const int ncol = syst.get_nbr_unknowns();

@@ -220,6 +220,18 @@ int main(int argc, char** argv)
     // still computes R/rr -- because rewriting it would move every number this
     // thread has published.
     bool compact = false;            // --compact
+    // ⚠ ROUND 151: an explicit B-hat^theta / beta~^r profile, so the monopole
+    // sweep can carry the note's OWN throat form as a named member instead of
+    // scanning blind.  analysis/note/main.tex l.1967-1968:
+    //   \hat\mB^\theta &= \alpha_0 \tb_0 r^{\sqrt{2}+1} A \sin\theta \cos\theta
+    //   \mB^r          &= \alpha_0 \tb_0 r^{\sqrt{2}+1} ( A \sin^2\theta + B/\sqrt2 )
+    // and l.1971: "where $A,B,C, D$ are constant to be determined."
+    // ⚠ THE TWO SHARE A AND THE SAME RADIAL POWER, so a BT-only sweep is not
+    // the throat solution.  --br-prof exists for exactly that reason and the
+    // tied run is reported beside the untied one.
+    double btpow = 0.0, btamp = 0.0;     // --bt-prof POW AMP : AMP r^POW sin cos
+    int btang = 2;                       // --bt-ang M        : sin(M theta)/2
+    double brpow = 0.0, bramp = 0.0, brB = 0.0;  // --br-prof POW A B
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -261,6 +273,12 @@ int main(int argc, char** argv)
         else if (k == "--sdef") { sdef = true; sdefdelta = std::stod(argv[++i]); }
         else if (k == "--jj") { havejj = true; jjoverride = std::stod(argv[++i]); }
         else if (k == "--compact") compact = true;
+        else if (k == "--bt-prof") { btpow = std::stod(argv[++i]);
+                                     btamp = std::stod(argv[++i]); }
+        else if (k == "--bt-ang") btang = std::stoi(argv[++i]);
+        else if (k == "--br-prof") { brpow = std::stod(argv[++i]);
+                                     bramp = std::stod(argv[++i]);
+                                     brB = std::stod(argv[++i]); }
         else if (k == "--manufactured") manfile = argv[++i];
     }
 
@@ -684,6 +702,37 @@ int main(int argc, char** argv)
         } while (ix.inc());
     }
     ALP.std_base();
+
+    // ⚠ THE EXPLICIT THROAT PROFILES, applied AFTER PHP is filled so the outer
+    // row's backbone subtraction is unaffected, and after the seed so they ADD
+    // to it rather than replace it.
+    if (btamp != 0.0 || bramp != 0.0 || brB != 0.0) {
+        for (int d = 0; d <= dtop; d++) {
+            const Kadath::Domain* dm = space.get_domain(d);
+            Val_domain& vb = BT.set_domain(d);
+            Val_domain& vr = BR.set_domain(d);
+            Index ix(dm->get_nbr_points());
+            do {
+                const double rr = t.pts[d][ix(0)].r;
+                const double tt = dm->get_coloc(2)(ix(1));
+                if (!std::isfinite(rr))
+                    continue;             // the compact domain's outermost node
+                if (btamp != 0.0)
+                    vb.set(ix) += btamp * std::pow(rr, btpow)
+                                  * std::sin(btang * tt) / 2.0;
+                if (bramp != 0.0 || brB != 0.0)
+                    vr.set(ix) += std::pow(rr, brpow)
+                                  * (bramp * std::sin(tt) * std::sin(tt)
+                                     + brB / std::sqrt(2.0));
+            } while (ix.inc());
+        }
+        emit("FJP_bt_prof_pow", btpow);
+        emit("FJP_bt_prof_amp", btamp);
+        emit("FJP_bt_prof_ang", btang);
+        emit("FJP_br_prof_pow", brpow);
+        emit("FJP_br_prof_A", bramp);
+        emit("FJP_br_prof_B", brB);
+    }
 
     // the constant-family walk (round 137), AFTER PHP is safe
     if (scalePS != 1.0 || scalePH != 1.0 || scaleBR != 1.0) {

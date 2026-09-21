@@ -232,6 +232,18 @@ int main(int argc, char** argv)
     double btpow = 0.0, btamp = 0.0;     // --bt-prof POW AMP : AMP r^POW sin cos
     int btang = 2;                       // --bt-ang M        : sin(M theta)/2
     double brpow = 0.0, bramp = 0.0, brB = 0.0;  // --br-prof POW A B
+    // ⚠ ROUND 152: the note's THREE-FIELD throat configuration, applied with
+    // its own coefficients rather than as a shape plus a free amplitude.
+    // analysis/note/main.tex l.1966-1968:
+    //   u            = u_0 + (1/(2 sqrt2)) alpha_0 r^sqrt2 ( A sin^2 th + D )
+    //   Bhat^theta   = alpha_0 tb_0 r^{sqrt2+1} A sin th cos th
+    //   B^r          = alpha_0 tb_0 r^{sqrt2+1} ( A sin^2 th + B/sqrt2 )
+    // l.1969's varphi is NOT applied: it needs C and E, which research did not
+    // carry across, and importing them from the earlier version's section is
+    // exactly the substitution this project keeps paying for.
+    // psi^2 = (R/r) e^{2u}, so the u perturbation enters as PS *= exp(2 du).
+    bool throat = false;
+    double thA = 0.0, thB = 0.0, thD = 0.0, tha0 = 0.0, thb0 = 0.0;
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -276,6 +288,12 @@ int main(int argc, char** argv)
         else if (k == "--bt-prof") { btpow = std::stod(argv[++i]);
                                      btamp = std::stod(argv[++i]); }
         else if (k == "--bt-ang") btang = std::stoi(argv[++i]);
+        else if (k == "--throat") { throat = true;
+                                    thA = std::stod(argv[++i]);
+                                    thB = std::stod(argv[++i]);
+                                    thD = std::stod(argv[++i]);
+                                    tha0 = std::stod(argv[++i]);
+                                    thb0 = std::stod(argv[++i]); }
         else if (k == "--br-prof") { brpow = std::stod(argv[++i]);
                                      bramp = std::stod(argv[++i]);
                                      brB = std::stod(argv[++i]); }
@@ -732,6 +750,35 @@ int main(int argc, char** argv)
         emit("FJP_br_prof_pow", brpow);
         emit("FJP_br_prof_A", bramp);
         emit("FJP_br_prof_B", brB);
+    }
+
+    if (throat) {
+        const double q2 = std::sqrt(2.0);
+        for (int d = 0; d <= dtop; d++) {
+            const Kadath::Domain* dm = space.get_domain(d);
+            Val_domain& vp = PS.set_domain(d);
+            Val_domain& vb = BT.set_domain(d);
+            Val_domain& vr = BR.set_domain(d);
+            Index ix(dm->get_nbr_points());
+            do {
+                const double rr = t.pts[d][ix(0)].r;
+                if (!std::isfinite(rr))
+                    continue;
+                const double tt = dm->get_coloc(2)(ix(1));
+                const double s2 = std::sin(tt) * std::sin(tt);
+                const double du = (1.0 / (2.0 * q2)) * tha0 * std::pow(rr, q2)
+                                  * (thA * s2 + thD);
+                const double amp = tha0 * thb0 * std::pow(rr, q2 + 1.0);
+                vp.set(ix) *= std::exp(2.0 * du);
+                vb.set(ix) += amp * thA * std::sin(tt) * std::cos(tt);
+                vr.set(ix) += amp * (thA * s2 + thB / q2);
+            } while (ix.inc());
+        }
+        emit("FJP_throat_A", thA);
+        emit("FJP_throat_B", thB);
+        emit("FJP_throat_D", thD);
+        emit("FJP_throat_a0", tha0);
+        emit("FJP_throat_b0", thb0);
     }
 
     // the constant-family walk (round 137), AFTER PHP is safe

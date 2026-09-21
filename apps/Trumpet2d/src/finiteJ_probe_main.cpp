@@ -244,6 +244,13 @@ int main(int argc, char** argv)
     // psi^2 = (R/r) e^{2u}, so the u perturbation enters as PS *= exp(2 du).
     bool throat = false;
     double thA = 0.0, thB = 0.0, thD = 0.0, tha0 = 0.0, thb0 = 0.0;
+    // ⚠ ROUND 153: l.1969's varphi, with C and E PASSED IN rather than known.
+    //   \vp = (1/sqrt2) alpha_0 Phb_0 r^{2 sqrt2 - 1} ( C sin^2 th + E )
+    // Phibar = alpha psi^2 and varphi is its log perturbation, so this enters
+    // as PH *= exp(dvp).  It exists so that the linear RESPONSE to C and to E
+    // can be measured and the C that would close the A* gap can be SOLVED FOR
+    // -- which is a statement about what C would have to be, not a value of C.
+    double thC = 0.0, thE = 0.0, thP0 = 0.0;   // --phi-prof C E Phb_0
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -288,6 +295,9 @@ int main(int argc, char** argv)
         else if (k == "--bt-prof") { btpow = std::stod(argv[++i]);
                                      btamp = std::stod(argv[++i]); }
         else if (k == "--bt-ang") btang = std::stoi(argv[++i]);
+        else if (k == "--phi-prof") { thC = std::stod(argv[++i]);
+                                      thE = std::stod(argv[++i]);
+                                      thP0 = std::stod(argv[++i]); }
         else if (k == "--throat") { throat = true;
                                     thA = std::stod(argv[++i]);
                                     thB = std::stod(argv[++i]);
@@ -772,6 +782,12 @@ int main(int argc, char** argv)
                 vp.set(ix) *= std::exp(2.0 * du);
                 vb.set(ix) += amp * thA * std::sin(tt) * std::cos(tt);
                 vr.set(ix) += amp * (thA * s2 + thB / q2);
+                if (thC != 0.0 || thE != 0.0) {
+                    const double dvp = (1.0 / q2) * tha0 * thP0
+                                       * std::pow(rr, 2.0 * q2 - 1.0)
+                                       * (thC * s2 + thE);
+                    PH.set_domain(d).set(ix) *= std::exp(dvp);
+                }
             } while (ix.inc());
         }
         emit("FJP_throat_A", thA);
@@ -779,6 +795,9 @@ int main(int argc, char** argv)
         emit("FJP_throat_D", thD);
         emit("FJP_throat_a0", tha0);
         emit("FJP_throat_b0", thb0);
+        emit("FJP_throat_C", thC);
+        emit("FJP_throat_E", thE);
+        emit("FJP_throat_P0", thP0);
     }
 
     // the constant-family walk (round 137), AFTER PHP is safe

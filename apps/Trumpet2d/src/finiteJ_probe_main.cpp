@@ -144,6 +144,7 @@ int main(int argc, char** argv)
     // wrong silently.
     std::string gridout;
     std::string defsout;   // --dump-defs FILE
+    std::string jacdump;   // --dump-jacobian FILE (BULK rows only)
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -170,6 +171,7 @@ int main(int argc, char** argv)
         else if (k == "--pmix") pmix = argv[++i];
         else if (k == "--dump-grid") gridout = argv[++i];
         else if (k == "--dump-defs") defsout = argv[++i];
+        else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--manufactured") manfile = argv[++i];
     }
 
@@ -518,12 +520,27 @@ int main(int argc, char** argv)
     std::cout << "# building system" << std::endl;
     System_of_eqs syst(space, 0, dtop);
     std::cout << "# system built" << std::endl;
-    syst.add_cst("PS", PS);
-    syst.add_cst("PH", PH);
-    syst.add_cst("QF", QF);
-    syst.add_cst("BR", BR);
-    syst.add_cst("BT", BT);
-    syst.add_cst("QB", QB);
+    // ⚠ THE SIX UNKNOWNS ARE CONSTANTS FOR EVERY DIAGNOSTIC AND VARIABLES FOR
+    // THE JACOBIAN.  add_cst is what makes the residual diagnostics a pure
+    // evaluation -- nothing is solved for, so nothing can be silently adjusted.
+    // A Jacobian needs them to be unknowns, and that is the ONLY thing
+    // --dump-jacobian changes about the registration; the def chain, the bases
+    // and the read-back contract are identical either way.
+    if (jacdump.empty()) {
+        syst.add_cst("PS", PS);
+        syst.add_cst("PH", PH);
+        syst.add_cst("QF", QF);
+        syst.add_cst("BR", BR);
+        syst.add_cst("BT", BT);
+        syst.add_cst("QB", QB);
+    } else {
+        syst.add_var("PS", PS);
+        syst.add_var("PH", PH);
+        syst.add_var("QF", QF);
+        syst.add_var("BR", BR);
+        syst.add_var("BT", BT);
+        syst.add_var("QB", QB);
+    }
     syst.add_cst("RR", RR);
     syst.add_cst("ST", ST);
     syst.add_cst("CT", CT);
@@ -750,6 +767,52 @@ int main(int argc, char** argv)
         return 3;
     }
     emit("FJP_subdefs", static_cast<double>(nsub));
+
+    // ---- --dump-jacobian: the BULK operator, with NO boundary rows ---------
+    // ⚠ WHAT THIS IS AND IS NOT.  These are the six equations registered as
+    // equations on every domain and nothing else: no inner match to the
+    // rho-series, no outer far-field rows, no compatibility at R = 2M.  So it
+    // is NOT P2 and must never be quoted as one -- P2 is a left-null quantity
+    // of the FULL BVP and research round 341 is explicit that sigma_min, a
+    // right-null quantity, does not answer the blocker question either.
+    //
+    // What it establishes is one-sided and worth having: adding rows cannot
+    // decrease sigma_min, so sigma_min(bulk + BC) >= sigma_min(bulk).  And the
+    // counting m - n is reported beside it, because if the bulk is square its
+    // left null space is empty and it contributes no obstruction at all, which
+    // would put the whole compatibility question in the BC rows.
+    if (!jacdump.empty()) {
+        for (int d = 0; d <= dtop; d++)
+            for (const char* ename : Trumpet::finiteJ_eq_names())
+                syst.add_eq_inside(d, (std::string(ename) + " = 0").c_str());
+        Kadath::Array<double> bb(syst.sec_member());
+        const int nrow = syst.get_nbr_conditions();
+        const int ncol = syst.get_nbr_unknowns();
+        emit("FJPJ_rows", nrow);
+        emit("FJPJ_cols", ncol);
+        emit("FJPJ_m_minus_n", nrow - ncol);
+        if (rank == 0) {
+            std::ofstream fh(jacdump);
+            fh << "# Jacobian of the finite-J BULK operator (no BC rows)  rows "
+               << nrow << " cols " << ncol << "\n";
+            fh << "# ntheta " << ntheta << " dtop " << dtop << "\n";
+            fh << std::setprecision(17);
+            for (int r = 0; r < nrow; r++)
+                fh << "rhs " << r << " " << bb(r) << "\n";
+            long long nnz = 0;
+            for (int c = 0; c < ncol; c++) {
+                Kadath::Array<double> col(syst.do_col_J(c));
+                for (int r = 0; r < nrow; r++)
+                    if (col(r) != 0.0) {
+                        fh << "J " << r << " " << c << " " << col(r) << "\n";
+                        nnz++;
+                    }
+            }
+            emit("FJPJ_nnz", double(nnz));
+            emit("FJPJ_density", double(nnz) / (double(nrow) * double(ncol)));
+            std::cout << "# bulk Jacobian written to " << jacdump << "\n";
+        }
+    }
 
     // ---- --dump-defs FILE: every sub-def's value at every collocation point.
     // The bisection instrument (round 126).  Written from Kadath so the

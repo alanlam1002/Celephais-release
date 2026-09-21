@@ -209,6 +209,17 @@ int main(int argc, char** argv)
     // residual IS the source, which is what the t_Q monopole question needs.
     double jjoverride = 0.0;
     bool havejj = false;             // --jj J
+    // ⚠ --compact INCLUDES THE COMPACT DOMAIN, which nothing in this thread has
+    // exercised (research round 368).  The probe has always stopped at the last
+    // finite shell because the seed as WRITTEN is 0/0 there -- R/r and C r/R^3
+    // with R = Rr*r and r = infinity.  But the table carries Rr and oor = 1/r
+    // as columns, and in those the same seed is
+    //     psi^2 = Rr,   Phb = W Rr,   beta~^r = C oor^2 / Rr^3
+    // with no 0/0 anywhere: at r = infinity the table gives W = 1, Rr = 1,
+    // oor = 0 exactly.  The finite-shell path is left BYTE-IDENTICAL -- it
+    // still computes R/rr -- because rewriting it would move every number this
+    // thread has published.
+    bool compact = false;            // --compact
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -249,6 +260,7 @@ int main(int argc, char** argv)
         else if (k == "--no-esht-nt2") eshtnt2 = false;
         else if (k == "--sdef") { sdef = true; sdefdelta = std::stod(argv[++i]); }
         else if (k == "--jj") { havejj = true; jjoverride = std::stod(argv[++i]); }
+        else if (k == "--compact") compact = true;
         else if (k == "--manufactured") manfile = argv[++i];
     }
 
@@ -322,7 +334,17 @@ int main(int argc, char** argv)
     // The compact domain carries r = infinity, where the seed's R/r and C r/R^3
     // are 0/0 in floating point.  The probe therefore runs on the SHELLS only
     // and says so, rather than reporting a NaN as a small number.
-    const int dtop = dlast - 1;
+    const int dtop = compact ? dlast : dlast - 1;
+    if (compact && !clean) {
+        // ⚠ the smoke battery reads RR, which is r and is infinite in the
+        // compact domain.  Refused rather than run: a battery of inf is not a
+        // failure it would report, it is a battery that cannot discriminate.
+        if (rank == 0)
+            std::cerr << "FATAL: --compact requires --clean; the smoke battery "
+                         "reads RR = r, which is infinite there.\n";
+        MPI_Finalize();
+        return 8;
+    }
     std::cout << "# finiteJ_probe  ntheta=" << ntheta << "  shells 0.." << dtop
               << " of " << ndom << " domains  perturb=" << perturb << "\n";
     emit("FJP_ntheta", ntheta);
@@ -361,10 +383,39 @@ int main(int argc, char** argv)
         Index idx(dm->get_nbr_points());
         do {
             const int i = idx(0);
-            if (d > dtop) {                      // the compact domain: r = infinity
-                for (Val_domain* v : {&vps, &vph, &vqf, &vbr, &vbt, &vqb,
-                                      &vrr, &vst, &vct, &vc2, &vh2, &vl2, &vcx, &vsq, &vt7, &von})
-                    v->set(idx) = 0.0;
+            if (d == dlast) {                    // the compact domain
+                if (!compact) {
+                    for (Val_domain* v : {&vps, &vph, &vqf, &vbr, &vbt, &vqb,
+                                          &vrr, &vst, &vct, &vc2, &vh2, &vl2, &vcx, &vsq, &vt7, &von})
+                        v->set(idx) = 0.0;
+                    continue;
+                }
+                // the SAME seed, written in the table's own columns so that
+                // nothing is 0/0 -- see --compact above
+                const double Wc = t.pts[d][i].W;
+                const double Rc = t.pts[d][i].Rr;
+                const double uc = t.pts[d][i].oor;
+                const double thc = dm->get_coloc(2)(idx(1));
+                vps.set(idx) = Rc;
+                vph.set(idx) = Wc * Rc;
+                vqf.set(idx) = 0.0;
+                vbr.set(idx) = C * uc * uc / (Rc * Rc * Rc);
+                vbt.set(idx) = 0.0;
+                vqb.set(idx) = 0.0;
+                // ⚠ the scaffolding fields are NOT extended.  RR is r, which is
+                // infinite here, and the smoke battery that uses it is off under
+                // --clean; --compact requires --clean for that reason and the
+                // check is below.  ST/CT and friends are angular and carry over.
+                vrr.set(idx) = (uc > 0.0) ? 1.0 / uc : 0.0;
+                vst.set(idx) = std::sin(thc);
+                vct.set(idx) = std::cos(thc);
+                vc2.set(idx) = std::cos(2.0 * thc);
+                vh2.set(idx) = 0.0;
+                vl2.set(idx) = 0.0;
+                vcx.set(idx) = 0.0;
+                vsq.set(idx) = (1.0 - std::cos(2.0 * thc)) / 2.0;
+                vt7.set(idx) = std::sin(2.0 * thc) / 2.0;
+                von.set(idx) = 1.0;
                 continue;
             }
             const double rr = t.pts[d][i].r;

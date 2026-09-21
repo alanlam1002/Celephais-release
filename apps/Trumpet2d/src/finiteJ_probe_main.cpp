@@ -188,6 +188,27 @@ int main(int argc, char** argv)
     // permissive one -- rounds 125, 143 and 144 each cost a round to a flag
     // whose absence meant False, and the convention is now the project's.
     bool eshtnt2 = true;             // --esht-nt2 / --no-esht-nt2
+    // ⚠ STEP 4, FIRST PIECE (round 148): S_def, the deformed reference lapse's
+    // contribution.  working_draft.tex l.1971-1973 defines
+    //   alpha_P^{(n)} := alpha_P^{n/sqrt2},   delta := n/sqrt2 - 1
+    // and l.1996-2003 gives
+    //   S_def = delta [ Lap3 ln alpha_P + 2 D ln Phb_P . D ln alpha_P
+    //                   + D ln(r sin th) . D ln alpha_P ]
+    //           + delta^2 (D ln alpha_P)^2
+    // l.2004-2006: it "carries no field and so enters the residual and never
+    // the Jacobian: the Newton solve is unchanged and only the right-hand side
+    // moves", which is why this piece is buildable and checkable with no solve.
+    // --sdef DELTA runs it; the two self-checks the draft states are run with
+    // it and are the whole point of doing this piece first.
+    bool sdef = false;
+    double sdefdelta = 0.0;          // --sdef DELTA
+    // ⚠ --jj SETS THE SPIN CONSTANT WITHOUT MANUFACTURED DATA.  Until now JJ
+    // came from the manufactured file or was 0, and round 126 lost a round to
+    // add_cst("JJ", 0.0) while the data was at J = 0.1.  The J = 0 seed with
+    // JJ != 0 is a legitimate and useful state: q = 0 there, so the E_q
+    // residual IS the source, which is what the t_Q monopole question needs.
+    double jjoverride = 0.0;
+    bool havejj = false;             // --jj J
     // --manufactured FILE: fill the six unknowns from a table and compare the
     // equations against the sources tabulated beside them.  The FIELD SET and
     // the EQUATION NAMES are read from the file's header, so changing either
@@ -226,6 +247,8 @@ int main(int argc, char** argv)
         else if (k == "--scale-br") scaleBR = std::stod(argv[++i]);
         else if (k == "--esht-nt2") eshtnt2 = true;
         else if (k == "--no-esht-nt2") eshtnt2 = false;
+        else if (k == "--sdef") { sdef = true; sdefdelta = std::stod(argv[++i]); }
+        else if (k == "--jj") { havejj = true; jjoverride = std::stod(argv[++i]); }
         else if (k == "--manufactured") manfile = argv[++i];
     }
 
@@ -594,6 +617,23 @@ int main(int argc, char** argv)
     }
     PHP.std_base();
 
+    // ⚠ alpha_P IS W, AND THAT IS READ OFF THE SEED RATHER THAN ASSUMED.  The
+    // seed above sets  vps = R/r  and  vph = W R/r, so Phb_P = alpha_P psi_P^2
+    // gives alpha_P = W.  ALP is filled from t.pts[d][i].W directly -- the same
+    // table the seed uses -- and BEFORE any perturbation or scaling, for the
+    // reason PHP is: a reference captured after the perturbation is not a
+    // reference (round 137).
+    Scalar ALP(space);
+    for (int d = 0; d < ndom; d++) {
+        Val_domain& v = ALP.set_domain(d);
+        v.allocate_conf();
+        Index ix(space.get_domain(d)->get_nbr_points());
+        do {
+            v.set(ix) = (d > dtop) ? 1.0 : t.pts[d][ix(0)].W;
+        } while (ix.inc());
+    }
+    ALP.std_base();
+
     // the constant-family walk (round 137), AFTER PHP is safe
     if (scalePS != 1.0 || scalePH != 1.0 || scaleBR != 1.0) {
         for (int d = 0; d <= dtop; d++) {
@@ -659,6 +699,8 @@ int main(int argc, char** argv)
     // the emitted monomials materialise against it.
     syst.add_cst("ones", ONE);
     syst.add_cst("PHP", PHP);
+    syst.add_cst("ALP", ALP);
+    syst.add_cst("DEL", sdefdelta);
     // ⚠ JJ MUST MATCH THE DATA.  This was hardcoded to 0.0 -- correct for the
     // J = 0 seed, and silently wrong for manufactured data, which is generated
     // at J = 0.1.  Round 126 measured the consequence: D0022 = 6*JJ*sin^3, a def
@@ -666,7 +708,12 @@ int main(int argc, char** argv)
     // and that is what a constant mismatch looks like rather than a defect.
     // Round 125 read the whole effect as the emitted text and the twin
     // computing different functions; it was this.
-    syst.add_cst("JJ", mandata.empty() ? 0.0 : man_J);
+    // ⚠ --jj WINS over the manufactured file's J, and the two are never mixed
+    // silently: whichever is used is emitted as FJP_JJ.
+    syst.add_cst("JJ", havejj ? jjoverride
+                              : (mandata.empty() ? 0.0 : man_J));
+    emit("FJP_JJ", havejj ? jjoverride
+                          : (mandata.empty() ? 0.0 : man_J));
     if (rank == 0 && !mandata.empty())
         std::cout << "#   JJ set from the manufactured data: " << man_J << "\n";
     std::cout << "# csts registered" << std::endl;
@@ -873,6 +920,151 @@ int main(int argc, char** argv)
         return 3;
     }
     emit("FJP_subdefs", static_cast<double>(nsub));
+
+    // ---- STEP 4, FIRST PIECE: S_def and its two self-checks ---------------
+    // ⚠ EVERY PIECE IS ITS OWN NAMED DEF, so no sum has an unnamed first
+    // operand (round 108's defect) and every operand is read in registration
+    // order by add_def.  The expression is transcribed from
+    // working_draft.tex l.1996-2003 term by term rather than simplified first.
+    //
+    // ⚠ ONE TERM IS OMITTED AND THE OMISSION IS MEASURED, NOT ASSUMED.
+    // D ln(r sin th) . D X = (1/r) dr(X) + (cot th / r^2) dt(X), and the second
+    // piece is dropped here because alpha_P is a function of r alone so
+    // dt(ln alpha_P) = 0.  That is exactly the kind of claim this project has
+    // been wrong about, so FJP_sdef_dtLA reports max |dt(LA)| over the grid and
+    // the block REFUSES if it is not zero.  Emitting the cot form instead would
+    // put a divsint on an operand of sin-order 0 into a clean emission, which
+    // is what rounds 126 and 144 cost.
+    if (sdef) {
+        const char* SD[] = {
+            "LA = log(ALP)",
+            "LPH = log(PHP)",
+            "DLA = dr(LA)",
+            "DLP = dr(LPH)",
+            "TLA = dt(LA)",
+            "TLP = dt(LPH)",
+            "SA = lap(LA)",
+            "SB1 = DLP * DLA",
+            "SB2 = TLP * TLA",
+            "SB3 = divr(divr(SB2))",
+            "SB4 = SB1 + SB3",
+            "SB = 2 * SB4",
+            "SC = divr(DLA)",
+            "SG1 = DLA * DLA",
+            "SG2 = TLA * TLA",
+            "SG3 = divr(divr(SG2))",
+            "SG = SG1 + SG3",
+            "SS1 = SA + SB",
+            "SS2 = SS1 + SC",
+            "SS3 = DEL * SS2",
+            "SG4 = DEL * SG",
+            "SG5 = DEL * SG4",
+            "SDEF = SS3 + SG5",
+            "RSD = SDEF * RR",
+            "RRSD = RSD * RR",
+        };
+        for (const char* d : SD)
+            syst.add_def(d);
+        // ⚠ FETCHING IS NOT READING (round 108): index every def once, in
+        // registration order, before anything is read back.
+        for (const char* d : SD) {
+            std::string nm(d);
+            nm = nm.substr(0, nm.find(' '));
+            for (int dd = 0; dd <= dtop; dd++) {
+                const Val_domain& v =
+                    syst.give_val_def_scalar_domain(nm.c_str(), dd);
+                Index ix(space.get_domain(dd)->get_nbr_points());
+                do { (void) v(ix); } while (ix.inc());
+            }
+        }
+        // ⚠ std::max SILENTLY SWALLOWS NaN, so a sup-norm built from it cannot
+        // detect a non-finite field: std::max(m, NaN) returns m, because every
+        // comparison with NaN is false.  The first version of this guard used
+        // exactly that and reported max |S_def| = 0.295 on a layout whose
+        // values were NaN at every point it had skipped.  The non-finite points
+        // are COUNTED separately, which is the only way the check can fail.
+        long nonfin = 0;
+        auto sup = [&](const char* nm, int dd) {
+            const Val_domain& v = syst.give_val_def_scalar_domain(nm, dd);
+            double m = 0.0;
+            Index ix(space.get_domain(dd)->get_nbr_points());
+            do {
+                const double x = v(ix);
+                if (!std::isfinite(x)) { nonfin++; continue; }
+                m = std::max(m, std::fabs(x));
+            } while (ix.inc());
+            return m;
+        };
+        double dtla = 0.0, dtlp = 0.0, sd = 0.0;
+        for (int dd = 0; dd <= dtop; dd++) {
+            dtla = std::max(dtla, sup("TLA", dd));
+            dtlp = std::max(dtlp, sup("TLP", dd));
+            sd = std::max(sd, sup("SDEF", dd));
+        }
+        emit("FJP_sdef_nonfinite", static_cast<double>(nonfin));
+        emit("FJP_sdef_delta", sdefdelta);
+        emit("FJP_sdef_dtLA", dtla);
+        emit("FJP_sdef_dtLPH", dtlp);
+        emit("FJP_sdef_sup", sd);
+        if (rank == 0) {
+            std::cout << "#\n#   S_def, delta = " << sdefdelta << "\n";
+            std::cout << "#   max |dt(ln alpha_P)| = " << dtla
+                      << "   max |dt(ln Phb_P)| = " << dtlp
+                      << "   (the omitted cot term is proportional to the "
+                         "first)\n";
+            std::cout << "#   max |S_def| = " << sd << "\n";
+        }
+        // ⚠ S_def GOES AS 1/r^2 AT THE THROAT (draft l.2007-2009), so a layout
+        // whose inner domain REACHES r = 0 cannot carry it: ln alpha_P = ln 0
+        // there and every derived quantity is non-finite.  Measured on
+        // backbone_stock_res21.dat, whose first radius is exactly 0.  Refused
+        // rather than reported, because a table of nan reads as a failed build
+        // and this is a statement about the layout.
+        if (nonfin || !std::isfinite(sd)) {
+            if (rank == 0)
+                std::cerr << "FATAL: S_def is not finite at " << nonfin
+                          << " point(s) on this layout.  It goes as 1/r^2 at "
+                             "the throat, so an inner domain reaching r = 0 "
+                             "cannot carry it.\n";
+            MPI_Finalize();
+            return 7;
+        }
+        if (dtla != 0.0) {
+            if (rank == 0)
+                std::cerr << "FATAL: dt(ln alpha_P) is not identically zero, so "
+                             "the omitted cot(theta) term is not zero either "
+                             "and S_def as built is incomplete\n";
+            MPI_Finalize();
+            return 6;
+        }
+        // SELF-CHECK 2: near the throat S_def -> 2 delta (delta + 2) / r^2,
+        // draft l.2007-2009.  Reported as r^2 S_def against that constant, at
+        // the innermost radii of domain 0, WITH its approach rather than as a
+        // single number: ln alpha_P = sqrt2 ln r + O(1) is a leading-order
+        // statement and the O(1) is what the approach measures.
+        if (rank == 0) {
+            const double want = 2.0 * sdefdelta * (sdefdelta + 2.0);
+            std::cout << "#   near-throat check: r^2 S_def -> 2 d (d+2) = "
+                      << want << "\n";
+            std::cout << "#     i   r            r^2 S_def        ratio\n";
+            const Val_domain& v =
+                syst.give_val_def_scalar_domain("RRSD", 0);
+            Index ix(space.get_domain(0)->get_nbr_points());
+            const int npr = space.get_domain(0)->get_nbr_points()(0);
+            for (int i = 0; i < std::min(6, npr); i++) {
+                Index jx(space.get_domain(0)->get_nbr_points());
+                jx.set(0) = i; jx.set(1) = 0;
+                std::cout << "#     " << std::setw(3) << i << "   "
+                          << std::setw(11) << t.pts[0][i].r << "   "
+                          << std::setw(14) << v(jx) << "   "
+                          << (want != 0.0 ? v(jx) / want : 0.0) << "\n";
+            }
+            emit("FJP_sdef_throat_target", want);
+            Index jx(space.get_domain(0)->get_nbr_points());
+            jx.set(0) = 0; jx.set(1) = 0;
+            emit("FJP_sdef_r2S_innermost", v(jx));
+        }
+    }
 
     // ---- --dump-jacobian: the BULK operator, with NO boundary rows ---------
     // ⚠ WHAT THIS IS AND IS NOT.  These are the six equations registered as

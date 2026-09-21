@@ -1424,8 +1424,8 @@ namespace Trumpet
     /// Emission-time AXIS PRECONDITION violations carried into the
     /// artefact: each is a divsint applied where the emitter could not
     /// show the operand vanishes on the axis.  Empty is the only
-    /// acceptable state; a non-empty list means this header was written
-    /// under --allow-axis-violations and the defs named here are wrong.
+    /// acceptable state, and since round 342 it is the only reachable
+    /// one: the emitter refuses to write a violating emission at all.
     inline const std::vector<const char*>& finiteJ_axis_violations()
     {
         static const std::vector<const char*> V = {

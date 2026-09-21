@@ -162,6 +162,14 @@ int main(int argc, char** argv)
     // Prediction, stated before running: Phb and qf are both COS_EVEN, so
     // ntheta modes each and 2*ntheta rows.
     bool jacouter = false;           // --jac-outer
+    // ⚠ ROUND 155: the two outer rows registered SEPARATELY, because research
+    // round 379 found that multr(QF) = 0 is not what it is named for.  It is
+    // not t_Q = 0 (which needs no imposing) and not the asymptotic condition
+    // (which must fix the ln r coefficient or the additive constant); it is
+    // q = 0 at r = 3.9389, where q is small and not zero -- an approximation
+    // imposed as a condition, which a COUNT cannot see.  --jac-outer-rows
+    // selects a subset so the two can be told apart.
+    std::string jacouterrows = "q,phb";   // --jac-outer-rows q,phb
     double outerpert = 0.0;          // --outer-perturb DELTA: add DELTA/r^p to PH
     int outerpow = 1;                // --outer-perturb-pow p
     // ⚠ ROUND 137: the constant gauge family, as MULTIPLICATIVE scalings.
@@ -282,6 +290,7 @@ int main(int argc, char** argv)
         else if (k == "--jac-eqs") jaceqs = argv[++i];
         else if (k == "--jac-interfaces") jacinterfaces = true;
         else if (k == "--jac-outer") jacouter = true;
+        else if (k == "--jac-outer-rows") jacouterrows = argv[++i];
         else if (k == "--outer-perturb") outerpert = std::stod(argv[++i]);
         else if (k == "--outer-perturb-pow") outerpow = std::stoi(argv[++i]);
         else if (k == "--scale-ps") scalePS = std::stod(argv[++i]);
@@ -1284,14 +1293,54 @@ int main(int argc, char** argv)
             emit("FJPJ_interface_conditions", nif);
         }
         if (jacouter) {
-            // t_Q = 0: qf's own tail, no subtraction -- q_P = 0 exactly, a
-            // theorem of the conformal gauge.
-            syst.add_eq_bc(dtop, OUTER_BC, "multr(QF) = 0");
+            const std::string want = ',' + jacouterrows + ',';
+            int nout = 0;
+            // ⚠ NAMED t_Q = 0, BUT IT IS NOT THAT.  Research round 379: q_P = 0
+            // is a theorem of the conformal gauge, so t_Q needs no imposing;
+            // and the asymptotic condition for a 2-D Laplacian must fix the
+            // ln r coefficient or the additive constant.  What this row
+            // actually imposes is q = 0 AT r = r_out, a Dirichlet condition at
+            // a finite radius where q is small and not zero.  It is kept, and
+            // separately selectable, so that what it constrains can be
+            // measured rather than argued.
+            if (want.find(",q,") != std::string::npos) {
+                syst.add_eq_bc(dtop, OUTER_BC, "multr(QF) = 0");
+                nout++;
+            }
             // 2 t_U + t_G = 0: Phi-bar = alpha psi^2, so the 1/r coefficient of
             // ln Phi-bar is the sum of the lapse and psi^2 coefficients.  The
-            // backbone subtraction is EXPLICIT.
-            syst.add_eq_bc(dtop, OUTER_BC, "multr(PH) = multr(PHP)");
-            emit("FJPJ_outer_conditions", 2);
+            // backbone subtraction is EXPLICIT.  ⚠ Whether this one is also a
+            // finite-radius Dirichlet match rather than the global statement it
+            // is named for is the same question and is measured the same way.
+            if (want.find(",phb,") != std::string::npos) {
+                syst.add_eq_bc(dtop, OUTER_BC, "multr(PH) = multr(PHP)");
+                nout++;
+            }
+            // ⚠ CONTROLS, and they are the point of the measurement rather
+            // than an extra.  "Most of the q row lies inside the bulk row
+            // space" means nothing until it is known what a boundary row looks
+            // like here: every row supported only on the outer face will have a
+            // large component in a row space of codimension 12nt - 6.  These
+            // are alternative outer rows of the same shape -- a plain
+            // Dirichlet, a Neumann, and one on a different field -- so the q
+            // row's fraction can be read against them instead of against 1.
+            if (want.find(",qd,") != std::string::npos) {
+                syst.add_eq_bc(dtop, OUTER_BC, "QF = 0");
+                nout++;
+            }
+            if (want.find(",qn,") != std::string::npos) {
+                syst.add_eq_bc(dtop, OUTER_BC, "dr(QF) = 0");
+                nout++;
+            }
+            if (want.find(",ps,") != std::string::npos) {
+                syst.add_eq_bc(dtop, OUTER_BC, "multr(PS) = 0");
+                nout++;
+            }
+            if (want.find(",br,") != std::string::npos) {
+                syst.add_eq_bc(dtop, OUTER_BC, "multr(BR) = 0");
+                nout++;
+            }
+            emit("FJPJ_outer_conditions", nout);
         }
         Kadath::Array<double> bb(syst.sec_member());
         const int nrow = syst.get_nbr_conditions();

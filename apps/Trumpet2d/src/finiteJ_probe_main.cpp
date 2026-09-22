@@ -144,6 +144,15 @@ int main(int argc, char** argv)
     // wrong silently.
     std::string gridout;
     std::string defsout;   // --dump-defs FILE
+    // ⚠ ROUND 157: the six FIELD values, which --dump-defs does not carry (it
+    // dumps sub-defs).  The log detector needs q itself, not an equation.
+    std::string fieldsout;  // --dump-fields FILE
+    // ⚠ AND A PLANTED LOGARITHM, so the detector can be shown to FIRE.  Round
+    // 154 grouped three defects of one family -- checks whose failure mode was
+    // unreachable -- and a detector that has never recovered a known signal is
+    // the fourth.  --qlog C adds C log(r) to q, which is theta-independent and
+    // so lands entirely in the m = 0 mode the detector fits.
+    double qlog = 0.0;      // --qlog C
     std::string jacdump;   // --dump-jacobian FILE (BULK rows only)
     // ⚠ STEP 1 OF THE BVP BUILD (round 134): the row/column counts must be
     // ATTRIBUTED to named fields and equations, not inferred from the total.
@@ -293,6 +302,8 @@ int main(int argc, char** argv)
         else if (k == "--pmix") pmix = argv[++i];
         else if (k == "--dump-grid") gridout = argv[++i];
         else if (k == "--dump-defs") defsout = argv[++i];
+        else if (k == "--dump-fields") fieldsout = argv[++i];
+        else if (k == "--qlog") qlog = std::stod(argv[++i]);
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--jac-fields") jacfields = argv[++i];
         else if (k == "--jac-eqs") jaceqs = argv[++i];
@@ -819,6 +830,20 @@ int main(int argc, char** argv)
         emit("FJP_throat_P0", thP0);
     }
 
+    if (qlog != 0.0) {
+        for (int d = 0; d <= dtop; d++) {
+            const Kadath::Domain* dm = space.get_domain(d);
+            Val_domain& v = QF.set_domain(d);
+            Index ix(dm->get_nbr_points());
+            do {
+                const double rr = t.pts[d][ix(0)].r;
+                if (std::isfinite(rr) && rr > 0.0)
+                    v.set(ix) += qlog * std::log(rr);
+            } while (ix.inc());
+        }
+        emit("FJP_qlog", qlog);
+    }
+
     // the constant-family walk (round 137), AFTER PHP is safe
     if (scalePS != 1.0 || scalePH != 1.0 || scaleBR != 1.0) {
         for (int d = 0; d <= dtop; d++) {
@@ -852,6 +877,32 @@ int main(int argc, char** argv)
     // --dump-jacobian changes about the registration; the def chain, the bases
     // and the read-back contract are identical either way.
     if (jacdump.empty()) {
+    // ⚠ DUMPED WHERE THE SYSTEM SEES THEM, not where they are first built.
+    // The first version of this sat before PHP -- and so before the throat
+    // profiles, before --qlog and before the gauge walk -- so it wrote the bare
+    // seed whatever was asked for, and the log detector's selftest recovered
+    // 0 from a planted 1.  That is the fourth member of round 154's family in
+    // eight rounds, and the selftest is why it was found in one run.
+    if (!fieldsout.empty() && rank == 0) {
+        std::ofstream ff(fieldsout);
+        ff << "# field values written by finiteJ_probe --dump-fields\n";
+        ff << "fields PS PH QF BR BT QB\n";
+        ff << std::setprecision(17);
+        const Scalar* fp[6] = {&PS, &PH, &QF, &BR, &BT, &QB};
+        for (int d = 0; d <= dtop; d++) {
+            Index ix(space.get_domain(d)->get_nbr_points());
+            do {
+                ff << "val " << d << " " << ix(0) << " " << ix(1)
+                   << " " << t.pts[d][ix(0)].r
+                   << " " << space.get_domain(d)->get_coloc(2)(ix(1));
+                for (int q = 0; q < 6; q++)
+                    ff << " " << (*fp[q])(d)(ix);
+                ff << "\n";
+            } while (ix.inc());
+        }
+        std::cout << "# fields written to " << fieldsout << "\n";
+    }
+
         syst.add_cst("PS", PS);
         syst.add_cst("PH", PH);
         syst.add_cst("QF", QF);

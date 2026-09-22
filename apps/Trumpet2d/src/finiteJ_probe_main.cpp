@@ -170,6 +170,14 @@ int main(int argc, char** argv)
     // imposed as a condition, which a COUNT cannot see.  --jac-outer-rows
     // selects a subset so the two can be told apart.
     std::string jacouterrows = "q,phb";   // --jac-outer-rows q,phb
+    // ⚠ ROUND 156: the MIXED outer row  r d_r q + lambda q = 0, which
+    // interpolates between the two limits research named.  For q ~ c log r + d
+    // the Dirichlet limit (lambda -> infinity) fixes d and the Neumann limit
+    // (lambda = 0) fixes c, and round 155 measured the second as nearly implied
+    // by the bulk.  Sweeping lambda maps the whole family in one pass, so
+    // "no member is well-conditioned" is a measurement rather than two points.
+    bool jacmixed = false;
+    double jacmixlam = 0.0;          // --jac-outer-mixed LAMBDA
     double outerpert = 0.0;          // --outer-perturb DELTA: add DELTA/r^p to PH
     int outerpow = 1;                // --outer-perturb-pow p
     // ⚠ ROUND 137: the constant gauge family, as MULTIPLICATIVE scalings.
@@ -291,6 +299,8 @@ int main(int argc, char** argv)
         else if (k == "--jac-interfaces") jacinterfaces = true;
         else if (k == "--jac-outer") jacouter = true;
         else if (k == "--jac-outer-rows") jacouterrows = argv[++i];
+        else if (k == "--jac-outer-mixed") { jacmixed = true;
+                                             jacmixlam = std::stod(argv[++i]); }
         else if (k == "--outer-perturb") outerpert = std::stod(argv[++i]);
         else if (k == "--outer-perturb-pow") outerpow = std::stoi(argv[++i]);
         else if (k == "--scale-ps") scalePS = std::stod(argv[++i]);
@@ -876,6 +886,7 @@ int main(int argc, char** argv)
     syst.add_cst("PHP", PHP);
     syst.add_cst("ALP", ALP);
     syst.add_cst("DEL", sdefdelta);
+    syst.add_cst("LAM", jacmixlam);
     // ⚠ JJ MUST MATCH THE DATA.  This was hardcoded to 0.0 -- correct for the
     // J = 0 seed, and silently wrong for manufactured data, which is generated
     // at J = 0.1.  Round 126 measured the consequence: D0022 = 6*JJ*sin^3, a def
@@ -1339,6 +1350,12 @@ int main(int argc, char** argv)
             if (want.find(",br,") != std::string::npos) {
                 syst.add_eq_bc(dtop, OUTER_BC, "multr(BR) = 0");
                 nout++;
+            }
+            if (jacmixed) {
+                syst.add_eq_bc(dtop, OUTER_BC,
+                               "multr(dr(QF)) + LAM * QF = 0");
+                nout++;
+                emit("FJPJ_outer_mixed_lambda", jacmixlam);
             }
             emit("FJPJ_outer_conditions", nout);
         }

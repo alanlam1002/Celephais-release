@@ -183,6 +183,14 @@ int main(int argc, char** argv)
     // count.  The deficit reported here is therefore the ROW count against the
     // bulk, not the inner block's net contribution, and it is labelled as such.
     bool jacinner = false;           // --jac-inner
+    // ⚠ THE OUTER BLOCK, VALUE AND DERIVATIVE, ALL SIX FIELDS (round 165).
+    // Not a proposed BC set: a SPANNING SET of outer-boundary functionals, so
+    // that dim(image of ker(bulk+interfaces) under restriction to the outer
+    // boundary) can be measured.  That dimension is how much of the interior's
+    // undetermined freedom is visible as far-field data, and it is the number
+    // the outer specification must be written against -- research round 400
+    // ruled that "one condition per field per angular mode" was an assumption.
+    bool jacouterfull = false;       // --jac-outer-full
     // ⚠ ROUND 155: the two outer rows registered SEPARATELY, because research
     // round 379 found that multr(QF) = 0 is not what it is named for.  It is
     // not t_Q = 0 (which needs no imposing) and not the asymptotic condition
@@ -322,6 +330,7 @@ int main(int argc, char** argv)
         else if (k == "--jac-interfaces") jacinterfaces = true;
         else if (k == "--jac-outer") jacouter = true;
         else if (k == "--jac-inner") jacinner = true;
+        else if (k == "--jac-outer-full") jacouterfull = true;
         else if (k == "--jac-outer-rows") jacouterrows = argv[++i];
         else if (k == "--jac-outer-mixed") { jacmixed = true;
                                              jacmixlam = std::stod(argv[++i]); }
@@ -1438,6 +1447,18 @@ int main(int argc, char** argv)
                 nin += 2;
             }
             emit("FJPJ_inner_conditions", nin);
+        }
+        if (jacouterfull) {
+            const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+            int nof = 0;
+            for (int q = 0; q < 6; q++) {
+                syst.add_eq_bc(dtop, OUTER_BC,
+                               (std::string(fn[q]) + " = 0").c_str());
+                syst.add_eq_bc(dtop, OUTER_BC,
+                               (std::string("dr(") + fn[q] + ") = 0").c_str());
+                nof += 2;
+            }
+            emit("FJPJ_outer_full_conditions", nof);
         }
         Kadath::Array<double> bb(syst.sec_member());
         const int nrow = syst.get_nbr_conditions();

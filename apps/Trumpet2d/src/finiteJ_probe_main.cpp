@@ -171,6 +171,18 @@ int main(int argc, char** argv)
     // Prediction, stated before running: Phb and qf are both COS_EVEN, so
     // ntheta modes each and 2*ntheta rows.
     bool jacouter = false;           // --jac-outer
+    // ⚠ STEP 4's INNER BLOCK (research round 397 ruling 3).  C0 and C1 at
+    // r_match for six fields.  The prediction, stated before running, is
+    // 12*ntheta - 6 rows -- two conditions per field per ANGULAR MODE, and the
+    // mode counts are not ntheta for all six (BT is SIN_EVEN -> nt-2, QB is
+    // COS_ODD -> nt-1), which is exactly the correction step 2 needed.
+    // ⚠ THIS REGISTERS ROWS ONLY.  The matching's new unknowns -- the throat
+    // system's free data -- are NOT registered, because their number is not
+    // settled: round 398 measured the deficient row-subspace as SKEW to the
+    // parity blocks, so the tower's two functions carry no angular basis to
+    // count.  The deficit reported here is therefore the ROW count against the
+    // bulk, not the inner block's net contribution, and it is labelled as such.
+    bool jacinner = false;           // --jac-inner
     // ⚠ ROUND 155: the two outer rows registered SEPARATELY, because research
     // round 379 found that multr(QF) = 0 is not what it is named for.  It is
     // not t_Q = 0 (which needs no imposing) and not the asymptotic condition
@@ -309,6 +321,7 @@ int main(int argc, char** argv)
         else if (k == "--jac-eqs") jaceqs = argv[++i];
         else if (k == "--jac-interfaces") jacinterfaces = true;
         else if (k == "--jac-outer") jacouter = true;
+        else if (k == "--jac-inner") jacinner = true;
         else if (k == "--jac-outer-rows") jacouterrows = argv[++i];
         else if (k == "--jac-outer-mixed") { jacmixed = true;
                                              jacmixlam = std::stod(argv[++i]); }
@@ -1409,6 +1422,22 @@ int main(int argc, char** argv)
                 emit("FJPJ_outer_mixed_lambda", jacmixlam);
             }
             emit("FJPJ_outer_conditions", nout);
+        }
+        if (jacinner) {
+            // C0 and C1 at the inner face of domain 0, for all six fields.
+            // add_eq_bc at INNER_BC projects onto each field's own tau basis,
+            // so the count is the sum of the six angular-mode counts twice --
+            // the 12nt - 6 the specification predicts -- rather than 12*ntheta.
+            const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+            int nin = 0;
+            for (int q = 0; q < 6; q++) {
+                syst.add_eq_bc(0, INNER_BC,
+                               (std::string(fn[q]) + " = 0").c_str());
+                syst.add_eq_bc(0, INNER_BC,
+                               (std::string("dr(") + fn[q] + ") = 0").c_str());
+                nin += 2;
+            }
+            emit("FJPJ_inner_conditions", nin);
         }
         Kadath::Array<double> bb(syst.sec_member());
         const int nrow = syst.get_nbr_conditions();

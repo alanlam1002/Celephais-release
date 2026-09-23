@@ -35,6 +35,7 @@
 #include "Trumpet1d/src/table_io.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <iomanip>
 #include <fstream>
@@ -269,6 +270,16 @@ int main(int argc, char** argv)
     // the outer specification must be written against -- research round 400
     // ruled that "one condition per field per angular mode" was an assumption.
     bool jacouterfull = false;       // --jac-outer-full
+    // ⚠ ROUND 186: WHERE the spanning set is EVALUATED, not what it is.
+    // Rounds 184-185 bracketed the 4 + (2nt-7) grading by changing the
+    // BACKGROUND with the structure fixed and the STRUCTURE with the background
+    // fixed; it survived both.  The item neither session had listed is the one
+    // the grading is DEFINED AGAINST -- these functionals.  `-1` keeps the
+    // historical behaviour (the outer face of dtop, which on the compact domain
+    // is r = infinity); 0..dtop puts the SAME twelve blocks on the outer face of
+    // an interior domain, i.e. at a FINITE radius, changing where they live
+    // without changing what they are.
+    int jacouterfulldom = -1;        // --jac-outer-full-dom <d>
     // ⚠ ROUND 155: the two outer rows registered SEPARATELY, because research
     // round 379 found that multr(QF) = 0 is not what it is named for.  It is
     // not t_Q = 0 (which needs no imposing) and not the asymptotic condition
@@ -425,6 +436,7 @@ int main(int argc, char** argv)
         else if (k == "--jac-match-break") { jacmatch = true;
                                              jacmatchbreak = true; }
         else if (k == "--jac-outer-full") jacouterfull = true;
+        else if (k == "--jac-outer-full-dom") jacouterfulldom = std::stoi(argv[++i]);
         else if (k == "--jac-outer-rows") jacouterrows = argv[++i];
         else if (k == "--jac-outer-mixed") { jacmixed = true;
                                              jacmixlam = std::stod(argv[++i]); }
@@ -1775,15 +1787,29 @@ int main(int argc, char** argv)
         }
         if (jacouterfull) {
             const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+            const int ofd = (jacouterfulldom < 0) ? dtop : jacouterfulldom;
+            if (ofd > dtop) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --jac-outer-full-dom " << ofd
+                              << " is beyond dtop = " << dtop << "\n";
+                MPI_Finalize();
+                return 14;
+            }
             int nof = 0;
             for (int q = 0; q < 6; q++) {
-                syst.add_eq_bc(dtop, OUTER_BC,
+                syst.add_eq_bc(ofd, OUTER_BC,
                                (std::string(fn[q]) + " = 0").c_str());
-                syst.add_eq_bc(dtop, OUTER_BC,
+                syst.add_eq_bc(ofd, OUTER_BC,
                                (std::string("dr(") + fn[q] + ") = 0").c_str());
                 nof += 2;
             }
             emit("FJPJ_outer_full_conditions", nof);
+            emit("FJPJ_outer_full_dom", ofd);
+            // the radius the block now lives at: the outer bound of that
+            // domain, which for the compact domain is infinity.
+            emit("FJPJ_outer_full_radius",
+                 (ofd == ndom - 1) ? std::numeric_limits<double>::infinity()
+                                   : bounds[ofd + 1]);
         }
         Kadath::Array<double> bb(syst.sec_member());
         const int nrow = syst.get_nbr_conditions();

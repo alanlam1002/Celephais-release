@@ -202,6 +202,31 @@ int main(int argc, char** argv)
     // the only class pair that reproduces it (the other nine admissible pairs
     // give 2nt - 2, 2nt - 1 or 2nt).  Coinciding counts is not the same as the
     // subspace BEING that pair, and that is stated rather than assumed.
+    // ⚠ THE BASIS-ASSIGNMENT INSTRUMENT (research round 416 ruling 3).
+    // --jac-match-break showed this build CANNOT answer which angular family
+    // each matching amplitude belongs to: the plant is reinterpreted because a
+    // sum takes its first operand's theta basis (round 111), so a single-mode
+    // coefficient array stays single-mode whichever family it is read in.
+    //
+    // ⚠ SO THIS ROUTES THROUGH NO SUM AT ALL.  It plants a known combination of
+    // a family's modes into THE FIELD ITSELF -- pointwise values, transformed
+    // by the field's own declared base -- and reads the inner tau rows off the
+    // RHS.  No Term_eq addition is involved anywhere, so the mistagging cannot
+    // reach it.
+    //
+    // ⚠ AND THE READING IS A RATIO, NOT A VALUE, because the tau projection may
+    // normalise each mode differently and a single plant cannot separate that
+    // normalisation from the planted amplitude.  Two plants do: with a_k = 1
+    // and a_k = k+1 over the same family, row j must satisfy
+    //     rhs_j(B) / rhs_j(A) = j + 1
+    // exactly, whatever c_j is.  That identifies WHICH angular mode each row
+    // picks off, which is the question.
+    //   A   a_k = 1     in each field's DECLARED family
+    //   B   a_k = k+1   in each field's DECLARED family
+    //   WA/WB  the same two, but BT is given COS_EVEN modes and QB SIN_EVEN
+    //          ones -- the WRONG families.  The ratio must then FAIL to be
+    //          j + 1, or the instrument is not measuring the family either.
+    std::string basisprobe;          // --basis-probe A|B|WA|WB
     bool jacmatch = false;           // --jac-match
     // ⚠ --jac-match-break WAS WRITTEN AS A NEGATIVE CONTROL AND CAME BACK
     // NEGATIVE, WHICH IS THE RESULT.  It gives BT's grade-0 amplitudes a
@@ -369,6 +394,7 @@ int main(int argc, char** argv)
         else if (k == "--jac-interfaces") jacinterfaces = true;
         else if (k == "--jac-outer") jacouter = true;
         else if (k == "--jac-inner") jacinner = true;
+        else if (k == "--basis-probe") basisprobe = argv[++i];
         else if (k == "--jac-match") jacmatch = true;
         else if (k == "--jac-match-break") { jacmatch = true;
                                              jacmatchbreak = true; }
@@ -642,6 +668,45 @@ int main(int argc, char** argv)
     // and the lattice carry it; the acceptance test does not.  The header
     // records which, and the declaration check below is what keeps the run and
     // the analysis in step.
+    // ---- --basis-probe: plant the fields, BEFORE the bases are declared -----
+    // ⚠ ORDER.  The plant has to happen before std_base()/std_anti_base() so
+    // that the values are transformed by the base under test.  Planting after
+    // would transform them with whatever base was already set and the run would
+    // report on the wrong object while looking identical.
+    if (!basisprobe.empty()) {
+        const bool ampB  = (basisprobe == "B" || basisprobe == "WB");
+        const bool wrong = (basisprobe == "WA" || basisprobe == "WB");
+        Scalar* fp[6] = {&PS, &PH, &QF, &BR, &BT, &QB};
+        int fam[6] = {0, 0, 0, 0, 2, 1};   // 0 COS_EVEN, 1 COS_ODD, 2 SIN_EVEN
+        const int cnt[6] = {ntheta, ntheta, ntheta, ntheta,
+                            ntheta - 2, ntheta - 1};
+        if (wrong) { fam[4] = 0; fam[5] = 2; }
+        for (int q = 0; q < 6; q++)
+            for (int d = 0; d < ndom; d++) {
+                const Kadath::Domain* dm = space.get_domain(d);
+                Val_domain& v = fp[q]->set_domain(d);
+                v.allocate_conf();
+                Index ix(dm->get_nbr_points());
+                do {
+                    const double th = dm->get_coloc(2)(ix(1));
+                    double acc = 0.0;
+                    for (int k = 0; k < cnt[q]; k++) {
+                        const double a = ampB ? double(k + 1) : 1.0;
+                        acc += a * (fam[q] == 0 ? std::cos(2.0 * k * th)
+                                  : fam[q] == 1 ? std::cos((2.0 * k + 1.0) * th)
+                                                : std::sin(2.0 * (k + 1) * th));
+                    }
+                    v.set(ix) = acc;
+                } while (ix.inc());
+            }
+        emit("FJP_basis_probe_ampB", ampB ? 1.0 : 0.0);
+        emit("FJP_basis_probe_wrong", wrong ? 1.0 : 0.0);
+        if (rank == 0)
+            std::cout << "# ⚠ --basis-probe " << basisprobe
+                      << ": the six fields are PLANTED.  No residual, no"
+                         " acceptance test and no Jacobian VALUE from this run"
+                         " means anything -- only the inner-row RHS does.\n";
+    }
     for (Scalar* s : {&PS, &PH, &QF, &BR, &RR, &ST, &CT, &C2, &H2, &L2,
                       &CX, &SQ, &T7, &ONE})
         s->std_base();
@@ -1428,6 +1493,18 @@ int main(int argc, char** argv)
     // counting m - n is reported beside it, because if the bulk is square its
     // left null space is empty and it contributes no obstruction at all, which
     // would put the whole compatibility question in the BC rows.
+    if (!basisprobe.empty() && (jacdump.empty() || !clean)) {
+        // ⚠ The plant destroys the physical fields, so every other output of
+        // this run is meaningless.  Refuse rather than let a planted run be
+        // mistaken for a real one -- there is no reading of a residual here
+        // that would look wrong.
+        if (rank == 0)
+            std::cerr << "FATAL: --basis-probe requires --clean and "
+                         "--dump-jacobian; the fields are planted and nothing "
+                         "else this run produces is meaningful.\n";
+        MPI_Finalize();
+        return 13;
+    }
     if (!jacdump.empty() && jacmatch && jacouterfull) {
         // ⚠ The incidence check locates the inner block as the LAST 12nt - 6
         // rows, which is true only because --jac-inner is registered last.
@@ -1688,6 +1765,12 @@ int main(int argc, char** argv)
             fh << std::setprecision(17);
             for (int r = 0; r < nrow; r++)
                 fh << "rhs " << r << " " << bb(r) << "\n";
+            if (!basisprobe.empty()) {
+                // only the RHS is read; the columns would cost ncol solves and
+                // carry no information about the plant.
+                emit("FJPJ_nnz", 0.0);
+                std::cout << "# basis-probe RHS written to " << jacdump << "\n";
+            } else {
             long long nnz = 0;
             // ---- THE INCIDENCE CONTROL for --jac-match ---------------------
             // ⚠ WHAT THIS CHECKS, AND WHY IT IS THE RIGHT CHECK.  Each matching
@@ -1766,6 +1849,7 @@ int main(int argc, char** argv)
             emit("FJPJ_nnz", double(nnz));
             emit("FJPJ_density", double(nnz) / (double(nrow) * double(ncol)));
             std::cout << "# bulk Jacobian written to " << jacdump << "\n";
+            }
         }
     }
 

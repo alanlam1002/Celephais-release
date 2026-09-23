@@ -1420,6 +1420,32 @@ int main(int argc, char** argv)
                 syst.add_eq_bc(dtop, OUTER_BC, "multr(PS) = 0");
                 nout++;
             }
+            // ⚠ THE FOUR OWED ROWS, IN THEIR SPECIFIED FORM (round 171).
+            // NOTES_outer_rows.md specifies Dirichlet AT THE r = infinity NODE
+            // -- psi^2(inf) = 1, beta~^r(inf) = 0, Bhat^theta(inf) = 0,
+            // qbar(inf) = 0 -- because on the compact domain the value at that
+            // node IS the additive constant each m = 0 mode leaves free.
+            // ⚠ These are NOT the `ps` and `br` entries below: multr(PS) picks
+            // the 1/r COEFFICIENT, which is a different functional.  Added so a
+            // complete assembly can be built rather than approximated with the
+            // rows that happened to exist.  The RHS is irrelevant to every use
+            // these have; only the row space is read.
+            if (want.find(",psv,") != std::string::npos) {
+                syst.add_eq_bc(dtop, OUTER_BC, "PS = 0");
+                nout++;
+            }
+            if (want.find(",brv,") != std::string::npos) {
+                syst.add_eq_bc(dtop, OUTER_BC, "BR = 0");
+                nout++;
+            }
+            if (want.find(",btv,") != std::string::npos) {
+                syst.add_eq_bc(dtop, OUTER_BC, "BT = 0");
+                nout++;
+            }
+            if (want.find(",qbv,") != std::string::npos) {
+                syst.add_eq_bc(dtop, OUTER_BC, "QB = 0");
+                nout++;
+            }
             if (want.find(",br,") != std::string::npos) {
                 syst.add_eq_bc(dtop, OUTER_BC, "multr(BR) = 0");
                 nout++;

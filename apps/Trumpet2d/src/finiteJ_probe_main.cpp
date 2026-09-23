@@ -340,6 +340,16 @@ int main(int argc, char** argv)
     // tied run is reported beside the untied one.
     double btpow = 0.0, btamp = 0.0;     // --bt-prof POW AMP : AMP r^POW sin cos
     int btang = 2;                       // --bt-ang M        : sin(M theta)/2
+    // ⚠ --bt-taper: AMP r^POW / (1 + r^2)^POW instead of AMP r^POW.
+    // The bare power VANISHES at the throat as required but GROWS without
+    // bound outward, and this grid reaches r = 409.99 -- so --bt-prof 2 0.004
+    // puts 336 at the outer end against fields of order 1.  Round 180 measured
+    // the consequence: the outer-visibility gap collapsed from 1e3-1e4 to
+    // O(1) at EVERY amplitude down to 0.004, which reads as "any beta^^theta
+    // dissolves the four" and is in fact the profile blowing up where the
+    // spectrum is measured.  The taper is ~r^POW inward and ~r^-POW outward,
+    // so it vanishes at BOTH ends as a physical beta^^theta must.
+    bool bttaper = false;                // --bt-taper
     double brpow = 0.0, bramp = 0.0, brB = 0.0;  // --br-prof POW A B
     // ⚠ ROUND 152: the note's THREE-FIELD throat configuration, applied with
     // its own coefficients rather than as a shape plus a free amplitude.
@@ -415,6 +425,7 @@ int main(int argc, char** argv)
         else if (k == "--bt-prof") { btpow = std::stod(argv[++i]);
                                      btamp = std::stod(argv[++i]); }
         else if (k == "--bt-ang") btang = std::stoi(argv[++i]);
+        else if (k == "--bt-taper") bttaper = true;
         else if (k == "--phi-prof") { thC = std::stod(argv[++i]);
                                       thE = std::stod(argv[++i]);
                                       thP0 = std::stod(argv[++i]); }
@@ -952,9 +963,12 @@ int main(int argc, char** argv)
                 const double tt = dm->get_coloc(2)(ix(1));
                 if (!std::isfinite(rr))
                     continue;             // the compact domain's outermost node
-                if (btamp != 0.0)
-                    vb.set(ix) += btamp * std::pow(rr, btpow)
-                                  * std::sin(btang * tt) / 2.0;
+                if (btamp != 0.0) {
+                    double prof = std::pow(rr, btpow);
+                    if (bttaper)
+                        prof /= std::pow(1.0 + rr * rr, btpow);
+                    vb.set(ix) += btamp * prof * std::sin(btang * tt) / 2.0;
+                }
                 if (bramp != 0.0 || brB != 0.0)
                     vr.set(ix) += std::pow(rr, brpow)
                                   * (bramp * std::sin(tt) * std::sin(tt)
@@ -964,6 +978,7 @@ int main(int argc, char** argv)
         emit("FJP_bt_prof_pow", btpow);
         emit("FJP_bt_prof_amp", btamp);
         emit("FJP_bt_prof_ang", btang);
+        emit("FJP_bt_prof_taper", bttaper ? 1.0 : 0.0);
         emit("FJP_br_prof_pow", brpow);
         emit("FJP_br_prof_A", bramp);
         emit("FJP_br_prof_B", brB);

@@ -184,6 +184,20 @@ int main(int argc, char** argv)
     // count.  The deficit reported here is therefore the ROW count against the
     // bulk, not the inner block's net contribution, and it is labelled as such.
     bool jacinner = false;           // --jac-inner
+    // ⚠ THE BRACKET EXPERIMENT (round 185).  Round 184 changed the BACKGROUND
+    // while holding the matching structure fixed and the grading persisted.
+    // This changes the STRUCTURE while holding the background fixed.
+    //   full  C0 and C1 for six fields         12nt - 6   (the default)
+    //   half  C0 only, six fields               6nt - 3   -- research's literal
+    //         spec; ⚠ with no matching unknowns this makes the system SQUARE,
+    //         so there is no kernel and nothing to grade.  Run anyway, because
+    //         "there is nothing to measure" is itself the answer to that form.
+    //   net   dr(F) = 0 for PS, PH, QF, BR only     4nt   -- the block that
+    //         carries no unknown in the posed system, i.e. the inner block's
+    //         NET contribution (round 172).  With no matching unknowns this
+    //         reproduces the deficit 2nt - 3 EXACTLY by a different mechanism,
+    //         which is the comparison that can actually be made.
+    std::string jacinnermode = "full";   // --jac-inner-mode full|half|net
     // ⚠ STEP 4's MATCHING UNKNOWNS (research round 414 ruling 1).  The inner
     // rows above register ROWS ONLY, and round 171 measured the consequence:
     // with every specified row in, the assembly has FULL COLUMN RANK, so the
@@ -404,6 +418,8 @@ int main(int argc, char** argv)
         else if (k == "--jac-interfaces") jacinterfaces = true;
         else if (k == "--jac-outer") jacouter = true;
         else if (k == "--jac-inner") jacinner = true;
+        else if (k == "--jac-inner-mode") { jacinner = true;
+                                            jacinnermode = argv[++i]; }
         else if (k == "--basis-probe") basisprobe = argv[++i];
         else if (k == "--jac-match") jacmatch = true;
         else if (k == "--jac-match-break") { jacmatch = true;
@@ -1712,6 +1728,8 @@ int main(int argc, char** argv)
             // ⚠ get_nbr_conditions() is -1 until the system is assembled, so
             // the span is COMPUTED: the inner block is 12nt - 6 rows and, with
             // --jac-outer-full refused above, it is the last block registered.
+            const bool in_half = (jacinnermode == "half");
+            const bool in_net  = (jacinnermode == "net");
             int nin = 0, g = 0, tw = 0;
             for (int q = 0; q < 6; q++) {
                 std::string c0 = std::string(fn[q]);
@@ -1735,11 +1753,21 @@ int main(int argc, char** argv)
                             c1 += b;
                         }
                 }
-                syst.add_eq_bc(0, INNER_BC, (c0 + " = 0").c_str());
-                syst.add_eq_bc(0, INNER_BC, (c1 + " = 0").c_str());
-                nin += 2;
+                if (in_net) {
+                    // the 4nt rows that carry no matching unknown
+                    if (q < 4) { syst.add_eq_bc(0, INNER_BC,
+                                                (c1 + " = 0").c_str()); nin++; }
+                } else if (in_half) {
+                    syst.add_eq_bc(0, INNER_BC, (c0 + " = 0").c_str()); nin++;
+                } else {
+                    syst.add_eq_bc(0, INNER_BC, (c0 + " = 0").c_str());
+                    syst.add_eq_bc(0, INNER_BC, (c1 + " = 0").c_str());
+                    nin += 2;
+                }
             }
             emit("FJPJ_inner_conditions", nin);
+            emit("FJPJ_inner_mode_half", in_half ? 1.0 : 0.0);
+            emit("FJPJ_inner_mode_net", in_net ? 1.0 : 0.0);
             if (jacmatch) {
                 emit("FJPJ_match_grade0_used", g);
                 emit("FJPJ_match_tower_used", tw);

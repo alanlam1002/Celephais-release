@@ -198,7 +198,11 @@ int main(int argc, char** argv)
     //         NET contribution (round 172).  With no matching unknowns this
     //         reproduces the deficit 2nt - 3 EXACTLY by a different mechanism,
     //         which is the comparison that can actually be made.
-    std::string jacinnermode = "full";   // --jac-inner-mode full|half|net
+    std::string jacinnermode = "full";   // --jac-inner-mode full|half|net|iso
+    // six characters, one per field in the order PS PH QF BR BT QB:
+    // E = even under the composite isometry -> dr(F) = 0 at the minimal
+    // surface, O = odd -> F = 0.  The count is 6nt - 3 for all 64.
+    std::string isoparity;               // --iso-parity EEEOOE
     // ⚠ STEP 4's MATCHING UNKNOWNS (research round 414 ruling 1).  The inner
     // rows above register ROWS ONLY, and round 171 measured the consequence:
     // with every specified row in, the assembly has FULL COLUMN RANK, so the
@@ -431,6 +435,7 @@ int main(int argc, char** argv)
         else if (k == "--jac-inner") jacinner = true;
         else if (k == "--jac-inner-mode") { jacinner = true;
                                             jacinnermode = argv[++i]; }
+        else if (k == "--iso-parity") isoparity = argv[++i];
         else if (k == "--basis-probe") basisprobe = argv[++i];
         else if (k == "--jac-match") jacmatch = true;
         else if (k == "--jac-match-break") { jacmatch = true;
@@ -1742,6 +1747,34 @@ int main(int argc, char** argv)
             // --jac-outer-full refused above, it is the last block registered.
             const bool in_half = (jacinnermode == "half");
             const bool in_net  = (jacinnermode == "net");
+            // ⚠ ROUND 187: the TWO-ENDED isometry block.  Under the composite
+            // r -> M^2/4r, theta -> pi-theta, phi -> -phi (the human, round
+            // 463: phi flips J and theta flips J, so together J -> J, which is
+            // why the radial inversion alone is not an isometry of a spinning
+            // end), each field is even or odd at the minimal surface and gets
+            // ONE condition per angular mode either way:
+            //     even  ->  dr(F) = 0        odd  ->  F = 0
+            // so the block is 6nt - 3 for all 2^6 assignments and the system is
+            // SQUARE before any parity is chosen.  ⚠ That is why the observable
+            // is the NULLITY and not the count: round 185's `half` was square
+            // with nullity 0, and square is not determined.
+            const bool in_iso = (jacinnermode == "iso");
+            if (in_iso && static_cast<int>(isoparity.size()) != 6) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --jac-inner-mode iso needs "
+                                 "--iso-parity with six characters E/O, got \""
+                              << isoparity << "\"\n";
+                MPI_Finalize();
+                return 15;
+            }
+            if (in_iso && jacmatch) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --jac-inner-mode iso with --jac-match;"
+                                 " the isometry block replaces the matching"
+                                 " unknowns, it does not carry them.\n";
+                MPI_Finalize();
+                return 16;
+            }
             int nin = 0, g = 0, tw = 0;
             for (int q = 0; q < 6; q++) {
                 std::string c0 = std::string(fn[q]);
@@ -1765,7 +1798,20 @@ int main(int argc, char** argv)
                             c1 += b;
                         }
                 }
-                if (in_net) {
+                if (in_iso) {
+                    const char pc = isoparity[q];
+                    if (pc != 'E' && pc != 'O') {
+                        if (rank == 0)
+                            std::cerr << "FATAL: --iso-parity character " << q
+                                      << " is '" << pc << "', not E or O\n";
+                        MPI_Finalize();
+                        return 15;
+                    }
+                    // even -> dr(F) = 0 ; odd -> F = 0.  Same count either way.
+                    syst.add_eq_bc(0, INNER_BC,
+                                   ((pc == 'E' ? c1 : c0) + " = 0").c_str());
+                    nin++;
+                } else if (in_net) {
                     // the 4nt rows that carry no matching unknown
                     if (q < 4) { syst.add_eq_bc(0, INNER_BC,
                                                 (c1 + " = 0").c_str()); nin++; }
@@ -1778,6 +1824,9 @@ int main(int argc, char** argv)
                 }
             }
             emit("FJPJ_inner_conditions", nin);
+            if (in_iso && rank == 0)
+                std::cout << "# iso parity " << isoparity
+                          << "  (E -> dr(F)=0, O -> F=0)\n";
             emit("FJPJ_inner_mode_half", in_half ? 1.0 : 0.0);
             emit("FJPJ_inner_mode_net", in_net ? 1.0 : 0.0);
             if (jacmatch) {

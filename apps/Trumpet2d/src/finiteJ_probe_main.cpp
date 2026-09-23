@@ -40,6 +40,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -183,6 +184,44 @@ int main(int argc, char** argv)
     // count.  The deficit reported here is therefore the ROW count against the
     // bulk, not the inner block's net contribution, and it is labelled as such.
     bool jacinner = false;           // --jac-inner
+    // ⚠ STEP 4's MATCHING UNKNOWNS (research round 414 ruling 1).  The inner
+    // rows above register ROWS ONLY, and round 171 measured the consequence:
+    // with every specified row in, the assembly has FULL COLUMN RANK, so the
+    // posed system's kernel cannot be reached from any dumpable matrix.  The
+    // directions that are free live in COLUMNS this probe does not have.
+    //
+    // --jac-match registers them: 8nt - 6 Kadath scalar unknowns, the throat
+    // system's free data, entering the C0/C1 rows they are specified to enter.
+    //   grade-0  6nt - 3   one per field per angular mode, in that field's own
+    //                      basis, subtracted from the C0 (value) row
+    //   tower    2nt - 3   COS_ODD (nt-1) + SIN_EVEN (nt-2), subtracted from
+    //                      the C1 (derivative) rows of QB and BT
+    // ⚠ THE TOWER'S PLACEMENT IS THE ONE REPRESENTATIONAL CHOICE HERE, and it
+    // is not free: round 164 measured the free subspace's column count as
+    // 2nt - 3 by INTERSECTION with the parity blocks, and COS_ODD + SIN_EVEN is
+    // the only class pair that reproduces it (the other nine admissible pairs
+    // give 2nt - 2, 2nt - 1 or 2nt).  Coinciding counts is not the same as the
+    // subspace BEING that pair, and that is stated rather than assumed.
+    bool jacmatch = false;           // --jac-match
+    // ⚠ --jac-match-break WAS WRITTEN AS A NEGATIVE CONTROL AND CAME BACK
+    // NEGATIVE, WHICH IS THE RESULT.  It gives BT's grade-0 amplitudes a
+    // COS_EVEN profile where their row is SIN_EVEN, and the intent was that the
+    // column stop being single-row.  It does not: round 172 compared the two
+    // dumps column by column and the only difference is at 1e-16.
+    //
+    // The reason is round 111's: Kadath tags a sum with its FIRST operand's
+    // theta basis, so `BT - G * MCE00` reinterprets the profile's COEFFICIENT
+    // ARRAY in BT's basis, and a single-mode array stays a single-mode array
+    // whichever family it is read in.  So the incidence check below tests
+    // BIJECTIVITY and unit coupling -- both real and both necessary -- and it
+    // is BLIND to the basis assignment.  Stated here rather than claimed
+    // otherwise: this flag is kept because it is what measured that.
+    //
+    // ⚠ The consequence cuts both ways, and the useful direction is the second:
+    // this build does NOT validate which angular family each matching amplitude
+    // belongs to, AND the kernel measurement cannot be contaminated by getting
+    // it wrong, because the assembled Jacobian is the same either way.
+    bool jacmatchbreak = false;      // --jac-match-break
     // ⚠ THE OUTER BLOCK, VALUE AND DERIVATIVE, ALL SIX FIELDS (round 165).
     // Not a proposed BC set: a SPANNING SET of outer-boundary functionals, so
     // that dim(image of ker(bulk+interfaces) under restriction to the outer
@@ -330,6 +369,9 @@ int main(int argc, char** argv)
         else if (k == "--jac-interfaces") jacinterfaces = true;
         else if (k == "--jac-outer") jacouter = true;
         else if (k == "--jac-inner") jacinner = true;
+        else if (k == "--jac-match") jacmatch = true;
+        else if (k == "--jac-match-break") { jacmatch = true;
+                                             jacmatchbreak = true; }
         else if (k == "--jac-outer-full") jacouterfull = true;
         else if (k == "--jac-outer-rows") jacouterrows = argv[++i];
         else if (k == "--jac-outer-mixed") { jacmixed = true;
@@ -741,6 +783,54 @@ int main(int argc, char** argv)
             } while (ix.inc());
         }
         std::cout << "# grid written to " << gridout << "\n";
+    }
+
+    // ---- --jac-match: the angular basis profiles and the unknowns ---------
+    // ⚠ DECLARED BEFORE `syst` ON PURPOSE.  add_var(name, double&) stores a
+    // POINTER; the storage must outlive the system, and a vector that is later
+    // grown would invalidate every one of them silently.  Sized once, here.
+    const int NCE = ntheta;        // COS_EVEN   cos(2k th),      k = 0 .. nt-1
+    const int NCO = ntheta - 1;    // COS_ODD    cos((2k+1) th),  k = 0 .. nt-2
+    const int NSE = ntheta - 2;    // SIN_EVEN   sin(2k th),      k = 1 .. nt-2
+    const int NG  = 4 * NCE + NSE + NCO;   // grade-0   = 6nt - 3
+    const int NT  = NSE + NCO;             // tower     = 2nt - 3
+    std::vector<double> matchv(NG + NT, 0.0);
+    std::vector<std::unique_ptr<Scalar>> mbase;
+    auto mbname = [](const char* pre, int k) {
+        char b[16]; std::snprintf(b, sizeof b, "%s%02d", pre, k);
+        return std::string(b);
+    };
+    std::vector<std::string> mbnames;
+    if (jacmatch) {
+        // fill cos(2k th), cos((2k+1) th), sin(2k th) at the collocation
+        // points and tag each with the basis it belongs to.  ⚠ std_base() is
+        // COS_EVEN, std_anti_base() COS_ODD and std_anti_base(1) SIN_EVEN --
+        // the same three calls the six fields' own declarations use, so the
+        // profiles are in the SAME spaces the tau projection reads.
+        struct Fam { const char* pre; int n; int kind; };
+        const Fam fam[3] = { {"MCE", NCE, 0}, {"MCO", NCO, 1}, {"MSE", NSE, 2} };
+        for (const Fam& f : fam)
+            for (int j = 0; j < f.n; j++) {
+                const int k = (f.kind == 2) ? j + 1 : j;
+                auto sp = std::make_unique<Scalar>(space);
+                for (int d = 0; d < ndom; d++) {
+                    const Kadath::Domain* dm = space.get_domain(d);
+                    Val_domain& v = sp->set_domain(d);
+                    v.allocate_conf();
+                    Index ix(dm->get_nbr_points());
+                    do {
+                        const double th = dm->get_coloc(2)(ix(1));
+                        v.set(ix) = (f.kind == 0) ? std::cos(2.0 * k * th)
+                                  : (f.kind == 1) ? std::cos((2.0 * k + 1.0) * th)
+                                                  : std::sin(2.0 * k * th);
+                    } while (ix.inc());
+                }
+                if      (f.kind == 0) sp->std_base();
+                else if (f.kind == 1) sp->std_anti_base();
+                else                  sp->std_anti_base(1);
+                mbnames.push_back(mbname(f.pre, k));
+                mbase.push_back(std::move(sp));
+            }
     }
 
     std::cout << "# building system" << std::endl;
@@ -1338,7 +1428,56 @@ int main(int argc, char** argv)
     // counting m - n is reported beside it, because if the bulk is square its
     // left null space is empty and it contributes no obstruction at all, which
     // would put the whole compatibility question in the BC rows.
+    if (!jacdump.empty() && jacmatch && jacouterfull) {
+        // ⚠ The incidence check locates the inner block as the LAST 12nt - 6
+        // rows, which is true only because --jac-inner is registered last.
+        // --jac-outer-full appends after it, so the two together would make the
+        // check report on the wrong rows while still returning a clean number.
+        if (rank == 0)
+            std::cerr << "FATAL: --jac-match and --jac-outer-full together; the "
+                         "inner block would no longer be the last 12nt - 6 rows "
+                         "and the incidence check would silently move.\n";
+        MPI_Finalize();
+        return 12;
+    }
+    if (!jacdump.empty() && jacmatch && !jacinner) {
+        // ⚠ REFUSE rather than register.  The matching unknowns enter the C0/C1
+        // rows and nothing else, so without --jac-inner they would be columns
+        // no row touches -- the kernel would come back 8nt - 6 and would be
+        // reporting this flag combination rather than the system.
+        if (rank == 0)
+            std::cerr << "FATAL: --jac-match requires --jac-inner; without the "
+                         "C0/C1 rows the matching unknowns are unconstrained "
+                         "columns and the nullity would measure the flags.\n";
+        MPI_Finalize();
+        return 11;
+    }
     if (!jacdump.empty()) {
+        // ---- --jac-match: registration, BEFORE any equation is parsed ------
+        // ⚠ ORDER IS LOAD-BEARING.  The parser resolves names at add_eq time,
+        // so both the profiles and the unknowns have to exist first.  And the
+        // column block they occupy is Kadath's own: do_col_J walks variable
+        // domains, then the nvar_double scalars in registration order, then
+        // the fields -- so the matching unknowns are columns [0, 8nt-6).
+        int match_ncol_before = 0, match_ncol_after = 0;
+        if (jacmatch) {
+            for (std::size_t i = 0; i < mbase.size(); i++)
+                syst.add_cst(mbnames[i].c_str(), *mbase[i]);
+            match_ncol_before = syst.get_nbr_unknowns();
+            char nm[16];
+            for (int g = 0; g < NG; g++) {
+                std::snprintf(nm, sizeof nm, "G%02d", g);
+                syst.add_var(nm, matchv[g]);
+            }
+            for (int tt = 0; tt < NT; tt++) {
+                std::snprintf(nm, sizeof nm, "T%02d", tt);
+                syst.add_var(nm, matchv[NG + tt]);
+            }
+            match_ncol_after = syst.get_nbr_unknowns();
+            emit("FJPJ_match_unknowns", match_ncol_after - match_ncol_before);
+            emit("FJPJ_match_grade0", NG);
+            emit("FJPJ_match_tower", NT);
+        }
         auto wanted_eq = [&](const char* nm) {
             if (jaceqs == "all") return true;
             return (',' + jaceqs + ',').find(std::string(",") + nm + ",")
@@ -1458,21 +1597,61 @@ int main(int argc, char** argv)
             }
             emit("FJPJ_outer_conditions", nout);
         }
+        int inner_row_begin = -1, inner_row_end = -1;
         if (jacinner) {
             // C0 and C1 at the inner face of domain 0, for all six fields.
             // add_eq_bc at INNER_BC projects onto each field's own tau basis,
             // so the count is the sum of the six angular-mode counts twice --
             // the 12nt - 6 the specification predicts -- rather than 12*ntheta.
             const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
-            int nin = 0;
+            // which angular family each field's tau projection lives in, and
+            // how many modes it has.  These are the DECLARED bases (round 313):
+            // PS/PH/QF/BR COS_EVEN nt, BT SIN_EVEN nt-2, QB COS_ODD nt-1.
+            const char* fpre[6] = {"MCE", "MCE", "MCE", "MCE", "MSE", "MCO"};
+            const int   fn_n[6] = {NCE, NCE, NCE, NCE, NSE, NCO};
+            const int   fk0 [6] = {0, 0, 0, 0, 1, 0};
+            // ⚠ THE TOWER ENTERS ONLY BT's AND QB's C1 ROWS.  4nt C1 rows
+            // (PS, PH, QF, BR) carry no unknown at all, and that is exactly the
+            // inner block's net contribution 12nt - 6 - (8nt - 6) = 4nt, which
+            // is round 164's number reached from the registration rather than
+            // from the arithmetic.  If the placement were anywhere else the net
+            // would still be 4nt but the count would not be 2nt - 3.
+            const bool ftower[6] = {false, false, false, false, true, true};
+            // ⚠ get_nbr_conditions() is -1 until the system is assembled, so
+            // the span is COMPUTED: the inner block is 12nt - 6 rows and, with
+            // --jac-outer-full refused above, it is the last block registered.
+            int nin = 0, g = 0, tw = 0;
             for (int q = 0; q < 6; q++) {
-                syst.add_eq_bc(0, INNER_BC,
-                               (std::string(fn[q]) + " = 0").c_str());
-                syst.add_eq_bc(0, INNER_BC,
-                               (std::string("dr(") + fn[q] + ") = 0").c_str());
+                std::string c0 = std::string(fn[q]);
+                std::string c1 = std::string("dr(") + fn[q] + ")";
+                if (jacmatch) {
+                    char b[16];
+                    for (int j = 0; j < fn_n[q]; j++) {
+                        // the break control: BT's grade-0 amplitude gets a
+                        // COS_EVEN profile, which its SIN_EVEN row cannot
+                        // represent, so the column must stop being single-row.
+                        const char* pre = (jacmatchbreak && q == 4) ? "MCE"
+                                                                   : fpre[q];
+                        const int k = (jacmatchbreak && q == 4) ? j : j + fk0[q];
+                        std::snprintf(b, sizeof b, " - G%02d * %s%02d", g++, pre, k);
+                        c0 += b;
+                    }
+                    if (ftower[q])
+                        for (int j = 0; j < fn_n[q]; j++) {
+                            std::snprintf(b, sizeof b, " - T%02d * %s%02d",
+                                          tw++, fpre[q], j + fk0[q]);
+                            c1 += b;
+                        }
+                }
+                syst.add_eq_bc(0, INNER_BC, (c0 + " = 0").c_str());
+                syst.add_eq_bc(0, INNER_BC, (c1 + " = 0").c_str());
                 nin += 2;
             }
             emit("FJPJ_inner_conditions", nin);
+            if (jacmatch) {
+                emit("FJPJ_match_grade0_used", g);
+                emit("FJPJ_match_tower_used", tw);
+            }
         }
         if (jacouterfull) {
             const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
@@ -1510,13 +1689,79 @@ int main(int argc, char** argv)
             for (int r = 0; r < nrow; r++)
                 fh << "rhs " << r << " " << bb(r) << "\n";
             long long nnz = 0;
+            // ---- THE INCIDENCE CONTROL for --jac-match ---------------------
+            // ⚠ WHAT THIS CHECKS, AND WHY IT IS THE RIGHT CHECK.  Each matching
+            // unknown is specified to be the amplitude of ONE angular mode of
+            // ONE field, so its Jacobian column must have EXACTLY ONE nonzero,
+            // and that row must be an inner row, and the map unknown -> row
+            // must be injective.  An amplitude whose profile is not
+            // representable in the basis its row is projected onto (round 103
+            // measured cos(theta) falling outside the scalar COS_EVEN span)
+            // would alias across modes.
+            // ⚠ IT DOES NOT TEST THE BASIS ASSIGNMENT.  --jac-match-break was
+            // written expecting it to and measured that it does not; see the
+            // note at that flag's declaration.  What it tests is that the
+            // matching block is an INCIDENCE block: one row per unknown, one
+            // unknown per row, coefficient -1, every row inside the inner
+            // block.  That is what the kernel measurement rests on.
+            const int nmatch = jacmatch ? (match_ncol_after - match_ncol_before)
+                                        : 0;
+            if (jacmatch) {
+                inner_row_begin = nrow - (12 * ntheta - 6);
+                inner_row_end = nrow;
+                emit("FJPJ_inner_row_begin", inner_row_begin);
+                emit("FJPJ_inner_row_end", inner_row_end);
+            }
+            // ⚠ THE THRESHOLD IS A TOLERANCE, NOT `!= 0.0`.  The first version
+            // of this check counted raw nonzeros and reported 8 of 34 columns
+            // single-row; every column in fact carried ONE entry of -1 and up
+            // to four more at 1e-17, which are the tau transform's roundoff.
+            // A check that cannot tell -1 from 1e-17 reports on the arithmetic.
+            const double MC_TOL = 1e-10;
+            int mc_min = 1 << 30, mc_max = 0, mc_ok = 0, mc_outside = 0;
+            double mc_vmin = 1e300, mc_vmax = 0.0;
+            std::vector<int> mc_row;
             for (int c = 0; c < ncol; c++) {
                 Kadath::Array<double> col(syst.do_col_J(c));
+                double cmax = 0.0;
+                if (c < nmatch)
+                    for (int r = 0; r < nrow; r++)
+                        cmax = std::max(cmax, std::fabs(col(r)));
+                int ccount = 0, crow = -1;
                 for (int r = 0; r < nrow; r++)
                     if (col(r) != 0.0) {
                         fh << "J " << r << " " << c << " " << col(r) << "\n";
                         nnz++;
+                        if (c < nmatch && std::fabs(col(r)) > MC_TOL * cmax) {
+                            ccount++; if (crow < 0) crow = r;
+                        }
                     }
+                if (c < nmatch) {
+                    mc_min = std::min(mc_min, ccount);
+                    mc_max = std::max(mc_max, ccount);
+                    mc_vmin = std::min(mc_vmin, cmax);
+                    mc_vmax = std::max(mc_vmax, cmax);
+                    if (ccount == 1) { mc_ok++; mc_row.push_back(crow); }
+                    if (crow >= 0 && (crow < inner_row_begin
+                                      || crow >= inner_row_end)) mc_outside++;
+                }
+            }
+            if (jacmatch) {
+                std::vector<int> u(mc_row);
+                std::sort(u.begin(), u.end());
+                u.erase(std::unique(u.begin(), u.end()), u.end());
+                emit("FJPJ_match_cols", nmatch);
+                emit("FJPJ_match_col_nnz_min", mc_min == (1 << 30) ? -1 : mc_min);
+                emit("FJPJ_match_col_nnz_max", mc_max);
+                emit("FJPJ_match_single_row_cols", mc_ok);
+                emit("FJPJ_match_distinct_rows", int(u.size()));
+                emit("FJPJ_match_rows_outside_inner", mc_outside);
+                emit("FJPJ_match_col_absmax_min", mc_vmin);
+                emit("FJPJ_match_col_absmax_max", mc_vmax);
+                std::cout << "#   --jac-match: " << nmatch << " unknown columns, "
+                          << mc_ok << " single-row, " << u.size()
+                          << " distinct rows, " << mc_outside
+                          << " outside the inner block\n";
             }
             emit("FJPJ_nnz", double(nnz));
             emit("FJPJ_density", double(nnz) / (double(nrow) * double(ncol)));

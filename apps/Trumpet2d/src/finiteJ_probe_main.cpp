@@ -318,6 +318,22 @@ int main(int argc, char** argv)
     // none in the p_max = 1 system (see NOTES_finiteJ_bvp.md, round 201).
     double nexp = std::sqrt(2.0);
     std::string newtonfields;   // --newton-fields FILE
+    // ---- the J = 0 diagnostic (round 202, research round 498) -------------
+    // ⚠ TWO VARIANTS, AND THEY ARE DIFFERENT SYSTEMS.  The ruling says
+    // "replace the two vacuous C0 rows on q and q-bar by Dirichlet on their
+    // amplitudes", and separately that the two fields "carry effectively
+    // NEUMANN ONLY at the inner face".  For g0 = 0 the pair is
+    //     C0   F - sum_j G_j M_j = 0        (defines G; imposes nothing)
+    //     C1   dr(F) - sum_j G_j dr(M_j) = 0  ->  dr(F) = 0, since dr(r^0) = 0
+    // so replacing ONE of them by the amplitude row  sum_j G_j M_j = 0  gives:
+    //     --inner-amp-pin  (C0 replaced)  ->  {G = 0, dr(F) = 0}  -- the field
+    //         still has NEUMANN ONLY.  This is the ruling's literal text.
+    //     --inner-amp-dir  (C1 replaced)  ->  {F(r_m) = 0, G = 0}  -- a genuine
+    //         DIRICHLET on the field.  This is what the ruling's purpose needs.
+    // Both are count-preserving and touch no columns.  Both are run, because
+    // `pin` is the negative control that shows the closure is the Dirichlet and
+    // not the pinning of an amplitude that was always free.
+    std::string ampdir, amppin;   // --inner-amp-dir / --inner-amp-pin  QF,QB
     // ⚠ ROUND 156: the MIXED outer row  r d_r q + lambda q = 0, which
     // interpolates between the two limits research named.  For q ~ c log r + d
     // the Dirichlet limit (lambda -> infinity) fixes d and the Neumann limit
@@ -480,6 +496,8 @@ int main(int argc, char** argv)
         else if (k == "--nexp") nexp = std::stod(argv[++i]);
         else if (k == "--newton-fields") { donewton = true;
                                            newtonfields = argv[++i]; }
+        else if (k == "--inner-amp-dir") ampdir = argv[++i];
+        else if (k == "--inner-amp-pin") amppin = argv[++i];
         else if (k == "--jac-outer-mixed") { jacmixed = true;
                                              jacmixlam = std::stod(argv[++i]); }
         else if (k == "--outer-perturb") outerpert = std::stod(argv[++i]);
@@ -1889,10 +1907,39 @@ int main(int argc, char** argv)
                 MPI_Finalize();
                 return 16;
             }
-            int nin = 0, g = 0, tw = 0;
+            auto ampwant = [](const std::string& list, const char* nm) {
+                if (list.empty()) return false;
+                return (',' + list + ',').find(std::string(",") + nm + ",")
+                       != std::string::npos;
+            };
+            // ⚠ REFUSE ON g0 != 0.  For those fields C1 is a genuine Robin
+            // condition (round 195), so replacing it would REMOVE a real
+            // condition and the near-kernel count would be reporting that
+            // rather than the diagnosis.  QF and QB are the only two with
+            // g0 = 0 and they are the only two the ruling names.
+            for (int q = 0; q < 6; q++)
+                if ((ampwant(ampdir, fn[q]) || ampwant(amppin, fn[q]))
+                    && q != 2 && q != 5) {
+                    if (rank == 0)
+                        std::cerr << "FATAL: --inner-amp-* names " << fn[q]
+                                  << ", whose g0 is not 0; its C1 row is a "
+                                     "genuine Robin condition and replacing it "
+                                     "would remove a real condition.\n";
+                    MPI_Finalize();
+                    return 18;
+                }
+            if ((!ampdir.empty() || !amppin.empty()) && !jacmatch) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --inner-amp-* without --jac-match; "
+                                 "there are no amplitudes to impose on.\n";
+                MPI_Finalize();
+                return 18;
+            }
+            int nin = 0, g = 0, tw = 0, namp = 0;
             for (int q = 0; q < 6; q++) {
                 std::string c0 = std::string(fn[q]);
                 std::string c1 = std::string("dr(") + fn[q] + ")";
+                std::string camp;
                 if (jacmatch) {
                     // ⚠ 40, not 16: " - G00 * dr(MPS00)" is 18 characters and
                     // the 16-byte buffer TRUNCATED it silently into a string the
@@ -1927,6 +1974,15 @@ int main(int argc, char** argv)
                                       gbase + j, pre, j + fk0[q]);
                         c1 += b;
                     }
+                    // the amplitude row  sum_j G_j M_j = 0, projected onto the
+                    // SAME tau basis the C0/C1 rows use, so it is one condition
+                    // per angular mode and the count does not move.
+                    for (int j = 0; j < fn_n[q]; j++) {
+                        std::snprintf(b, sizeof b, "%sG%02d * %s%02d",
+                                      j ? " + " : "", gbase + j, fpre[q],
+                                      j + fk0[q]);
+                        camp += b;
+                    }
                     if (ftower[q] && !jacmatchnotower)
                         for (int j = 0; j < fn_n[q]; j++) {
                             std::snprintf(b, sizeof b, " - T%02d * %s%02d",
@@ -1954,12 +2010,31 @@ int main(int argc, char** argv)
                 } else if (in_half) {
                     syst.add_eq_bc(0, INNER_BC, (c0 + " = 0").c_str()); nin++;
                 } else {
-                    syst.add_eq_bc(0, INNER_BC, (c0 + " = 0").c_str());
-                    syst.add_eq_bc(0, INNER_BC, (c1 + " = 0").c_str());
+                    const bool aD = ampwant(ampdir, fn[q]);
+                    const bool aP = ampwant(amppin, fn[q]);
+                    if (aD && aP) {
+                        if (rank == 0)
+                            std::cerr << "FATAL: " << fn[q] << " is in BOTH "
+                                         "--inner-amp-dir and --inner-amp-pin; "
+                                         "that would replace both rows and the "
+                                         "field would carry no inner condition."
+                                      << "\n";
+                        MPI_Finalize();
+                        return 18;
+                    }
+                    syst.add_eq_bc(0, INNER_BC, ((aP ? camp : c0) + " = 0").c_str());
+                    syst.add_eq_bc(0, INNER_BC, ((aD ? camp : c1) + " = 0").c_str());
                     nin += 2;
+                    if (aD || aP) namp += fn_n[q];
                 }
             }
             emit("FJPJ_inner_conditions", nin);
+            emit("FJPJ_amp_rows", namp);
+            if (rank == 0 && namp)
+                std::cout << "#  --inner-amp: " << namp << " amplitude rows"
+                          << (ampdir.empty() ? "" : ("  dir=" + ampdir))
+                          << (amppin.empty() ? "" : ("  pin=" + amppin))
+                          << "\n";
             if (in_iso && rank == 0)
                 std::cout << "# iso parity " << isoparity
                           << "  (E -> dr(F)=0, O -> F=0)\n";

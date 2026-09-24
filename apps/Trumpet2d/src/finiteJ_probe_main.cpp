@@ -303,6 +303,21 @@ int main(int argc, char** argv)
     // imposed as a condition, which a COUNT cannot see.  --jac-outer-rows
     // selects a subset so the two can be told apart.
     std::string jacouterrows = "q,phb";   // --jac-outer-rows q,phb
+    // ---- --newton: THE SOLVE (round 201) ---------------------------------
+    // ⚠ The registration is EXACTLY --dump-jacobian's: the six fields as
+    // variables, the matching amplitudes as variables, the same rows.  Newton
+    // adds nothing to the system -- it solves the one that has been measured
+    // for eight rounds -- which is why the flag shares the whole path and only
+    // the file write is gated on --dump-jacobian.
+    bool donewton = false;
+    int  newtonmax = 8;
+    double newtonprec = 1e-12;
+    // --nexp: the throat exponent, hardcoded to sqrt(2) until now.  ⚠ THIS IS
+    // NOT THE SHOOTING.  It makes n settable so its effect can be MEASURED;
+    // the shooting needs a scalar residual whose zero defines n, and there is
+    // none in the p_max = 1 system (see NOTES_finiteJ_bvp.md, round 201).
+    double nexp = std::sqrt(2.0);
+    std::string newtonfields;   // --newton-fields FILE
     // ⚠ ROUND 156: the MIXED outer row  r d_r q + lambda q = 0, which
     // interpolates between the two limits research named.  For q ~ c log r + d
     // the Dirichlet limit (lambda -> infinity) fixes d and the Neumann limit
@@ -457,6 +472,14 @@ int main(int argc, char** argv)
         else if (k == "--jac-outer-full") jacouterfull = true;
         else if (k == "--jac-outer-full-dom") jacouterfulldom = std::stoi(argv[++i]);
         else if (k == "--jac-outer-rows") jacouterrows = argv[++i];
+        else if (k == "--newton") donewton = true;
+        else if (k == "--newton-max") { donewton = true;
+                                        newtonmax = std::stoi(argv[++i]); }
+        else if (k == "--newton-prec") { donewton = true;
+                                         newtonprec = std::stod(argv[++i]); }
+        else if (k == "--nexp") nexp = std::stod(argv[++i]);
+        else if (k == "--newton-fields") { donewton = true;
+                                           newtonfields = argv[++i]; }
         else if (k == "--jac-outer-mixed") { jacmixed = true;
                                              jacmixlam = std::stod(argv[++i]); }
         else if (k == "--outer-perturb") outerpert = std::stod(argv[++i]);
@@ -931,7 +954,7 @@ int main(int argc, char** argv)
         const double Wm  = t.pts[0][0].W;
         const double Rm  = t.pts[0][0].Rr;
         const double om  = t.pts[0][0].oor;
-        const double ne  = std::sqrt(2.0);
+        const double ne  = nexp;
         matchv[0]        = Rm * rm;                             // PS,  g0 = -1
         matchv[NCE]      = Wm * Rm * std::pow(rm, 1.0 - ne);    // PH,  g0 = n-1
         matchv[2 * NCE]  = 0.0;                                 // QF,  q = 0
@@ -973,7 +996,7 @@ int main(int argc, char** argv)
         // radial factor differs between fields sharing a family.  The plain
         // COS_EVEN family MCE is kept as well, with no radial factor, because
         // --jac-match-break needs it as the wrong-family control (round 172).
-        const double NEXP = std::sqrt(2.0);
+        const double NEXP = nexp;
         struct Fam { const char* pre; int n; int kind; double g0; };
         const Fam fam[7] = { {"MPS", NCE, 0, -1.0},      {"MPH", NCE, 0, NEXP - 1.0},
                              {"MQF", NCE, 0,  0.0},      {"MBR", NCE, 0,  1.0},
@@ -1177,7 +1200,11 @@ int main(int argc, char** argv)
     // A Jacobian needs them to be unknowns, and that is the ONLY thing
     // --dump-jacobian changes about the registration; the def chain, the bases
     // and the read-back contract are identical either way.
-    if (jacdump.empty()) {
+    // ⚠ ONE SWITCH, TWO FLAGS.  --newton needs the same registration as
+    // --dump-jacobian (fields as variables); nothing else about the run may
+    // differ, or the system solved would not be the system measured.
+    const bool jacon = !jacdump.empty() || donewton;
+    if (!jacon) {
     // ⚠ DUMPED WHERE THE SYSTEM SEES THEM, not where they are first built.
     // The first version of this sat before PHP -- and so before the throat
     // profiles, before --qlog and before the gauge walk -- so it wrote the bare
@@ -1617,7 +1644,7 @@ int main(int argc, char** argv)
     // counting m - n is reported beside it, because if the bulk is square its
     // left null space is empty and it contributes no obstruction at all, which
     // would put the whole compatibility question in the BC rows.
-    if (!basisprobe.empty() && (jacdump.empty() || !clean)) {
+    if (!basisprobe.empty() && (!jacon || !clean)) {
         // ⚠ The plant destroys the physical fields, so every other output of
         // this run is meaningless.  Refuse rather than let a planted run be
         // mistaken for a real one -- there is no reading of a residual here
@@ -1629,7 +1656,7 @@ int main(int argc, char** argv)
         MPI_Finalize();
         return 13;
     }
-    if (!jacdump.empty() && jacmatch && jacouterfull) {
+    if (jacon && jacmatch && jacouterfull) {
         // ⚠ The incidence check locates the inner block as the LAST 12nt - 6
         // rows, which is true only because --jac-inner is registered last.
         // --jac-outer-full appends after it, so the two together would make the
@@ -1641,7 +1668,7 @@ int main(int argc, char** argv)
         MPI_Finalize();
         return 12;
     }
-    if (!jacdump.empty() && jacmatch && !jacinner) {
+    if (jacon && jacmatch && !jacinner) {
         // ⚠ REFUSE rather than register.  The matching unknowns enter the C0/C1
         // rows and nothing else, so without --jac-inner they would be columns
         // no row touches -- the kernel would come back 8nt - 6 and would be
@@ -1653,7 +1680,7 @@ int main(int argc, char** argv)
         MPI_Finalize();
         return 11;
     }
-    if (!jacdump.empty()) {
+    if (jacon) {
         // ---- --jac-match: registration, BEFORE any equation is parsed ------
         // ⚠ ORDER IS LOAD-BEARING.  The parser resolves names at add_eq time,
         // so both the profiles and the unknowns have to exist first.  And the
@@ -1984,7 +2011,7 @@ int main(int argc, char** argv)
         emit("FJPJ_rows", nrow);
         emit("FJPJ_cols", ncol);
         emit("FJPJ_m_minus_n", nrow - ncol);
-        if (rank == 0) {
+        if (rank == 0 && !jacdump.empty()) {
             std::ofstream fh(jacdump);
             fh << "# Jacobian of the finite-J BULK operator (no BC rows)  rows "
                << nrow << " cols " << ncol << "\n";
@@ -2076,6 +2103,171 @@ int main(int argc, char** argv)
             emit("FJPJ_nnz", double(nnz));
             emit("FJPJ_density", double(nnz) / (double(nrow) * double(ncol)));
             std::cout << "# bulk Jacobian written to " << jacdump << "\n";
+            }
+        }
+
+        // ---- --newton: THE SOLVE (round 201) ------------------------------
+        // ⚠ WHAT IS READ, AND WHY NOT do_newton's OWN NUMBER.  do_newton
+        // reports max |residual| over rows.  The six equations carry no radial
+        // prefactor and their leading grades run to r^{-2n-2} (round 190), so
+        // at r_m = 5.4e-3 a bulk row's natural size is ~1e11 and the absolute
+        // max is a statement about the worst-scaled row, not about the solve.
+        // The reading is round 198's RELATIVE C1 diagnostic, per field, before
+        // and after, plus the FIELD CHANGE -- because at cond ~ 2.6e18 a
+        // backward-stable solve drives the residual down whatever the step is,
+        // and only the size and smoothness of the step separates a real
+        // correction from amplified roundoff.
+        if (donewton) {
+            const char* fnm[6]  = {"PS", "PH", "QF", "BR", "BT", "QB"};
+            const int   fcnt[6] = {NCE, NCE, NCE, NCE, NSE, NCO};
+            const double fg0[6] = {-1.0, nexp - 1.0, 0.0, 1.0, nexp, 0.0};
+            const double rm = t.pts[0][0].r;
+            const int irb = nrow - (12 * ntheta - 6);
+            int gb[6]; { int a = 0; for (int q = 0; q < 6; q++) { gb[q] = a; a += fcnt[q]; } }
+            emit("FJPN_r_match", rm);
+            emit("FJPN_nexp", nexp);
+            emit("FJPN_inner_row_begin", irb);
+
+            // the relative C1 (and C0) diagnostic, read off a residual vector
+            auto report = [&](const char* tag, const Kadath::Array<double>& b) {
+                if (rank != 0) return;
+                std::cout << "#  " << tag
+                          << "   fld  |C0 resid|     |C1 resid|     rel C1\n";
+                for (int q = 0; q < 6; q++) {
+                    const int r0 = irb + 2 * gb[q];
+                    double n0 = 0.0, n1 = 0.0, den = 0.0;
+                    for (int j = 0; j < fcnt[q]; j++) {
+                        n0 = std::max(n0, std::fabs(b(r0 + j)));
+                        n1 = std::max(n1, std::fabs(b(r0 + fcnt[q] + j)));
+                        // |G_j * dr(r^{g0})| at r_m -- zero for g0 = 0 and for
+                        // the three fields whose amplitude vanishes at J = 0,
+                        // and those are reported UNDEFINED rather than as 0.
+                        den = std::max(den, std::fabs(matchv[gb[q] + j] * fg0[q]
+                                                      * std::pow(rm, fg0[q] - 1.0)));
+                    }
+                    char line[160];
+                    if (den > 0.0)
+                        std::snprintf(line, sizeof line,
+                                      "%-6s %-3s  %-14.6e %-14.6e %.6e",
+                                      tag, fnm[q], n0, n1, n1 / den);
+                    else
+                        std::snprintf(line, sizeof line,
+                                      "%-6s %-3s  %-14.6e %-14.6e UNDEFINED (G dr(r^g0) = 0)",
+                                      tag, fnm[q], n0, n1);
+                    std::cout << "#  " << line << "\n";
+                    emit(std::string("FJPN_") + tag + "_C0_" + fnm[q], n0);
+                    emit(std::string("FJPN_") + tag + "_C1_" + fnm[q], n1);
+                    if (den > 0.0)
+                        emit(std::string("FJPN_") + tag + "_rel_" + fnm[q], n1 / den);
+                }
+            };
+            report("pre", bb);
+
+            // ⚠ THE FIELDS ARE COPIED, not re-read.  do_newton updates the
+            // registered Scalars in place, so "did it move" has no answer
+            // unless the seed is held somewhere the solve cannot reach.
+            Scalar PS0(PS), PH0(PH), QF0(QF), BR0(BR), BT0(BT), QB0(QB);
+            std::vector<double> G0(matchv);
+
+            double err = 0.0;
+            bool ok = false;
+            int it = 0;
+            bool threw = false;
+            try {
+                for (it = 0; it < newtonmax && !ok; it++) {
+                    ok = syst.do_newton(newtonprec, err);
+                    emit("FJPN_err_" + std::to_string(it), err);
+                    if (rank == 0)
+                        std::cout << "#  newton step " << it
+                                  << "  max|resid| = " << std::setprecision(10)
+                                  << err << (ok ? "   (converged)" : "") << "\n";
+                }
+            } catch (const std::exception& e) {
+                threw = true;
+                if (rank == 0)
+                    std::cerr << "FATAL in do_newton: " << e.what() << "\n";
+            }
+            emit("FJPN_threw", threw ? 1.0 : 0.0);
+            emit("FJPN_ok", ok ? 1.0 : 0.0);
+            emit("FJPN_iters", it);
+            emit("FJPN_err", err);
+            if (threw) { MPI_Finalize(); return 17; }
+
+            Kadath::Array<double> b2(syst.sec_member());
+            report("post", b2);
+
+            // ---- THE STEP.  Per field, max |dF| and max |dF| / max |F|, over
+            // the probed domains only -- the compact domain's r = infinity node
+            // is included because that is where the outer rows live.
+            const Scalar* f0[6] = {&PS0, &PH0, &QF0, &BR0, &BT0, &QB0};
+            const Scalar* f1[6] = {&PS,  &PH,  &QF,  &BR,  &BT,  &QB};
+            if (rank == 0)
+                std::cout << "#  step   fld  max|dF|        max|F|         "
+                             "rel            worst at (dom,ir,ith)\n";
+            for (int q = 0; q < 6; q++) {
+                double dm = 0.0, fm = 0.0;
+                int wd = -1, wr = -1, wt = -1;
+                for (int d = 0; d <= dtop; d++) {
+                    Index ix(space.get_domain(d)->get_nbr_points());
+                    do {
+                        const double a = (*f0[q])(d)(ix), b = (*f1[q])(d)(ix);
+                        if (!std::isfinite(a) || !std::isfinite(b)) continue;
+                        fm = std::max(fm, std::fabs(a));
+                        if (std::fabs(b - a) > dm) {
+                            dm = std::fabs(b - a); wd = d; wr = ix(0); wt = ix(1);
+                        }
+                    } while (ix.inc());
+                }
+                emit(std::string("FJPN_dmax_") + fnm[q], dm);
+                emit(std::string("FJPN_fmax_") + fnm[q], fm);
+                emit(std::string("FJPN_drel_") + fnm[q], fm > 0.0 ? dm / fm : 0.0);
+                if (rank == 0) {
+                    char line[200];
+                    std::snprintf(line, sizeof line,
+                                  "%-3s  %-14.6e %-14.6e %-14.6e (%d,%d,%d)",
+                                  fnm[q], dm, fm, fm > 0.0 ? dm / fm : 0.0, wd, wr, wt);
+                    std::cout << "#  step   " << line << "\n";
+                }
+            }
+            // ---- THE AMPLITUDES.  These are the six leading unknowns, and a
+            // step that is physics moves them by O(alpha) too.
+            if (rank == 0)
+                std::cout << "#  ampl   fld  max|dG|        max|G0|        rel\n";
+            for (int q = 0; q < 6; q++) {
+                double dm = 0.0, gm = 0.0;
+                for (int j = 0; j < fcnt[q]; j++) {
+                    dm = std::max(dm, std::fabs(matchv[gb[q] + j] - G0[gb[q] + j]));
+                    gm = std::max(gm, std::fabs(G0[gb[q] + j]));
+                }
+                emit(std::string("FJPN_dG_") + fnm[q], dm);
+                emit(std::string("FJPN_G0_") + fnm[q], gm);
+                emit(std::string("FJPN_dGrel_") + fnm[q], gm > 0.0 ? dm / gm : 0.0);
+                if (rank == 0) {
+                    char line[160];
+                    std::snprintf(line, sizeof line, "%-3s  %-14.6e %-14.6e %-14.6e",
+                                  fnm[q], dm, gm, gm > 0.0 ? dm / gm : 0.0);
+                    std::cout << "#  ampl   " << line << "\n";
+                }
+            }
+            if (rank == 0 && !newtonfields.empty()) {
+                std::ofstream nf(newtonfields);
+                nf << "# fields AFTER --newton\n";
+                nf << "fields PS PH QF BR BT QB\n";
+                nf << std::setprecision(17);
+                for (int d = 0; d <= dtop; d++) {
+                    Index ix(space.get_domain(d)->get_nbr_points());
+                    do {
+                        nf << "val " << d << " " << ix(0) << " " << ix(1)
+                           << " " << t.pts[d][ix(0)].r
+                           << " " << space.get_domain(d)->get_coloc(2)(ix(1));
+                        for (int q = 0; q < 6; q++) nf << " " << (*f1[q])(d)(ix);
+                        nf << "\n";
+                    } while (ix.inc());
+                }
+                nf << "# amplitudes G, in registration order PS PH QF BR BT QB\n";
+                for (int g = 0; g < NG; g++)
+                    nf << "amp " << g << " " << matchv[g] << " " << G0[g] << "\n";
+                std::cout << "# post-Newton fields written to " << newtonfields << "\n";
             }
         }
     }

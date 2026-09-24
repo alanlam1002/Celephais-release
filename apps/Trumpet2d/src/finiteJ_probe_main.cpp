@@ -247,6 +247,16 @@ int main(int argc, char** argv)
     //          j + 1, or the instrument is not measuring the family either.
     std::string basisprobe;          // --basis-probe A|B|WA|WB
     bool jacmatch = false;           // --jac-match
+    // ⚠ ROUND 193, research round 485.  Round 483 found the series has no rank
+    // deficiency -- it has two leading amplitudes its equations do not
+    // determine, Bh and Qh -- and round 397's "deficiency 2 at every cut" was
+    // that fact mis-read through p-indexing as a dependency.  The tower's
+    // 2nt - 3 unknowns were registered against round 397's number, so they may
+    // DOUBLE-COUNT a freedom already sitting in Bh and Qh among the leading six.
+    // With this flag only the 6nt - 3 grade-0 amplitudes are registered, against
+    // the same 12nt - 6 inner rows: 3051 + 27 = 3078 columns against 3078 rows
+    // at nt = 5, square before any measurement.
+    bool jacmatchnotower = false;    // --jac-match-notower
     // ⚠ --jac-match-break WAS WRITTEN AS A NEGATIVE CONTROL AND CAME BACK
     // NEGATIVE, WHICH IS THE RESULT.  It gives BT's grade-0 amplitudes a
     // COS_EVEN profile where their row is SIN_EVEN, and the intent was that the
@@ -438,6 +448,8 @@ int main(int argc, char** argv)
         else if (k == "--iso-parity") isoparity = argv[++i];
         else if (k == "--basis-probe") basisprobe = argv[++i];
         else if (k == "--jac-match") jacmatch = true;
+        else if (k == "--jac-match-notower") { jacmatch = true;
+                                               jacmatchnotower = true; }
         else if (k == "--jac-match-break") { jacmatch = true;
                                              jacmatchbreak = true; }
         else if (k == "--jac-outer-full") jacouterfull = true;
@@ -1594,14 +1606,16 @@ int main(int argc, char** argv)
                 std::snprintf(nm, sizeof nm, "G%02d", g);
                 syst.add_var(nm, matchv[g]);
             }
-            for (int tt = 0; tt < NT; tt++) {
-                std::snprintf(nm, sizeof nm, "T%02d", tt);
-                syst.add_var(nm, matchv[NG + tt]);
-            }
+            if (!jacmatchnotower)
+                for (int tt = 0; tt < NT; tt++) {
+                    std::snprintf(nm, sizeof nm, "T%02d", tt);
+                    syst.add_var(nm, matchv[NG + tt]);
+                }
             match_ncol_after = syst.get_nbr_unknowns();
             emit("FJPJ_match_unknowns", match_ncol_after - match_ncol_before);
             emit("FJPJ_match_grade0", NG);
-            emit("FJPJ_match_tower", NT);
+            emit("FJPJ_match_tower", jacmatchnotower ? 0 : NT);
+            emit("FJPJ_match_notower", jacmatchnotower ? 1.0 : 0.0);
         }
         auto wanted_eq = [&](const char* nm) {
             if (jaceqs == "all") return true;
@@ -1791,7 +1805,7 @@ int main(int argc, char** argv)
                         std::snprintf(b, sizeof b, " - G%02d * %s%02d", g++, pre, k);
                         c0 += b;
                     }
-                    if (ftower[q])
+                    if (ftower[q] && !jacmatchnotower)
                         for (int j = 0; j < fn_n[q]; j++) {
                             std::snprintf(b, sizeof b, " - T%02d * %s%02d",
                                           tw++, fpre[q], j + fk0[q]);

@@ -257,6 +257,7 @@ int main(int argc, char** argv)
     // the same 12nt - 6 inner rows: 3051 + 27 = 3078 columns against 3078 rows
     // at nt = 5, square before any measurement.
     bool jacmatchnotower = false;    // --jac-match-notower
+    bool seedmatch = false;          // --seed-match
     // ⚠ --jac-match-break WAS WRITTEN AS A NEGATIVE CONTROL AND CAME BACK
     // NEGATIVE, WHICH IS THE RESULT.  It gives BT's grade-0 amplitudes a
     // COS_EVEN profile where their row is SIN_EVEN, and the intent was that the
@@ -450,6 +451,7 @@ int main(int argc, char** argv)
         else if (k == "--jac-match") jacmatch = true;
         else if (k == "--jac-match-notower") { jacmatch = true;
                                                jacmatchnotower = true; }
+        else if (k == "--seed-match") seedmatch = true;
         else if (k == "--jac-match-break") { jacmatch = true;
                                              jacmatchbreak = true; }
         else if (k == "--jac-outer-full") jacouterfull = true;
@@ -916,6 +918,31 @@ int main(int argc, char** argv)
     const int NG  = 4 * NCE + NSE + NCO;   // grade-0   = 6nt - 3
     const int NT  = NSE + NCO;             // tower     = 2nt - 3
     std::vector<double> matchv(NG + NT, 0.0);
+    // ⚠ ROUND 195: SEED THE MATCHING AMPLITUDES.  Round 194's residual was read
+    // with every G at zero, where the C1 row's residual is dr(F) itself whatever
+    // the profile is -- so restoring the radial factor could not have shown up
+    // there.  The amplitudes must carry the seed's own values for the residual
+    // to mean anything.  At J = 0 the seed is theta-independent, so only mode 0
+    // of each COS_EVEN family is nonzero and BT, QB are zero exactly.
+    //   G = F(r_m) / r_m^{g0},  matchv laid out PS, PH, QF, BR, BT, QB in the
+    //   registration order of the row loop below.
+    if (jacmatch && seedmatch) {
+        const double rm  = t.pts[0][0].r;
+        const double Wm  = t.pts[0][0].W;
+        const double Rm  = t.pts[0][0].Rr;
+        const double om  = t.pts[0][0].oor;
+        const double ne  = std::sqrt(2.0);
+        matchv[0]        = Rm * rm;                             // PS,  g0 = -1
+        matchv[NCE]      = Wm * Rm * std::pow(rm, 1.0 - ne);    // PH,  g0 = n-1
+        matchv[2 * NCE]  = 0.0;                                 // QF,  q = 0
+        matchv[3 * NCE]  = (C * om * om / (Rm * Rm * Rm)) / rm; // BR,  g0 = +1
+        if (rank == 0)
+            std::cout << "# seed-match at r_m = " << rm
+                      << "  G_PS = " << matchv[0]
+                      << "  G_PH = " << matchv[NCE]
+                      << "  G_BR = " << matchv[3 * NCE] << "\n";
+        emit("FJPJ_seed_match", 1.0);
+    }
     std::vector<std::unique_ptr<Scalar>> mbase;
     auto mbname = [](const char* pre, int k) {
         char b[16]; std::snprintf(b, sizeof b, "%s%02d", pre, k);
@@ -928,8 +955,30 @@ int main(int argc, char** argv)
         // COS_EVEN, std_anti_base() COS_ODD and std_anti_base(1) SIN_EVEN --
         // the same three calls the six fields' own declarations use, so the
         // profiles are in the SAME spaces the tau projection reads.
-        struct Fam { const char* pre; int n; int kind; };
-        const Fam fam[3] = { {"MCE", NCE, 0}, {"MCO", NCO, 1}, {"MSE", NSE, 2} };
+        // ⚠ ROUND 195: THE RADIAL FACTOR, restored.  A theta-only profile is the
+        // grade-0 amplitude WITH ITS RADIAL FACTOR DROPPED, which is why dr
+        // annihilated it and the C1 row collapsed to dr(F) = 0 (round 194).
+        // The factors are read from scripts/throat_th2.py:66-71 -- not from
+        // round 428's table, which lists the amplitudes without them:
+        //
+        //   psi2 = e^{2uh}/r        -> g0 = -1        qf = qh       -> g0 = 0
+        //   Phb  = (Ph_/r) rho      -> g0 = n - 1     br = bh r     -> g0 = +1
+        //   bt   = Bh rho           -> g0 = n         Qb = Qh       -> g0 = 0
+        //
+        // and they agree with round 188's INDEPENDENTLY MEASURED grade set
+        // (-1, n-1, 0, 1, n, 0) off the assembly's own Ser objects.
+        // Stage 1 fixes n = sqrt(2) exactly, per research round 487 ruling (3).
+        //
+        // ⚠ The profiles are per FIELD now, not per angular family, because the
+        // radial factor differs between fields sharing a family.  The plain
+        // COS_EVEN family MCE is kept as well, with no radial factor, because
+        // --jac-match-break needs it as the wrong-family control (round 172).
+        const double NEXP = std::sqrt(2.0);
+        struct Fam { const char* pre; int n; int kind; double g0; };
+        const Fam fam[7] = { {"MPS", NCE, 0, -1.0},      {"MPH", NCE, 0, NEXP - 1.0},
+                             {"MQF", NCE, 0,  0.0},      {"MBR", NCE, 0,  1.0},
+                             {"MBT", NSE, 2,  NEXP},     {"MQB", NCO, 1,  0.0},
+                             {"MCE", NCE, 0,  0.0} };
         for (const Fam& f : fam)
             for (int j = 0; j < f.n; j++) {
                 const int k = (f.kind == 2) ? j + 1 : j;
@@ -941,15 +990,30 @@ int main(int argc, char** argv)
                     Index ix(dm->get_nbr_points());
                     do {
                         const double th = dm->get_coloc(2)(ix(1));
-                        v.set(ix) = (f.kind == 0) ? std::cos(2.0 * k * th)
-                                  : (f.kind == 1) ? std::cos((2.0 * k + 1.0) * th)
-                                                  : std::sin(2.0 * k * th);
+                        const double ang = (f.kind == 0) ? std::cos(2.0 * k * th)
+                                         : (f.kind == 1) ? std::cos((2.0*k + 1.0) * th)
+                                                         : std::sin(2.0 * k * th);
+                        // ⚠ the compact domain carries r = infinity, where
+                        // r^{+g0} is inf and r^{-|g0|} is 0.  The profiles are
+                        // read ONLY at the inner face of domain 0, so the
+                        // compact domain is filled with 0 rather than with an
+                        // infinity that would propagate as a NaN.
+                        const double rr = t.pts[d][ix(0)].r;
+                        const double rad = (!std::isfinite(rr)) ? 0.0
+                                         : (f.g0 == 0.0 ? 1.0 : std::pow(rr, f.g0));
+                        v.set(ix) = rad * ang;
                     } while (ix.inc());
                 }
                 if      (f.kind == 0) sp->std_base();
                 else if (f.kind == 1) sp->std_anti_base();
                 else                  sp->std_anti_base(1);
-                mbnames.push_back(mbname(f.pre, k));
+                // ⚠ NAMED BY j, NOT BY k.  k carries the SIN_EVEN offset for
+                // the angular function only; the row loop indexes profiles by j
+                // from 0 for every family.  The first version named by k and
+                // registered MBT01 where the row asked for MBT00 -- "Unknown
+                // operator MBT00" at parse time, which is the good failure: it
+                // cannot assemble a wrong system, only refuse to assemble.
+                mbnames.push_back(mbname(f.pre, j));
                 mbase.push_back(std::move(sp));
             }
     }
@@ -1709,7 +1773,14 @@ int main(int argc, char** argv)
             // rows that happened to exist.  The RHS is irrelevant to every use
             // these have; only the row space is read.
             if (want.find(",psv,") != std::string::npos) {
-                syst.add_eq_bc(dtop, OUTER_BC, "PS = 0");
+                // ⚠ ROUND 195: psi^2(inf) = 1, not 0.  NOTES_outer_rows.md
+                // specifies it and the seed carries it (the table gives Rr = 1
+                // at the r = infinity node); the 0 was the placeholder the
+                // comment above declares, and round 194 measured the seed
+                // failing it by exactly 1.  The ROW is unchanged, so every
+                // row-space result from rounds 172-193 is untouched.
+                // brv, btv and qbv are already 0, which is their specified value.
+                syst.add_eq_bc(dtop, OUTER_BC, "PS = 1");
                 nout++;
             }
             if (want.find(",brv,") != std::string::npos) {
@@ -1746,9 +1817,11 @@ int main(int argc, char** argv)
             // which angular family each field's tau projection lives in, and
             // how many modes it has.  These are the DECLARED bases (round 313):
             // PS/PH/QF/BR COS_EVEN nt, BT SIN_EVEN nt-2, QB COS_ODD nt-1.
-            const char* fpre[6] = {"MCE", "MCE", "MCE", "MCE", "MSE", "MCO"};
+            const char* fpre[6] = {"MPS", "MPH", "MQF", "MBR", "MBT", "MQB"};
             const int   fn_n[6] = {NCE, NCE, NCE, NCE, NSE, NCO};
-            const int   fk0 [6] = {0, 0, 0, 0, 1, 0};
+            // ⚠ the SIN_EVEN offset now lives inside the profile build (k = j+1
+            // there), so every family is indexed by j from 0 here.
+            const int   fk0 [6] = {0, 0, 0, 0, 0, 0};
             // ⚠ THE TOWER ENTERS ONLY BT's AND QB's C1 ROWS.  4nt C1 rows
             // (PS, PH, QF, BR) carry no unknown at all, and that is exactly the
             // inner block's net contribution 12nt - 6 - (8nt - 6) = 4nt, which
@@ -1794,7 +1867,22 @@ int main(int argc, char** argv)
                 std::string c0 = std::string(fn[q]);
                 std::string c1 = std::string("dr(") + fn[q] + ")";
                 if (jacmatch) {
-                    char b[16];
+                    // ⚠ 40, not 16: " - G00 * dr(MPS00)" is 18 characters and
+                    // the 16-byte buffer TRUNCATED it silently into a string the
+                    // parser rejected with "= needed for equations".  The
+                    // compiler warned; the build output was tailed two lines and
+                    // the warning was missed.
+                    char b[40];
+                    // ⚠ ROUND 195: THE SAME G ENTERS C1, DIFFERENTIATED.  Round
+                    // 194 found C1 collapsing to dr(F) = 0; restoring the
+                    // profile's radial factor alone did not change it, because
+                    // the grade-0 unknowns were written into C0 ONLY -- C1 took
+                    // tower terms and nothing else, so with the tower removed it
+                    // carried no unknown at all.  The matching condition is
+                    // value AND slope against the SAME amplitude, so G must
+                    // appear in both rows; C0 and C1 then eliminate it to round
+                    // 436's Robin condition X'S - XS' = 0 with S = r^{g0}M(th).
+                    const int gbase = g;
                     for (int j = 0; j < fn_n[q]; j++) {
                         // the break control: BT's grade-0 amplitude gets a
                         // COS_EVEN profile, which its SIN_EVEN row cannot
@@ -1804,6 +1892,13 @@ int main(int argc, char** argv)
                         const int k = (jacmatchbreak && q == 4) ? j : j + fk0[q];
                         std::snprintf(b, sizeof b, " - G%02d * %s%02d", g++, pre, k);
                         c0 += b;
+                    }
+                    for (int j = 0; j < fn_n[q]; j++) {
+                        const char* pre = (jacmatchbreak && q == 4) ? "MCE"
+                                                                    : fpre[q];
+                        std::snprintf(b, sizeof b, " - G%02d * dr(%s%02d)",
+                                      gbase + j, pre, j + fk0[q]);
+                        c1 += b;
                     }
                     if (ftower[q] && !jacmatchnotower)
                         for (int j = 0; j < fn_n[q]; j++) {

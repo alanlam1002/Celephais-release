@@ -334,6 +334,20 @@ int main(int argc, char** argv)
     // `pin` is the negative control that shows the closure is the Dirichlet and
     // not the pinning of an amplitude that was always free.
     std::string ampdir, amppin;   // --inner-amp-dir / --inner-amp-pin  QF,QB
+    // ---- --newton-delta FILE: apply an EXTERNALLY COMPUTED Newton step ----
+    // Round 203.  The minimum-norm step has to be computed where the singular
+    // values can be compared across LAPACK drivers -- that is how the noise
+    // floor is DERIVED rather than chosen -- and that is offline.  This is the
+    // hook back in: xx_to_vars_delta is public and is exactly what do_newton
+    // calls, so the iteration is
+    //     probe --dump-jacobian  ->  offline truncated solve  ->  probe
+    //     --newton-delta (accumulated)  --dump-jacobian  ->  ...
+    // ⚠ SIGN: xx_to_vars_delta SUBTRACTS (system_of_eqs.cpp:557), so the file
+    // carries X solving  J X = b,  not  J X = -b.
+    // ⚠ ORDER: applied AFTER every add_var and after the equations are
+    // registered, which is where do_newton applies it.  Anywhere earlier and
+    // the unknown count it asserts against is not final.
+    std::string newtondelta;
     // ⚠ ROUND 156: the MIXED outer row  r d_r q + lambda q = 0, which
     // interpolates between the two limits research named.  For q ~ c log r + d
     // the Dirichlet limit (lambda -> infinity) fixes d and the Neumann limit
@@ -498,6 +512,7 @@ int main(int argc, char** argv)
                                            newtonfields = argv[++i]; }
         else if (k == "--inner-amp-dir") ampdir = argv[++i];
         else if (k == "--inner-amp-pin") amppin = argv[++i];
+        else if (k == "--newton-delta") newtondelta = argv[++i];
         else if (k == "--jac-outer-mixed") { jacmixed = true;
                                              jacmixlam = std::stod(argv[++i]); }
         else if (k == "--outer-perturb") outerpert = std::stod(argv[++i]);
@@ -2070,6 +2085,92 @@ int main(int argc, char** argv)
             emit("FJPJ_outer_full_radius",
                  (ofd == ndom - 1) ? std::numeric_limits<double>::infinity()
                                    : bounds[ofd + 1]);
+        }
+        // ---- --newton-delta: apply the external step BEFORE anything is read
+        if (!newtondelta.empty()) {
+            const int nu = syst.get_nbr_unknowns();
+            std::vector<double> dv(nu, 0.0);
+            std::ifstream df(newtondelta);
+            if (!df) {
+                if (rank == 0)
+                    std::cerr << "FATAL: cannot open --newton-delta "
+                              << newtondelta << "\n";
+                MPI_Finalize();
+                return 19;
+            }
+            std::string tok; int idx; double val; int nread = 0;
+            while (df >> tok) {
+                if (tok != "d") { std::getline(df, tok); continue; }
+                df >> idx >> val;
+                if (idx < 0 || idx >= nu) {
+                    if (rank == 0)
+                        std::cerr << "FATAL: --newton-delta index " << idx
+                                  << " outside [0, " << nu << ")\n";
+                    MPI_Finalize();
+                    return 19;
+                }
+                dv[idx] = val; nread++;
+            }
+            if (nread != nu) {
+                // ⚠ REFUSE on a short file.  A delta with missing entries is a
+                // DIFFERENT step, silently, and the iteration would converge to
+                // something nobody asked for.
+                if (rank == 0)
+                    std::cerr << "FATAL: --newton-delta has " << nread
+                              << " entries, needs " << nu << "\n";
+                MPI_Finalize();
+                return 19;
+            }
+            // ⚠ THE FIELDS ARE SNAPSHOT FIRST.  "max|dF| / max|F|" is the
+            // quantity that was 2-5 for the exact step and must be O(alpha)
+            // here, and it has no answer unless the pre-step state is held
+            // somewhere xx_to_vars_delta cannot reach.
+            Scalar DS0(PS), DH0(PH), DF0(QF), DR0(BR), DT0(BT), DB0(QB);
+            Kadath::Array<double> X(nu);
+            double dmax = 0.0;
+            for (int i = 0; i < nu; i++) {
+                X.set(i) = dv[i];
+                dmax = std::max(dmax, std::fabs(dv[i]));
+            }
+            int conte = 0;
+            space.xx_to_vars_variable_domains(&syst, X, conte);
+            syst.xx_to_vars_delta(X, conte);
+            emit("FJPN_delta_applied", 1.0);
+            emit("FJPN_delta_max", dmax);
+            emit("FJPN_delta_n", nu);
+            if (rank == 0)
+                std::cout << "#  --newton-delta applied: " << nu
+                          << " entries, max|d| = " << dmax << "\n";
+            {   // the field-space size of the step just applied
+                const char* dn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+                const Scalar* p0[6] = {&DS0, &DH0, &DF0, &DR0, &DT0, &DB0};
+                const Scalar* p1[6] = {&PS, &PH, &QF, &BR, &BT, &QB};
+                if (rank == 0)
+                    std::cout << "#  dstep  fld  max|dF|        max|F|         "
+                                 "rel\n";
+                for (int q = 0; q < 6; q++) {
+                    double dm = 0.0, fm = 0.0;
+                    for (int d = 0; d <= dtop; d++) {
+                        Index ix(space.get_domain(d)->get_nbr_points());
+                        do {
+                            const double a = (*p0[q])(d)(ix), c2 = (*p1[q])(d)(ix);
+                            if (!std::isfinite(a) || !std::isfinite(c2)) continue;
+                            fm = std::max(fm, std::fabs(a));
+                            dm = std::max(dm, std::fabs(c2 - a));
+                        } while (ix.inc());
+                    }
+                    emit(std::string("FJPN_ddmax_") + dn[q], dm);
+                    emit(std::string("FJPN_dfmax_") + dn[q], fm);
+                    emit(std::string("FJPN_ddrel_") + dn[q], fm > 0.0 ? dm / fm : 0.0);
+                    if (rank == 0) {
+                        char line[160];
+                        std::snprintf(line, sizeof line,
+                                      "%-3s  %-14.6e %-14.6e %-14.6e",
+                                      dn[q], dm, fm, fm > 0.0 ? dm / fm : 0.0);
+                        std::cout << "#  dstep  " << line << "\n";
+                    }
+                }
+            }
         }
         Kadath::Array<double> bb(syst.sec_member());
         const int nrow = syst.get_nbr_conditions();

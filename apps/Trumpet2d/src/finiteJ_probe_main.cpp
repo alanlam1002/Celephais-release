@@ -348,6 +348,21 @@ int main(int argc, char** argv)
     // registered, which is where do_newton applies it.  Anywhere earlier and
     // the unknown count it asserts against is not final.
     std::string newtondelta;
+    // ---- --eq-prefactor NAME:k,... : multiply an equation by r^k BEFORE the
+    // tau projection (round 205, research round 502 ruling 2).
+    // ⚠ WHY THIS IS NOT A ROW SCALING.  A radial prefactor applied to the
+    // assembled ROW is a diagonal multiplier, and round 205 measured the
+    // minimum-norm step to be EXACTLY invariant under one (||dx|| identical to
+    // seven digits under a 10^+-7 scaling).  Applied to the EXPRESSION, multr
+    // mixes radial modes before the tau projection drops the top coefficient,
+    // so it changes WHICH combination is discarded.  That is the only part of
+    // the prefactor proposal that can reach this solver, and this flag isolates
+    // it.
+    // ⚠ INTEGER POWERS ONLY.  The leading grades are -2, -1, -2, -n-3, -2n-2,
+    // -2; four are integers and two are not, so E_Phi and E_q cannot be treated
+    // this way and are left alone.  A partial test is still a test: if the four
+    // move nothing, the two will not either.
+    std::string eqpref;
     // ⚠ ROUND 156: the MIXED outer row  r d_r q + lambda q = 0, which
     // interpolates between the two limits research named.  For q ~ c log r + d
     // the Dirichlet limit (lambda -> infinity) fixes d and the Neumann limit
@@ -513,6 +528,7 @@ int main(int argc, char** argv)
         else if (k == "--inner-amp-dir") ampdir = argv[++i];
         else if (k == "--inner-amp-pin") amppin = argv[++i];
         else if (k == "--newton-delta") newtondelta = argv[++i];
+        else if (k == "--eq-prefactor") eqpref = argv[++i];
         else if (k == "--jac-outer-mixed") { jacmixed = true;
                                              jacmixlam = std::stod(argv[++i]); }
         else if (k == "--outer-perturb") outerpert = std::stod(argv[++i]);
@@ -1751,9 +1767,24 @@ int main(int argc, char** argv)
                 if (wanted_eq(ename)) {
                     const bool proj = eshtnt2
                                       && std::string(ename) == "ESHT";
-                    const std::string lhs = proj
+                    std::string lhs = proj
                         ? "multsint(" + std::string(ename) + ")"
                         : std::string(ename);
+                    // r^k, applied to the EXPRESSION and so before the tau
+                    // projection.  k is read from --eq-prefactor NAME:k.
+                    int kp = 0;
+                    if (!eqpref.empty()) {
+                        const std::string want = std::string(ename) + ":";
+                        std::size_t at = (',' + eqpref).find(',' + want);
+                        if (at != std::string::npos)
+                            kp = std::atoi(eqpref.c_str()
+                                           + (at + want.size()));
+                    }
+                    for (int t2 = 0; t2 < kp; t2++)
+                        lhs = "multr(" + lhs + ")";
+                    if (kp && d == 0 && rank == 0)
+                        std::cout << "#  --eq-prefactor " << ename
+                                  << " -> r^" << kp << "\n";
                     syst.add_eq_inside(d, (lhs + " = 0").c_str());
                 }
         if (jacinterfaces) {

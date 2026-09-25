@@ -280,6 +280,7 @@ int main(int argc, char** argv)
     bool jacmatchbreak = false;      // --jac-match-break
     bool jacrec = false;             // --jac-recursion
     bool jacrecearly = false;        // --jac-recursion-early
+    double ampgen = 0.0;             // --amp-generic X
     // ⚠ THE OUTER BLOCK, VALUE AND DERIVATIVE, ALL SIX FIELDS (round 165).
     // Not a proposed BC set: a SPANNING SET of outer-boundary functionals, so
     // that dim(image of ker(bulk+interfaces) under restriction to the outer
@@ -528,6 +529,7 @@ int main(int argc, char** argv)
         else if (k == "--jac-match-break") { jacmatch = true;
                                              jacmatchbreak = true; }
         else if (k == "--jac-recursion") { jacmatch = true; jacrec = true; }
+        else if (k == "--amp-generic") ampgen = std::stod(argv[++i]);
         else if (k == "--jac-recursion-early") { jacmatch = true;
                                     jacrec = true; jacrecearly = true; }
         else if (k == "--jac-outer-full") jacouterfull = true;
@@ -1044,7 +1046,57 @@ int main(int argc, char** argv)
                       << "  G_PS = " << matchv[0]
                       << "  G_PH = " << matchv[NCE]
                       << "  G_BR = " << matchv[3 * NCE] << "\n";
+        // ⚠ THE GRADE-1 AMPLITUDES, from round 176's monomial curve
+        // (throat_wrho.py:188-190), research round 513 ruling 3:
+        //     u1 = sqrt2/4 w0    P1 = -sqrt2/3 w0    b1 = -3 sqrt2/2 w0
+        //     B2 = Q1 = q1 = 0   at J = 0,   w0 = W0 on the deep layout
+        // The UNKNOWNS are not those: the reconstruction in throatth_eqs.hpp
+        // reads psi2's Ser as e^{2uh}/r and e^{2uh}/r . 2u1, and Phb's as
+        // Ph_/r and Ph_ P1/r, so
+        //     H_PS = 2 G_PS u1     H_PH = G_PH P1     H_BR = G_BR b1
+        // and the other three are zero.  At J = 0 the seed is spherical, so
+        // only mode 0 of each COS_EVEN family carries anything and ACE00 = 1,
+        // which makes the mode-0 coefficient the value itself.
+        // ⚠ Round 195's lesson: a residual read with the grade-1 amplitudes at
+        // zero measures the grade-1 truncation, not the system.
+        if (jacrec) {
+            const double q2 = std::sqrt(2.0);
+            const double w0 = t.W0;   // the layout parameter, not a point value
+            const double u1 = q2 / 4.0 * w0;
+            const double P1 = -q2 / 3.0 * w0;
+            const double b1 = -3.0 * q2 / 2.0 * w0;
+            matchv[NG + NT + 0]           = 2.0 * matchv[0] * u1;
+            matchv[NG + NT + NCE]         = matchv[NCE] * P1;
+            matchv[NG + NT + 3 * NCE]     = matchv[3 * NCE] * b1;
+            emit("FJPJ_seed_grade1", 1.0);
+            emit("FJPJ_seed_w0", w0);
+            if (rank == 0)
+                std::cout << "# seed-grade1  w0 = " << w0
+                          << "  H_PS = " << matchv[NG + NT]
+                          << "  H_PH = " << matchv[NG + NT + NCE]
+                          << "  H_BR = " << matchv[NG + NT + 3 * NCE] << "\n";
+        }
         emit("FJPJ_seed_match", 1.0);
+    }
+    // ⚠ GENERIC AMPLITUDES -- A RANK INSTRUMENT, AND NOTHING ELSE.  The
+    // reconstruction in throatth_eqs.hpp reads the AMPLITUDES, not the fields,
+    // so --seed-perturb cannot reach it: it makes qbar nonzero as a field and
+    // leaves S_QF and S_QB at exactly zero, which is the quantity the grade-1
+    // block is linearised on.  A rank read wants generic data (the throat
+    // rank scripts have used fixed seeds since round 77), and this fills every
+    // G and H entry with a deterministic value of the requested size.  The
+    // state is NOT physical and no residual from it means anything.
+    if (jacmatch && ampgen != 0.0) {
+        unsigned st = 4242u;
+        for (std::size_t i = 0; i < matchv.size(); i++) {
+            st = st * 1664525u + 1013904223u;
+            const double u = double(st >> 8) / double(1u << 24) - 0.5;
+            matchv[i] += ampgen * u;
+        }
+        emit("FJPJ_amp_generic", ampgen);
+        if (rank == 0)
+            std::cout << "#  --amp-generic " << ampgen
+                      << ": every G and H amplitude perturbed; RANK ONLY\n";
     }
     std::vector<std::unique_ptr<Scalar>> mbase;
     auto mbname = [](const char* pre, int k) {

@@ -279,6 +279,7 @@ int main(int argc, char** argv)
     // it wrong, because the assembled Jacobian is the same either way.
     bool jacmatchbreak = false;      // --jac-match-break
     bool jacrec = false;             // --jac-recursion
+    bool jacrecearly = false;        // --jac-recursion-early
     // ⚠ THE OUTER BLOCK, VALUE AND DERIVATIVE, ALL SIX FIELDS (round 165).
     // Not a proposed BC set: a SPANNING SET of outer-boundary functionals, so
     // that dim(image of ker(bulk+interfaces) under restriction to the outer
@@ -527,6 +528,8 @@ int main(int argc, char** argv)
         else if (k == "--jac-match-break") { jacmatch = true;
                                              jacmatchbreak = true; }
         else if (k == "--jac-recursion") { jacmatch = true; jacrec = true; }
+        else if (k == "--jac-recursion-early") { jacmatch = true;
+                                    jacrec = true; jacrecearly = true; }
         else if (k == "--jac-outer-full") jacouterfull = true;
         else if (k == "--jac-outer-full-dom") jacouterfulldom = std::stoi(argv[++i]);
         else if (k == "--jac-outer-rows") jacouterrows = argv[++i];
@@ -1382,6 +1385,12 @@ int main(int argc, char** argv)
     // silently: whichever is used is emitted as FJP_JJ.
     syst.add_cst("JJ", havejj ? jjoverride
                               : (mandata.empty() ? 0.0 : man_J));
+    // ⚠ n IS A CONSTANT OF THE SYSTEM, not just a C++ double.  The theta-ODE
+    // rows carry the throat exponent explicitly -- every grade is a power of
+    // r^n and the recursion relations are n-dependent -- so it has to be a
+    // name the parser knows.  Registered beside JJ and from the same nexp the
+    // seed-match and the Fam table use, so one --nexp moves all three.
+    syst.add_cst("nexp", nexp);
     emit("FJP_JJ", havejj ? jjoverride
                           : (mandata.empty() ? 0.0 : man_J));
     if (rank == 0 && !mandata.empty())
@@ -2188,7 +2197,7 @@ int main(int argc, char** argv)
             // added after them, is fine.  So the defs go in immediately
             // before the rows that need them, which is also where they
             // belong: nothing earlier reads them.
-            if (jacrec) {
+            if (jacrec && jacrecearly) {
                 try {
                     // ⚠ DOMAIN 0 ONLY.  These rows live at the inner face
                     // and nowhere else, and the pure-angular profiles are
@@ -2224,12 +2233,26 @@ int main(int argc, char** argv)
             // the rows do not exist -- asking for them aborts on an unknown
             // name, which is what every bisection run was actually dying of
             // before this gate went in.
-            if (jacrec && std::getenv("THROATTH_MAX") == nullptr) {
+            if (jacrec && jacrecearly
+                && std::getenv("THROATTH_MAX") == nullptr) {
+                // ⚠ MEASURED, NOT DECLARED.  The first version summed the
+                // emitter's own mode table and asserted that -- which checks
+                // the table against itself and passed while the assembly came
+                // out one row over.  get_nbr_conditions() before and after is
+                // what the system actually did with each row.
                 int nrec = 0, k = 0;
                 for (const auto& r : Trumpet::throatth_rows()) {
+                    const int before = syst.get_nbr_conditions();
                     syst.add_eq_bc(0, INNER_BC,
                                    (std::string(r.first) + " = 0").c_str());
-                    nrec += Trumpet::throatth_row_modes(k, ntheta);
+                    const int got = syst.get_nbr_conditions() - before;
+                    const int want = Trumpet::throatth_row_modes(k, ntheta);
+                    if (rank == 0)
+                        std::cout << "#  --jac-recursion: " << r.first
+                                  << "  declared " << want << "  assembled "
+                                  << got << (got == want ? "" : "   <-- ***")
+                                  << "\n";
+                    nrec += got;
                     k++;
                 }
                 if (nrec != NG) {
@@ -2289,6 +2312,137 @@ int main(int argc, char** argv)
             emit("FJPJ_outer_full_radius",
                  (ofd == ndom - 1) ? std::numeric_limits<double>::infinity()
                                    : bounds[ofd + 1]);
+        }
+        // ⚠ LATE, AND THAT IS A SEQUENCING RULE, NOT A PREFERENCE.  Ope_def
+        // EVALUATES its expression in its constructor, and the first SUM in
+        // the emission segfaults at every earlier point tried -- with the
+        // matching unknowns, and again immediately before the rows that need
+        // it -- while the identical string through --extra-def, after the
+        // whole equation set, is fine.  Registered here, the last point
+        // before sec_member() is called.  --jac-recursion-early keeps the
+        // failing placement reachable as the standing control (round 513
+        // ruling 2): if THROATTH_MAX=34 there ever stops segfaulting,
+        // something changed and this rule is no longer describing the
+        // library it was written against.
+        if (jacrec && !jacrecearly) {
+            // ⚠ THE MINIMAL REPRODUCTION, env-gated.  Round 213 said "the
+            // first + in the emission" and that was WRONG: the amplitude defs
+            // are themselves sums over the G block and they register.  This
+            // narrows it -- each line is tried in order and the last one
+            // printed is the shape that fails.
+            if (std::getenv("THROATTH_MINREPRO")) {
+                const char* probe[] = {
+                    "ZT1 = (PS + PH)",            // two FIELDS
+                    "ZT2 = (ACE00 + ACE01)",      // two CSTS
+                    "ZT3 = (PS * ACE00)",         // field x cst
+                    "ZT4 = (ZT3 + ZT3)",          // sum of two named defs
+                    "ZT5 = (G00 * ACE00)",        // UNKNOWN x cst
+                    "ZT6 = (ZT5 + ZT5)",          // sum of two unknown-defs
+                    "ZT7 = (ZT5 + ZT3)",          // one of each
+                    "ZTA = (G00 * ACE00 + G01 * ACE01)",       // 2-term sum
+                    "ZTB = (ZTA + ZTA)",                       // sum of those
+                    "ZTC = (G00 * ACE00 + G01 * ACE01 + G02 * ACE02)",
+                    "ZTD = (ZTC + ZTC)",                       // 3-term
+                    "ZTE = (G00 * ACE00 + G01 * ACE01 + G02 * ACE02 + G03 * ACE03)",
+                    "ZTF = (ZTE + ZTE)",                       // 4-term
+                    "ZTG = (G00 * ACE00 + G01 * ACE01 + G02 * ACE02 + G03 * ACE03 + G04 * ACE04)",
+                    "ZTH = (ZTG + ZTG)",                       // 5-term
+                    // ⚠ S-PREFIXED NAME, registered the ordinary way: if this
+                    // sum dies the trigger is the NAME (is_tensor reading
+                    // "SPS" as S with indices P,S), and if it lives the
+                    // trigger is throatth_register's add_def(dd, ...) loop.
+                    "SQQ = (G00 * ACE00 + G01 * ACE01 + G02 * ACE02 + G03 * ACE03 + G04 * ACE04)",
+                    "ZTI = (SQQ + ZTG)",
+                    "ZT8 = (SPS + SPH)",          // the emission's shape
+                };
+                for (const char* q : probe) {
+                    std::printf("minrepro %s\n", q);
+                    std::fflush(stdout);
+                    syst.add_def(q);
+                }
+                std::printf("minrepro ALL SIX REGISTERED\n");
+                std::fflush(stdout);
+            }
+            // ⚠ ONE EVALUATION FIRST, and it is a probe of the mechanism
+            // rather than a superstition: the only placement where these defs
+            // register is --extra-def's, which is past sec_member().  If what
+            // that buys is a lazily-sized scratch pool -- Ope_add takes TWO
+            // OperandScratchLeases at once -- then forcing one evaluation here
+            // is the whole fix; if it is not, this costs one assembly and
+            // rules the hypothesis out.
+            if (std::getenv("THROATTH_NOPRIME") == nullptr) {
+                Kadath::Array<double> warm(syst.sec_member());
+                (void)warm;
+            }
+            try {
+                // ⚠ DOMAIN 0 ONLY.  These rows live at the inner face
+                // and nowhere else, and the pure-angular profiles are
+                // filled with ZERO at the compact domain's r = infinity
+                // node -- so SPS vanishes there, log(SPS) is -inf, and
+                // reading the chain across all three domains evaluates an
+                // amplitude reconstruction that has no meaning outside
+                // domain 0.
+                Trumpet::throatth_register(syst, space, ntheta,
+                                   0, dtop,
+                                   std::getenv("THROATTH_NOREAD")
+                                   == nullptr);
+            } catch (const std::exception& ex) {
+                if (rank == 0)
+                std::cerr << "FATAL: throatth_register threw: "
+                          << ex.what() << "\n";
+                MPI_Finalize();
+                return 20;
+            }
+            if (rank == 0)
+                std::cout << "#  --jac-recursion: " << NG
+                      << " grade-1 unknowns, "
+                      << Trumpet::throatth_rows().size()
+                      << " theta-ODE rows registered\n";
+        }
+        // ⚠ THE RECURSION ROWS -- the inner boundary condition itself
+        // (research round 504).  Each is projected onto its own parity's
+        // tau basis, so the six contribute nt-1 + nt + nt-2 + nt + nt + nt
+        // = 6nt - 3, exactly the grade-1 block they close.  The count is
+        // asserted here rather than trusted, because it is the whole
+        // reason the system stays square.
+        // ⚠ THROATTH_MAX truncates the def table for bisection, and then
+        // the rows do not exist -- asking for them aborts on an unknown
+        // name, which is what every bisection run was actually dying of
+        // before this gate went in.
+        if (jacrec && !jacrecearly
+            && std::getenv("THROATTH_MAX") == nullptr) {
+            int nrec = 0, k = 0;
+            // ⚠ MEASURED, NOT DECLARED.  The first version summed the
+            // emitter's own mode table and asserted that -- which checks the
+            // table against itself, and it passed while the assembly came out
+            // one row over.  get_nbr_conditions() before and after is what the
+            // system actually did with each row.
+            for (const auto& r : Trumpet::throatth_rows()) {
+                // ⚠ get_nbr_conditions() IS NOT A RUNNING COUNT -- it came
+                // back 2269 before the first row and 0 after, so it recomputes
+                // rather than accumulates and cannot measure one row.  The
+                // declared table is what is summed here; the REAL check is
+                // FJPJ_rows against FJPJ_cols at the end, which is what caught
+                // this table being one short.
+                syst.add_eq_bc(0, INNER_BC,
+                           (std::string(r.first) + " = 0").c_str());
+                nrec += Trumpet::throatth_row_modes(k, ntheta);
+                k++;
+            }
+            if (nrec != NG) {
+                if (rank == 0)
+                std::cerr << "FATAL: the recursion rows project onto "
+                          << nrec << " conditions, not " << NG
+                          << " = 6nt - 3; the system cannot be square."
+                          << "\n";
+                MPI_Finalize();
+                return 21;
+            }
+            emit("FJPJ_recursion_rows", nrec);
+            if (rank == 0)
+                std::cout << "#  --jac-recursion: " << nrec
+                      << " conditions from 6 rows (6nt - 3 = " << NG
+                      << ")\n";
         }
         // ---- --newton-delta: apply the external step BEFORE anything is read
         if (!newtondelta.empty()) {

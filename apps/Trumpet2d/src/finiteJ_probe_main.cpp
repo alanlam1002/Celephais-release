@@ -150,6 +150,13 @@ int main(int argc, char** argv)
     // ⚠ ROUND 157: the six FIELD values, which --dump-defs does not carry (it
     // dumps sub-defs).  The log detector needs q itself, not an equation.
     std::string fieldsout;  // --dump-fields FILE
+    // --dump-eqvals FILE: every equation residual at every collocation point,
+    // so the readout can be a PER-MODE NORM instead of a max.  ⚠ Research round
+    // 521: round 212 read FJP_EQTW as a max and round 219 found std::max(x,NaN)
+    // returns x, so a max can neither see a NaN nor distinguish "zero" from
+    // "cancelling at the grid maximum".  The theta-mode decomposition is done
+    // offline against the collocation angles written here.
+    std::string eqvalsout;  // --dump-eqvals FILE
     // ⚠ AND A PLANTED LOGARITHM, so the detector can be shown to FIRE.  Round
     // 154 grouped three defects of one family -- checks whose failure mode was
     // unreachable -- and a detector that has never recovered a known signal is
@@ -511,6 +518,7 @@ int main(int argc, char** argv)
         else if (k == "--dump-grid") gridout = argv[++i];
         else if (k == "--dump-defs") defsout = argv[++i];
         else if (k == "--dump-fields") fieldsout = argv[++i];
+        else if (k == "--dump-eqvals") eqvalsout = argv[++i];
         else if (k == "--qlog") qlog = std::stod(argv[++i]);
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--jac-fields") jacfields = argv[++i];
@@ -3041,6 +3049,18 @@ int main(int argc, char** argv)
     // on an operand that vanishes on the axis; if the failures sit at
     // idx(1) == 0 that is the cause, and if they are spread it is not.
     double worst = 0.0, worst_int = 0.0;
+    // ⚠ --dump-eqvals writes the residual at EVERY collocation point, with its
+    // r and theta, so the verdict can be a per-mode norm.  Opened before the
+    // loop and written inside it, reusing the same give_val_def_scalar_domain
+    // the max readout uses -- one evaluation, two readouts, no chance of the
+    // dump and the printed max being different objects.
+    std::ofstream eqf;
+    if (!eqvalsout.empty() && rank == 0) {
+        eqf.open(eqvalsout);
+        eqf << "# equation residuals written by finiteJ_probe --dump-eqvals\n";
+        eqf << "version 1\nntheta " << ntheta << "\ndtop " << dtop << "\n";
+        eqf << std::setprecision(17);
+    }
     std::cout << "#   equation      max|E| axis     max|E| interior\n";
     for (const char* ename : Trumpet::finiteJ_eq_names()) {
         if (maxdefs >= 0) break;
@@ -3055,6 +3075,11 @@ int main(int argc, char** argv)
                 mx = std::max(mx, a);
                 if (idx(1) != 0 && idx(1) != nth - 1)
                     mxi = std::max(mxi, a);
+                if (eqf.is_open())
+                    eqf << "E " << ename << " " << d << " " << idx(0) << " "
+                        << idx(1) << " " << t.pts[d][idx(0)].r << " "
+                        << space.get_domain(d)->get_coloc(2)(idx(1)) << " "
+                        << x << "\n";
             } while (idx.inc());
         }
         std::cout << "#   " << std::left << std::setw(13) << ename

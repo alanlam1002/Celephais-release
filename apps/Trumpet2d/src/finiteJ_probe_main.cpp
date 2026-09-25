@@ -1874,6 +1874,19 @@ int main(int argc, char** argv)
                 syst.add_eq_bc(dtop, OUTER_BC, "PS = 1");
                 nout++;
             }
+            // ⚠ THE MISSING NODE VALUE (round 206, research round 503 ruling 3).
+            // NOTES_outer_rows.md specifies Dirichlet AT THE r = infinity NODE
+            // for psi^2, beta~^r, beta^^theta and qbar -- psv, brv, btv, qbv --
+            // and there is no entry for Phibar.  That is why releasing
+            // multr(PH) cost exactly nt: PH loses its ONLY outer row.
+            // Phibar = alpha psi^2 with alpha -> 1 and psi^2 -> 1, so the node
+            // value is 1, exactly parallel to psv.  With phv assembled,
+            // multr(PH) is free to be the theorem-level check the draft
+            // describes instead of a boundary condition.
+            if (want.find(",phv,") != std::string::npos) {
+                syst.add_eq_bc(dtop, OUTER_BC, "PH = 1");
+                nout++;
+            }
             if (want.find(",brv,") != std::string::npos) {
                 syst.add_eq_bc(dtop, OUTER_BC, "BR = 0");
                 nout++;

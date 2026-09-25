@@ -363,6 +363,16 @@ int main(int argc, char** argv)
     // this way and are left alone.  A partial test is still a test: if the four
     // move nothing, the two will not either.
     std::string eqpref;
+    // ---- --tail-readout: the 1/r coefficients at the r = infinity node ------
+    // Round 207, research round 504 ruling (3).  On the compact domain multr
+    // raises the decay order, so the VALUE of multr(F) at the r = infinity node
+    // IS F's 1/r coefficient -- which is why the outer rows are written that
+    // way.  Round 206 tried to get it by fitting r(PH-1) in powers of 1/r and
+    // got 7e-4 to 1.1e-3 across fit degrees 2-4, against a floor of alpha =
+    // 4.6e-4.  ⚠ A fit cannot resolve it; the coefficient is EXACT in Kadath and
+    // is a readout, not a row.  With phv carrying Phibar's node value, multr(PH)
+    // is free and this is the theorem-level check the draft describes.
+    bool tailout = false;
     // ⚠ ROUND 156: the MIXED outer row  r d_r q + lambda q = 0, which
     // interpolates between the two limits research named.  For q ~ c log r + d
     // the Dirichlet limit (lambda -> infinity) fixes d and the Neumann limit
@@ -529,6 +539,7 @@ int main(int argc, char** argv)
         else if (k == "--inner-amp-pin") amppin = argv[++i];
         else if (k == "--newton-delta") newtondelta = argv[++i];
         else if (k == "--eq-prefactor") eqpref = argv[++i];
+        else if (k == "--tail-readout") tailout = true;
         else if (k == "--jac-outer-mixed") { jacmixed = true;
                                              jacmixlam = std::stod(argv[++i]); }
         else if (k == "--outer-perturb") outerpert = std::stod(argv[++i]);
@@ -1330,6 +1341,16 @@ int main(int argc, char** argv)
                           : (mandata.empty() ? 0.0 : man_J));
     if (rank == 0 && !mandata.empty())
         std::cout << "#   JJ set from the manufactured data: " << man_J << "\n";
+    if (tailout) {
+        // ⚠ REGISTERED HERE, with the csts, so the defs exist before any
+        // equation is parsed -- the same ordering rule the matching profiles
+        // follow (round 172: the parser resolves names at add_eq time).
+        syst.add_def("TAILPS = multr(PS)");
+        syst.add_def("TAILPH = multr(PH)");
+        syst.add_def("TAILPHP = multr(PHP)");
+        syst.add_def("TAILQF = multr(QF)");
+        if (rank == 0) std::cout << "#  --tail-readout: 4 defs registered\n";
+    }
     std::cout << "# csts registered" << std::endl;
 
     // ---- SMOKE: do the operators work at all, and where is the size limit? --
@@ -2489,6 +2510,33 @@ int main(int argc, char** argv)
                     nf << "amp " << g << " " << matchv[g] << " " << G0[g] << "\n";
                 std::cout << "# post-Newton fields written to " << newtonfields << "\n";
             }
+        }
+    }
+
+    // ---- --tail-readout: read the 1/r coefficients at the r = infinity node
+    if (tailout) {
+        const char* tn[4] = {"TAILPS", "TAILPH", "TAILPHP", "TAILQF"};
+        const Kadath::Domain* dm = space.get_domain(dtop);
+        const int nr = dm->get_nbr_points()(0);
+        if (rank == 0)
+            std::cout << "#  tail   def        theta      1/r coefficient\n";
+        for (int q = 0; q < 4; q++) {
+            const Val_domain& v =
+                syst.give_val_def_scalar_domain(tn[q], dtop);
+            Index ix(dm->get_nbr_points());
+            double mx = 0.0;
+            do {
+                if (ix(0) != nr - 1) continue;       // the r = infinity node
+                const double x = v(ix);
+                mx = std::max(mx, std::fabs(x));
+                if (rank == 0) {
+                    char line[120];
+                    std::snprintf(line, sizeof line, "%-10s %-10.6f %+.10e",
+                                  tn[q], dm->get_coloc(2)(ix(1)), x);
+                    std::cout << "#  tail   " << line << "\n";
+                }
+            } while (ix.inc());
+            emit(std::string("FJP_tail_") + tn[q], mx);
         }
     }
 

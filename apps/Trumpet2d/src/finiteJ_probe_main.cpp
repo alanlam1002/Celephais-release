@@ -893,6 +893,14 @@ int main(int argc, char** argv)
                     Index ix(dm->get_nbr_points());
                     do {
                         const double rr = t.pts[d][ix(0)].r;
+                        // ⚠ THE RADIAL PROFILE IS NOT COMPACT-SAFE.  0.15 r^2
+                        // at the compact domain's r = infinity node makes the
+                        // pass-0 sup norm infinite, so pass 1 plants
+                        // eps * v / inf = 0 EVERYWHERE and NaN at the node
+                        // itself -- the flag silently perturbs nothing.  Same
+                        // guard the explicit throat profiles already carry.
+                        if (!std::isfinite(rr))
+                            continue;
                         const double th = dm->get_coloc(2)(ix(1));
                         const double rad = 0.5 + 0.35 * rr + 0.15 * rr * rr;
                         double ang;
@@ -2244,8 +2252,40 @@ int main(int argc, char** argv)
             // tail": a row imposing SOME falloff assembles and counts exactly
             // like the right one, and only the residual tells them apart.
             double bmax = 0.0;
-            for (int r = 0; r < nrow; r++) bmax = std::max(bmax, std::fabs(bb(r)));
+            int bnf = 0;
+            for (int r = 0; r < nrow; r++) {
+                if (!std::isfinite(bb(r))) { bnf++; continue; }
+                bmax = std::max(bmax, std::fabs(bb(r)));
+            }
             emit("FJPJ_rhs_max", bmax);
+            // ⚠ THE DOMAIN TEST (research round 508 ruling 3).  Phibar =
+            // alpha psi^2 > 0 and 1/Phibar is in the emission, so a step that
+            // drives Phibar through zero leaves the operator's DOMAIN and the
+            // assembly is NaN -- which round 209 found only by re-assembling
+            // by hand, after reporting the residual.  It is counted here
+            // because std::max(x, NaN) returns x: FJPJ_rhs_max cannot see a
+            // NaN, exactly as do_newton's own max could not in round 201.
+            double phmin = 1e300;
+            int phnf = 0;
+            for (int d = 0; d <= dtop; d++) {
+                Index ip(space.get_domain(d)->get_nbr_points());
+                do {
+                    const double v = PH(d)(ip);
+                    if (!std::isfinite(v)) { phnf++; continue; }
+                    phmin = std::min(phmin, v);
+                } while (ip.inc());
+            }
+            emit("FJPJ_min_PH", phmin);
+            emit("FJPJ_nonfinite_PH", phnf);
+            emit("FJPJ_nonfinite_rhs", bnf);
+            emit("FJPJ_in_domain", (phmin > 0.0 && phnf == 0 && bnf == 0)
+                                   ? 1.0 : 0.0);
+            if (rank == 0)
+                std::cout << "#   domain test: min Phibar " << phmin
+                          << ", non-finite  Phibar " << phnf
+                          << "  rhs " << bnf
+                          << (phmin > 0.0 && phnf == 0 && bnf == 0
+                              ? "   IN DOMAIN\n" : "   *** OUT OF DOMAIN ***\n");
             emit("FJPJ_outer_perturb", outerpert);
             emit("FJPJ_outer_perturb_pow", outerpow);
         }

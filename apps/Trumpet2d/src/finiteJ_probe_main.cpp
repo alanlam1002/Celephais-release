@@ -32,6 +32,7 @@
 
 #include "space/space_polar_trumpet.hpp"
 #include "src/finiteJ_eqs.hpp"
+#include "src/throatth_eqs.hpp"
 #include "Trumpet1d/src/table_io.hpp"
 
 #include <algorithm>
@@ -277,6 +278,7 @@ int main(int argc, char** argv)
     // belongs to, AND the kernel measurement cannot be contaminated by getting
     // it wrong, because the assembled Jacobian is the same either way.
     bool jacmatchbreak = false;      // --jac-match-break
+    bool jacrec = false;             // --jac-recursion
     // ⚠ THE OUTER BLOCK, VALUE AND DERIVATIVE, ALL SIX FIELDS (round 165).
     // Not a proposed BC set: a SPANNING SET of outer-boundary functionals, so
     // that dim(image of ker(bulk+interfaces) under restriction to the outer
@@ -524,6 +526,7 @@ int main(int argc, char** argv)
         else if (k == "--seed-match") seedmatch = true;
         else if (k == "--jac-match-break") { jacmatch = true;
                                              jacmatchbreak = true; }
+        else if (k == "--jac-recursion") { jacmatch = true; jacrec = true; }
         else if (k == "--jac-outer-full") jacouterfull = true;
         else if (k == "--jac-outer-full-dom") jacouterfulldom = std::stoi(argv[++i]);
         else if (k == "--jac-outer-rows") jacouterrows = argv[++i];
@@ -1008,7 +1011,13 @@ int main(int argc, char** argv)
     const int NSE = ntheta - 2;    // SIN_EVEN   sin(2k th),      k = 1 .. nt-2
     const int NG  = 4 * NCE + NSE + NCO;   // grade-0   = 6nt - 3
     const int NT  = NSE + NCO;             // tower     = 2nt - 3
-    std::vector<double> matchv(NG + NT, 0.0);
+    // ⚠ THE GRADE-1 BLOCK IS ANOTHER NG, and it is sized here with the rest
+    // for the same reason: add_var stores a POINTER, and a vector grown later
+    // would invalidate every one of them silently.  Research round 511 ruling
+    // (1): G_1 is the same Kadath object as G, extended -- a second block of
+    // scalar matching unknowns in the same parity classes, not fields on a
+    // 1-D angular space and not add_cst.
+    std::vector<double> matchv(NG + NT + NG, 0.0);
     // ⚠ ROUND 195: SEED THE MATCHING AMPLITUDES.  Round 194's residual was read
     // with every G at zero, where the C1 row's residual is dr(F) itself whatever
     // the profile is -- so restoring the radial factor could not have shown up
@@ -1066,11 +1075,31 @@ int main(int argc, char** argv)
         // --jac-match-break needs it as the wrong-family control (round 172).
         const double NEXP = nexp;
         struct Fam { const char* pre; int n; int kind; double g0; };
-        const Fam fam[7] = { {"MPS", NCE, 0, -1.0},      {"MPH", NCE, 0, NEXP - 1.0},
+        // ⚠ SIX MORE SETS FOR --jac-recursion, and both kinds are needed.
+        //   A**  the PURE ANGULAR profile of each family, no radial factor.
+        //        The theta-ODE rows live at ONE radius, so a radial factor
+        //        there is a constant folded into an unknown that already
+        //        carries it.  ACE duplicates MQF and ACO duplicates MQB by
+        //        value; they are separate names so a later change to a field's
+        //        g0 cannot silently move the angular basis with it.
+        //   N**  the GRADE-1 radial profile, r^{g0 + n}: one step of the
+        //        rho = r^n series (throat_th2.py's Ser index), which is what
+        //        lets C0 and C1 determine G and G_1 TOGETHER.
+        const Fam fam[13] = { {"MPS", NCE, 0, -1.0},      {"MPH", NCE, 0, NEXP - 1.0},
                              {"MQF", NCE, 0,  0.0},      {"MBR", NCE, 0,  1.0},
                              {"MBT", NSE, 2,  NEXP},     {"MQB", NCO, 1,  0.0},
-                             {"MCE", NCE, 0,  0.0} };
-        for (const Fam& f : fam)
+                             {"MCE", NCE, 0,  0.0},
+                             {"ACE", NCE, 0,  0.0},      {"ASE", NSE, 2,  0.0},
+                             {"ACO", NCO, 1,  0.0},
+                             {"NPS", NCE, 0, NEXP - 1.0},
+                             {"NPH", NCE, 0, 2.0 * NEXP - 1.0},
+                             {"NQF", NCE, 0, NEXP} };
+        const Fam fam2[3] = { {"NBR", NCE, 0, NEXP + 1.0},
+                              {"NBT", NSE, 2, 2.0 * NEXP},
+                              {"NQB", NCO, 1, NEXP} };
+        std::vector<Fam> allfam(fam, fam + 13);
+        allfam.insert(allfam.end(), fam2, fam2 + 3);
+        for (const Fam& f : allfam)
             for (int j = 0; j < f.n; j++) {
                 const int k = (f.kind == 2) ? j + 1 : j;
                 auto sp = std::make_unique<Scalar>(space);
@@ -1090,8 +1119,16 @@ int main(int argc, char** argv)
                         // compact domain is filled with 0 rather than with an
                         // infinity that would propagate as a NaN.
                         const double rr = t.pts[d][ix(0)].r;
-                        const double rad = (!std::isfinite(rr)) ? 0.0
-                                         : (f.g0 == 0.0 ? 1.0 : std::pow(rr, f.g0));
+                        // ⚠ A ZERO-GRADE PROFILE IS FINITE AT r = infinity.
+                        // The guard below exists because r^{g0} is inf or 0
+                        // there; with g0 = 0 there is no radial factor at all,
+                        // and zeroing it anyway makes the pure-angular A**
+                        // families vanish in the compact domain -- which makes
+                        // SPS zero and log(SPS) meaningless in exactly the
+                        // domain the theta-ODE defs are also registered in.
+                        const double rad = (f.g0 == 0.0) ? 1.0
+                                         : ((!std::isfinite(rr)) ? 0.0
+                                            : std::pow(rr, f.g0));
                         v.set(ix) = rad * ang;
                     } while (ix.inc());
                 }
@@ -1780,9 +1817,17 @@ int main(int argc, char** argv)
                     std::snprintf(nm, sizeof nm, "T%02d", tt);
                     syst.add_var(nm, matchv[NG + tt]);
                 }
+            // ⚠ THE GRADE-1 BLOCK, registered AFTER the tower so the column
+            // layout of every build without --jac-recursion is untouched.
+            if (jacrec)
+                for (int g = 0; g < NG; g++) {
+                    std::snprintf(nm, sizeof nm, "H%02d", g);
+                    syst.add_var(nm, matchv[NG + NT + g]);
+                }
             match_ncol_after = syst.get_nbr_unknowns();
             emit("FJPJ_match_unknowns", match_ncol_after - match_ncol_before);
             emit("FJPJ_match_grade0", NG);
+            emit("FJPJ_match_grade1", jacrec ? NG : 0);
             emit("FJPJ_match_tower", jacmatchnotower ? 0 : NT);
             emit("FJPJ_match_notower", jacmatchnotower ? 1.0 : 0.0);
         }
@@ -1951,6 +1996,7 @@ int main(int argc, char** argv)
             // how many modes it has.  These are the DECLARED bases (round 313):
             // PS/PH/QF/BR COS_EVEN nt, BT SIN_EVEN nt-2, QB COS_ODD nt-1.
             const char* fpre[6] = {"MPS", "MPH", "MQF", "MBR", "MBT", "MQB"};
+            const char* npre[6] = {"NPS", "NPH", "NQF", "NBR", "NBT", "NQB"};
             const int   fn_n[6] = {NCE, NCE, NCE, NCE, NSE, NCO};
             // ⚠ the SIN_EVEN offset now lives inside the profile build (k = j+1
             // there), so every family is indexed by j from 0 here.
@@ -2062,6 +2108,25 @@ int main(int argc, char** argv)
                                       gbase + j, pre, j + fk0[q]);
                         c1 += b;
                     }
+                    // ⚠ C0 AND C1 DETERMINE G AND G_1 TOGETHER (research round
+                    // 511 ruling 2').  The grade-1 amplitude enters both rows
+                    // against the NEXT profile in the rho = r^n series, so the
+                    // 12nt - 6 matching rows carry 12nt - 6 unknowns and their
+                    // net contribution to the inner count is ZERO -- which is
+                    // what leaves the 6nt - 3 recursion rows as the inner
+                    // condition, and what keeps the system square.
+                    if (jacrec) {
+                        for (int j = 0; j < fn_n[q]; j++) {
+                            std::snprintf(b, sizeof b, " - H%02d * %s%02d",
+                                          gbase + j, npre[q], j + fk0[q]);
+                            c0 += b;
+                        }
+                        for (int j = 0; j < fn_n[q]; j++) {
+                            std::snprintf(b, sizeof b, " - H%02d * dr(%s%02d)",
+                                          gbase + j, npre[q], j + fk0[q]);
+                            c1 += b;
+                        }
+                    }
                     // the amplitude row  sum_j G_j M_j = 0, projected onto the
                     // SAME tau basis the C0/C1 rows use, so it is one condition
                     // per angular mode and the count does not move.
@@ -2115,6 +2180,72 @@ int main(int argc, char** argv)
                     nin += 2;
                     if (aD || aP) namp += fn_n[q];
                 }
+            }
+            // ⚠ REGISTERED HERE, NOT WITH THE MATCHING UNKNOWNS.  Ope_def
+            // EVALUATES its expression in the constructor, and the first SUM
+            // in the emission segfaults when the defs are added before the
+            // bulk equations while the identical string through --extra-def,
+            // added after them, is fine.  So the defs go in immediately
+            // before the rows that need them, which is also where they
+            // belong: nothing earlier reads them.
+            if (jacrec) {
+                try {
+                    // ⚠ DOMAIN 0 ONLY.  These rows live at the inner face
+                    // and nowhere else, and the pure-angular profiles are
+                    // filled with ZERO at the compact domain's r = infinity
+                    // node -- so SPS vanishes there, log(SPS) is -inf, and
+                    // reading the chain across all three domains evaluates an
+                    // amplitude reconstruction that has no meaning outside
+                    // domain 0.
+                    Trumpet::throatth_register(syst, space, ntheta,
+                                               0, dtop,
+                                               std::getenv("THROATTH_NOREAD")
+                                                   == nullptr);
+                } catch (const std::exception& ex) {
+                    if (rank == 0)
+                        std::cerr << "FATAL: throatth_register threw: "
+                                  << ex.what() << "\n";
+                    MPI_Finalize();
+                    return 20;
+                }
+                if (rank == 0)
+                    std::cout << "#  --jac-recursion: " << NG
+                              << " grade-1 unknowns, "
+                              << Trumpet::throatth_rows().size()
+                              << " theta-ODE rows registered\n";
+            }
+            // ⚠ THE RECURSION ROWS -- the inner boundary condition itself
+            // (research round 504).  Each is projected onto its own parity's
+            // tau basis, so the six contribute nt-1 + nt + nt-2 + nt + nt + nt
+            // = 6nt - 3, exactly the grade-1 block they close.  The count is
+            // asserted here rather than trusted, because it is the whole
+            // reason the system stays square.
+            // ⚠ THROATTH_MAX truncates the def table for bisection, and then
+            // the rows do not exist -- asking for them aborts on an unknown
+            // name, which is what every bisection run was actually dying of
+            // before this gate went in.
+            if (jacrec && std::getenv("THROATTH_MAX") == nullptr) {
+                int nrec = 0, k = 0;
+                for (const auto& r : Trumpet::throatth_rows()) {
+                    syst.add_eq_bc(0, INNER_BC,
+                                   (std::string(r.first) + " = 0").c_str());
+                    nrec += Trumpet::throatth_row_modes(k, ntheta);
+                    k++;
+                }
+                if (nrec != NG) {
+                    if (rank == 0)
+                        std::cerr << "FATAL: the recursion rows project onto "
+                                  << nrec << " conditions, not " << NG
+                                  << " = 6nt - 3; the system cannot be square."
+                                  << "\n";
+                    MPI_Finalize();
+                    return 21;
+                }
+                emit("FJPJ_recursion_rows", nrec);
+                if (rank == 0)
+                    std::cout << "#  --jac-recursion: " << nrec
+                              << " conditions from 6 rows (6nt - 3 = " << NG
+                              << ")\n";
             }
             emit("FJPJ_inner_conditions", nin);
             emit("FJPJ_amp_rows", namp);

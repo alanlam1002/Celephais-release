@@ -1050,7 +1050,8 @@ int main(int argc, char** argv)
         matchv[2 * NCE]  = 0.0;                                 // QF,  q = 0
         matchv[3 * NCE]  = (C * om * om / (Rm * Rm * Rm)) / rm; // BR,  g0 = +1
         if (rank == 0)
-            std::cout << "# seed-match at r_m = " << rm
+            std::cout << std::setprecision(17)
+                      << "# seed-match at r_m = " << rm
                       << "  G_PS = " << matchv[0]
                       << "  G_PH = " << matchv[NCE]
                       << "  G_BR = " << matchv[3 * NCE] << "\n";
@@ -1070,16 +1071,38 @@ int main(int argc, char** argv)
         if (jacrec) {
             const double q2 = std::sqrt(2.0);
             const double w0 = t.W0;   // the layout parameter, not a point value
+            // ⚠ ROUND 224: THREE OF THE FIVE FORMS CARRY n, AND THE SHOOTING
+            // MOVES n.  Re-deriving throat_wrho.py's STEP 1/STEP 2 with n
+            // symbolic (the recursion is rho dR/drho = R W / n, so n is in it
+            // from the start) gives
+            //     u1 = sqrt2 w0 / 4                       <- n-INDEPENDENT
+            //     P1 = -sqrt2 n w0 / (6n - 3 sqrt2)
+            //     b1 = 3 w0 (-6 sqrt2 n^4 + 22 n^3 - 15 sqrt2 n^2 + 9n - sqrt2)
+            //             / (12 n^4 - 22 sqrt2 n^3 + 30 n^2 - 9 sqrt2 n + 2)
+            // and all three reduce to round 176's recorded values at n = sqrt2
+            // EXACTLY (checked symbolically).  The e_1 normalisation that makes
+            // W's rho^1 coefficient exactly w0 is e1 = sqrt2 w0 / 2, which is
+            // itself n-free -- that is why u1 has no n.
+            // The effect is small: dP1/dn = w0/3 and db1/dn = 0 at n = sqrt2,
+            // so over the shooting's |delta-n| ~ 1e-3 this is a 0.1% change in
+            // P1 and a stationary b1.  Implemented because "re-evaluate the
+            // seed at each n_k" means this, not because it is large.
+            const double ne = nexp;
             const double u1 = q2 / 4.0 * w0;
-            const double P1 = -q2 / 3.0 * w0;
-            const double b1 = -3.0 * q2 / 2.0 * w0;
+            const double P1 = -q2 * ne * w0 / (6.0 * ne - 3.0 * q2);
+            const double b1 = 3.0 * w0
+                * (-6.0 * q2 * ne * ne * ne * ne + 22.0 * ne * ne * ne
+                   - 15.0 * q2 * ne * ne + 9.0 * ne - q2)
+                / (12.0 * ne * ne * ne * ne - 22.0 * q2 * ne * ne * ne
+                   + 30.0 * ne * ne - 9.0 * q2 * ne + 2.0);
             matchv[NG + NT + 0]           = 2.0 * matchv[0] * u1;
             matchv[NG + NT + NCE]         = matchv[NCE] * P1;
             matchv[NG + NT + 3 * NCE]     = matchv[3 * NCE] * b1;
             emit("FJPJ_seed_grade1", 1.0);
             emit("FJPJ_seed_w0", w0);
             if (rank == 0)
-                std::cout << "# seed-grade1  w0 = " << w0
+                std::cout << std::setprecision(17)
+                          << "# seed-grade1  w0 = " << w0 << "  nexp = " << ne
                           << "  H_PS = " << matchv[NG + NT]
                           << "  H_PH = " << matchv[NG + NT + NCE]
                           << "  H_BR = " << matchv[NG + NT + 3 * NCE] << "\n";

@@ -169,7 +169,20 @@ int main(int argc, char** argv)
     // one new column is a NET nt-1 conditions -- the ell >= 2 harmonics -- and
     // SBAL comes back as the shooting residual, read out of the system
     // instead of evaluated offline.
+    // --drop-tephi: free TEPHI's ell >= 2 content, keeping only its ell = 0.
+    // ⚠ NOT BY REMOVING ROWS.  add_eq_bc projects onto all nt tau modes and
+    // there is no way to ask it for one; but giving the ell >= 2 harmonics
+    // their own free coefficients has the same effect and IS expressible:
+    //     TEPHI - (WP01*MCE01 + ... + WP{nt-1}*MCE{nt-1}) = 0
+    // still assembles nt rows, nt-1 of which now merely DEFINE the WP's, so
+    // the only condition left on the state is the ell = 0 harmonic.  Rows are
+    // unchanged and nt-1 columns are added, which takes the --jac-balance
+    // system from over-by-(nt-1) to SQUARE.
+    // Justified by round 234's attribution -- TEPHI carries 22x and 34x its
+    // share of the excess left-null weight and the balance exactly 0x -- and
+    // NOT by a rank, which is not a number at this conditioning.
     bool jacbalance = false;   // --jac-balance
+    bool droptephi = false;    // --drop-tephi
     double* sbal_ptr = nullptr;
     // ⚠ AND A PLANTED LOGARITHM, so the detector can be shown to FIRE.  Round
     // 154 grouped three defects of one family -- checks whose failure mode was
@@ -534,6 +547,7 @@ int main(int argc, char** argv)
         else if (k == "--dump-fields") fieldsout = argv[++i];
         else if (k == "--dump-eqvals") eqvalsout = argv[++i];
         else if (k == "--jac-balance") jacbalance = true;
+        else if (k == "--drop-tephi") droptephi = true;
         else if (k == "--qlog") qlog = std::stod(argv[++i]);
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--jac-fields") jacfields = argv[++i];
@@ -1940,6 +1954,21 @@ int main(int argc, char** argv)
                 syst.add_var("SBAL", sbal_storage);
                 sbal_ptr = &sbal_storage;
             }
+            // ⚠ STATIC, as sbal_storage is: add_var keeps a pointer and these
+            // must outlive `syst`.
+            if (droptephi && jacrec) {
+                static std::vector<double> wp_storage;
+                wp_storage.assign(ntheta, 0.0);
+                char wn[16];
+                for (int q = 1; q < ntheta; q++) {
+                    std::snprintf(wn, sizeof wn, "WP%02d", q);
+                    syst.add_var(wn, wp_storage[q]);
+                }
+                if (rank == 0)
+                    std::cout << "#  --drop-tephi: " << ntheta - 1
+                              << " free coefficients WP01..WP"
+                              << ntheta - 1 << " for TEPHI's ell >= 2\n";
+            }
             match_ncol_after = syst.get_nbr_unknowns();
             emit("FJPJ_match_unknowns", match_ncol_after - match_ncol_before);
             emit("FJPJ_match_grade0", NG);
@@ -2531,8 +2560,21 @@ int main(int argc, char** argv)
                 // declared table is what is summed here; the REAL check is
                 // FJPJ_rows against FJPJ_cols at the end, which is what caught
                 // this table being one short.
-                syst.add_eq_bc(0, INNER_BC,
-                           (std::string(r.first) + " = 0").c_str());
+                std::string eqt = std::string(r.first) + " = 0";
+                if (droptephi && std::string(r.first) == "TEPHI") {
+                    eqt = r.first;
+                    char tb[32];
+                    for (int q = 1; q < ntheta; q++) {
+                        std::snprintf(tb, sizeof tb, " - WP%02d * MCE%02d",
+                                      q, q);
+                        eqt += tb;
+                    }
+                    eqt += " = 0";
+                    if (rank == 0)
+                        std::cout << "#  --drop-tephi: " << eqt.substr(0, 60)
+                                  << " ...\n";
+                }
+                syst.add_eq_bc(0, INNER_BC, eqt.c_str());
                 nrec += Trumpet::throatth_row_modes(k, ntheta);
                 k++;
             }

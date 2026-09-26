@@ -157,6 +157,20 @@ int main(int argc, char** argv)
     // "cancelling at the grid maximum".  The theta-mode decomposition is done
     // offline against the collocation angles written here.
     std::string eqvalsout;  // --dump-eqvals FILE
+    // --jac-balance: impose the BALANCE at every harmonic (research round 528).
+    // The shooting reads `E_Phi/Ph + 2 E_sigma` at ell = 0 only; its ell >= 2
+    // harmonics are Gate 1, which round 127's state satisfies to 1e-10 and
+    // this one violates by +2.3.  The emitted row is division-free,
+    //     TBAL = E_Phi(n-3) - Ph * E_q(-2),
+    // and it is imposed as `TBAL - SPH * SBAL = 0` with SBAL ONE new scalar
+    // unknown: TBAL is Ph times the balance, so `TBAL = Ph * SBAL` is exactly
+    // `balance = SBAL` pointwise, while `TBAL = const` would NOT be (Ph is
+    // theta-dependent and multiplying by it mixes harmonics).  nt rows against
+    // one new column is a NET nt-1 conditions -- the ell >= 2 harmonics -- and
+    // SBAL comes back as the shooting residual, read out of the system
+    // instead of evaluated offline.
+    bool jacbalance = false;   // --jac-balance
+    double* sbal_ptr = nullptr;
     // ⚠ AND A PLANTED LOGARITHM, so the detector can be shown to FIRE.  Round
     // 154 grouped three defects of one family -- checks whose failure mode was
     // unreachable -- and a detector that has never recovered a known signal is
@@ -519,6 +533,7 @@ int main(int argc, char** argv)
         else if (k == "--dump-defs") defsout = argv[++i];
         else if (k == "--dump-fields") fieldsout = argv[++i];
         else if (k == "--dump-eqvals") eqvalsout = argv[++i];
+        else if (k == "--jac-balance") jacbalance = true;
         else if (k == "--qlog") qlog = std::stod(argv[++i]);
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--jac-fields") jacfields = argv[++i];
@@ -1916,6 +1931,15 @@ int main(int argc, char** argv)
                     std::snprintf(nm, sizeof nm, "H%02d", g);
                     syst.add_var(nm, matchv[NG + NT + g]);
                 }
+            // ⚠ STATIC, because add_var stores a POINTER and this must outlive
+            // `syst` exactly as matchv does.  One scalar: the balance's own
+            // constant, i.e. n's shooting residual.
+            if (jacbalance && jacrec) {
+                static double sbal_storage = 0.0;
+                sbal_storage = 0.0;
+                syst.add_var("SBAL", sbal_storage);
+                sbal_ptr = &sbal_storage;
+            }
             match_ncol_after = syst.get_nbr_unknowns();
             emit("FJPJ_match_unknowns", match_ncol_after - match_ncol_before);
             emit("FJPJ_match_grade0", NG);
@@ -2520,6 +2544,27 @@ int main(int argc, char** argv)
                           << "\n";
                 MPI_Finalize();
                 return 21;
+            }
+            // ⚠ THE BALANCE ROW, at the LATE site -- that is the one the
+            // production invocation reaches.  --jac-recursion-early is what
+            // selects the early branch, and registering there gave one new
+            // COLUMN and ZERO new rows, which the count caught before any
+            // solve was attempted.
+            // ⚠ AND IT IS NOT COUNTED WITH get_nbr_conditions(), for the
+            // reason recorded twenty lines up: that call RECOMPUTES rather
+            // than accumulates and cannot measure one row.  The real check is
+            // FJPJ_rows against FJPJ_cols; the declared count is nt because
+            // the row is COS_EVEN.
+            if (jacbalance && Trumpet::throatth_balance() != nullptr) {
+                syst.add_eq_bc(0, INNER_BC,
+                    (std::string(Trumpet::throatth_balance())
+                     + " - SPH * SBAL = 0").c_str());
+                emit("FJPJ_balance_rows", ntheta);
+                if (rank == 0)
+                    std::cout << "#  --jac-balance: TBAL - SPH*SBAL registered"
+                                 ", declared " << ntheta << " modes (net "
+                              << ntheta - 1 << " conditions against 1 new "
+                                 "unknown)\n";
             }
             emit("FJPJ_recursion_rows", nrec);
             if (rank == 0)

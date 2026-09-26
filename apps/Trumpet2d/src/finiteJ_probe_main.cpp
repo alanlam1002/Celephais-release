@@ -183,6 +183,34 @@ int main(int argc, char** argv)
     // NOT by a rank, which is not a number at this conditioning.
     bool jacbalance = false;   // --jac-balance
     bool droptephi = false;    // --drop-tephi
+    // --jac-axisres: the AXIS RESIDUE of E_sh^theta, as one scalar row
+    // (research round 541).  module2_final.py closes its 8x8 ell = 2 solve
+    // with the vanishing of the 1/theta pole of the theta-momentum constraint
+    // at the axis; the global multiplies E_sh^theta by sin^2 theta (round
+    // 514), which clears the pole, and a pole multiplied away is a condition
+    // removed, not imposed.
+    // ⚠ NO AXIS EVALUATION IS NEEDED, because the throat amplitudes are
+    // explicit sums over the SCALAR unknowns G%02d / H%02d times pure angular
+    // profiles (throatth_amp_defs).  A Laurent expansion of deep5's UNWEIGHTED
+    // E_sh^theta(n-2) about theta = 0 -- theta^-3 and theta^-2 vanish
+    // identically, so the pole is exactly simple -- gives
+    //     Res = -2 Bh'(0) - n bh(0) [ b1(0) + 6 u1(0) ]
+    // and each axis datum is a plain sum of scalars: x(0) = sum_j X_j for the
+    // COS_EVEN/COS_ODD families, Bh'(0) = sum_j 2(j+1) G_BT_j for SIN_EVEN.
+    // Multiplied through by PS's axis value to clear the one division, the
+    // row is the division-free
+    //     TRES = -(sum G_PS) [ 4 sum_j (j+1) G_BT_j + n sum H_BR ]
+    //            - 3 n (sum G_BR)(sum H_PS)  =  0
+    // ONE condition, theta-independent: the residue is a number, not a
+    // harmonic, so unlike --jac-balance there is no new unknown and no mode
+    // count.  Rows +1, columns +0.
+    // ⚠ Validated before it was built, three ways: b1 + 6 u1 == 0 identically
+    // in n on round 176/224's closed forms (so the J = 0 backbone satisfies it
+    // exactly, not to a tolerance); the five pole-column coefficients match
+    // module2_final.py's independent 60-dps numerical extraction exactly,
+    // including the irrational sqrt2/3 on c2s; and the combination vanishes on
+    // module2's own regular-branch solution.
+    bool jacaxisres = false;   // --jac-axisres
     double* sbal_ptr = nullptr;
     // ⚠ AND A PLANTED LOGARITHM, so the detector can be shown to FIRE.  Round
     // 154 grouped three defects of one family -- checks whose failure mode was
@@ -547,6 +575,7 @@ int main(int argc, char** argv)
         else if (k == "--dump-fields") fieldsout = argv[++i];
         else if (k == "--dump-eqvals") eqvalsout = argv[++i];
         else if (k == "--jac-balance") jacbalance = true;
+        else if (k == "--jac-axisres") jacaxisres = true;
         else if (k == "--drop-tephi") droptephi = true;
         else if (k == "--qlog") qlog = std::stod(argv[++i]);
         else if (k == "--dump-jacobian") jacdump = argv[++i];
@@ -2597,6 +2626,58 @@ int main(int argc, char** argv)
             // than accumulates and cannot measure one row.  The real check is
             // FJPJ_rows against FJPJ_cols; the declared count is nt because
             // the row is COS_EVEN.
+            // ⚠ THE AXIS RESIDUE ROW.  Built here rather than in the
+            // emitter because it is not a theta-ODE: it is an algebraic
+            // relation among the scalar matching unknowns, and the emitter's
+            // whole vocabulary is trig monomials in theta.
+            if (jacaxisres) {
+                const int NCE = ntheta, NSE = ntheta - 2;
+                std::string sgps, sgbr, shps, shbr, sgbt;
+                char b[64];
+                for (int j = 0; j < NCE; j++) {
+                    std::snprintf(b, sizeof b, "%sG%02d", j ? " + " : "", j);
+                    sgps += b;
+                    std::snprintf(b, sizeof b, "%sH%02d", j ? " + " : "", j);
+                    shps += b;
+                    std::snprintf(b, sizeof b, "%sG%02d", j ? " + " : "",
+                                  3 * ntheta + j);
+                    sgbr += b;
+                    std::snprintf(b, sizeof b, "%sH%02d", j ? " + " : "",
+                                  3 * ntheta + j);
+                    shbr += b;
+                }
+                for (int j = 0; j < NSE; j++) {
+                    std::snprintf(b, sizeof b, "%s%d * G%02d",
+                                  j ? " + " : "", 4 * (j + 1),
+                                  4 * ntheta + j);
+                    sgbt += b;
+                }
+                char nb[64];
+                std::snprintf(nb, sizeof nb, "%.17g", nexp);
+                // ⚠ NO LEADING UNARY MINUS -- the condition is negated
+                // wholesale instead.
+                // ⚠ AND IT CANNOT GO THROUGH add_eq_bc.  The expression is
+                // PURELY SCALAR: every factor is a G/H unknown, so there is
+                // no field to project onto a tau basis and the assembly
+                // segfaults (it does register and log first, so the log line
+                // is not proof the row took -- the count is).  Multiplying by
+                // the cst ACE00 == 1 gives it an angular carrier that is
+                // identically theta-independent, so mode 0 IS the residue and
+                // every other mode is exactly zero; add_eq_mode then takes
+                // that one coefficient and yields ONE row, where add_eq_bc
+                // would yield nt of which nt-1 are identically zero.
+                std::string eq = "((" + sgps + ") * ((" + sgbt + ") + "
+                    + nb + " * (" + shbr + ")) + 3 * " + nb
+                    + " * (" + sgbr + ") * (" + shps + ")) * ACE00";
+                Index pos_cf(space.get_domain(0)->get_nbr_coefs());
+                syst.add_eq_mode(0, INNER_BC, eq.c_str(), pos_cf, 0.0);
+                emit("FJPJ_axisres_rows", 1);
+                if (rank == 0)
+                    std::cout << "#  --jac-axisres: TRES registered at n = "
+                              << nb << " by add_eq_mode, 1 scalar condition "
+                                 "(rows +1, columns +0); " << eq.substr(0, 60)
+                              << " ...\n";
+            }
             if (jacbalance && Trumpet::throatth_balance() != nullptr) {
                 syst.add_eq_bc(0, INNER_BC,
                     (std::string(Trumpet::throatth_balance())

@@ -150,6 +150,13 @@ int main(int argc, char** argv)
     // ⚠ ROUND 157: the six FIELD values, which --dump-defs does not carry (it
     // dumps sub-defs).  The log detector needs q itself, not an equation.
     std::string fieldsout;  // --dump-fields FILE
+    // --dump-fields-post: the same dump, AFTER --newton-delta has been applied.
+    // ⚠ --dump-fields fires at its own site well before the delta is read, so
+    // on a converged chain it writes the SEED and not the state.  The throat's
+    // intrinsic geometry (round 252) has to be read off the converged fields,
+    // so the dump is repeated at the one place where PS..QB carry the state:
+    // immediately after xx_to_vars_delta.
+    std::string fieldspost;  // --dump-fields-post FILE
     // --dump-eqvals FILE: every equation residual at every collocation point,
     // so the readout can be a PER-MODE NORM instead of a max.  ⚠ Research round
     // 521: round 212 read FJP_EQTW as a max and round 219 found std::max(x,NaN)
@@ -573,6 +580,7 @@ int main(int argc, char** argv)
         else if (k == "--dump-grid") gridout = argv[++i];
         else if (k == "--dump-defs") defsout = argv[++i];
         else if (k == "--dump-fields") fieldsout = argv[++i];
+        else if (k == "--dump-fields-post") fieldspost = argv[++i];
         else if (k == "--dump-eqvals") eqvalsout = argv[++i];
         else if (k == "--jac-balance") jacbalance = true;
         else if (k == "--jac-axisres") jacaxisres = true;
@@ -2779,6 +2787,26 @@ int main(int argc, char** argv)
                         std::cout << "#  dstep  " << line << "\n";
                     }
                 }
+            }
+            if (!fieldspost.empty() && rank == 0) {
+                std::ofstream ff(fieldspost);
+                ff << "# field values AFTER --newton-delta, by --dump-fields-post\n";
+                ff << "fields PS PH QF BR BT QB\n";
+                ff << std::setprecision(17);
+                const Scalar* fp[6] = {&PS, &PH, &QF, &BR, &BT, &QB};
+                for (int d = 0; d <= dtop; d++) {
+                    Index ix(space.get_domain(d)->get_nbr_points());
+                    do {
+                        ff << "val " << d << " " << ix(0) << " " << ix(1)
+                           << " " << t.pts[d][ix(0)].r
+                           << " " << space.get_domain(d)->get_coloc(2)(ix(1));
+                        for (int q = 0; q < 6; q++)
+                            ff << " " << (*fp[q])(d)(ix);
+                        ff << "\n";
+                    } while (ix.inc());
+                }
+                std::cout << "#  --dump-fields-post: written to "
+                          << fieldspost << "\n";
             }
         }
         Kadath::Array<double> bb(syst.sec_member());

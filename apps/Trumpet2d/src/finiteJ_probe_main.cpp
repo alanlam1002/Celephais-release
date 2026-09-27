@@ -3320,6 +3320,37 @@ int main(int argc, char** argv)
         worst = std::max(worst, mx);
         worst_int = std::max(worst_int, mxi);
     }
+    // ---- --extra-def names, on the SAME grid and through the SAME writer ----
+    // ⚠ Why this exists (round 259): the five terms of ESIG are internal
+    // definitions (D0286, D0293, D0303, D0306, D0311, whose sum is D0312 =
+    // ESIG).  Registering them as extras and dumping them here means the term
+    // split is the EQUATION'S OWN split, evaluated by Kadath's own operators on
+    // the same collocation points as the residual -- not a re-derivation in
+    // python that would have to be trusted separately.  The sum of the parts is
+    // then checkable against the whole, pointwise, from one run.
+    // ⚠ Round 236: every extra name is echoed with its max, so a name that
+    // resolved to nothing is an error and not a clean zero.
+    if (eqf.is_open())
+        for (const auto& nm : extra_names) {
+            double mx = 0.0;
+            for (int d = 0; d <= dtop; d++) {
+                const Val_domain& v =
+                    syst.give_val_def_scalar_domain(nm.c_str(), d);
+                Index idx(space.get_domain(d)->get_nbr_points());
+                do {
+                    const double x = v(idx);
+                    mx = std::max(mx, std::isfinite(x) ? std::fabs(x) : 1e300);
+                    eqf << "D " << nm << " " << d << " " << idx(0) << " "
+                        << idx(1) << " " << t.pts[d][idx(0)].r << " "
+                        << space.get_domain(d)->get_coloc(2)(idx(1)) << " "
+                        << x << "\n";
+                } while (idx.inc());
+            }
+            std::cout << "#   --dump-eqvals extra " << std::left
+                      << std::setw(10) << nm << " max|D| = "
+                      << std::setprecision(6) << mx << "\n";
+        }
+
     emit("FJP_worst_interior", worst_int);
     emit("FJP_worst", worst);
 

@@ -242,6 +242,22 @@ int main(int argc, char** argv)
     // including the irrational sqrt2/3 on c2s; and the combination vanishes on
     // module2's own regular-branch solution.
     bool jacaxisres = false;   // --jac-axisres
+    // --grade1-replace: THE ell >= 2 GRADE-1 REPLACEMENT (research rounds
+    // 543/575, code rounds 248/250).  Per ell >= 2 mode the six recursion
+    // rows are rank 3 of 5 on the grade-1 unknowns, because E_Phi(-3) and
+    // E_q(-n-2) are VACUOUS there; min-norm has been setting that two-per-mode
+    // freedom to zero.  The fix is a REPLACEMENT, net row change zero:
+    //     TEPHI, TEQFN      mode 0 only                      (1 + 1)
+    //     TESHR2 = E_sh^r(2n-1), TESIG2 = E_sigma(n-2)
+    //                       modes 1..nt-1                   (nt-1 + nt-1)
+    // = 2nt, exactly what TEPHI and TEQFN supply at every mode now, so the
+    // count stays 6nt - 3.  ⚠ add_eq_bc cannot take a subset of modes, so
+    // every one of these goes through add_eq_mode, one coefficient per call
+    // (Ope_mode reads the boundary value's cos(2k theta) coefficient k, the
+    // same coefficient add_eq_bc's tau projection imposes for a COS_EVEN row).
+    // Those are Eq_int rows and land AFTER the field equations in the row
+    // order; the count check below is what says the system is still square.
+    bool g1replace = false;    // --grade1-replace
     double* sbal_ptr = nullptr;
     // ⚠ AND A PLANTED LOGARITHM, so the detector can be shown to FIRE.  Round
     // 154 grouped three defects of one family -- checks whose failure mode was
@@ -611,6 +627,7 @@ int main(int argc, char** argv)
 #endif
         else if (k == "--jac-balance") jacbalance = true;
         else if (k == "--jac-axisres") jacaxisres = true;
+        else if (k == "--grade1-replace") g1replace = true;
         else if (k == "--drop-tephi") droptephi = true;
         else if (k == "--qlog") qlog = std::stod(argv[++i]);
         else if (k == "--dump-jacobian") jacdump = argv[++i];
@@ -2565,6 +2582,14 @@ int main(int argc, char** argv)
             // added after them, is fine.  So the defs go in immediately
             // before the rows that need them, which is also where they
             // belong: nothing earlier reads them.
+            if (g1replace && (jacrecearly || droptephi || !jacrec)) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --grade1-replace needs --jac-recursion"
+                                 " at the LATE site and without --drop-tephi"
+                                 " (both rewrite TEPHI's modes)\n";
+                MPI_Finalize();
+                return 22;
+            }
             if (jacrec && jacrecearly) {
                 try {
                     // ⚠ DOMAIN 0 ONLY.  These rows live at the inner face
@@ -2753,7 +2778,7 @@ int main(int argc, char** argv)
                 Trumpet::throatth_register(syst, space, ntheta,
                                    0, dtop,
                                    std::getenv("THROATTH_NOREAD")
-                                   == nullptr);
+                                   == nullptr, g1replace);
             } catch (const std::exception& ex) {
                 if (rank == 0)
                 std::cerr << "FATAL: throatth_register threw: "
@@ -2806,9 +2831,42 @@ int main(int argc, char** argv)
                         std::cout << "#  --drop-tephi: " << eqt.substr(0, 60)
                                   << " ...\n";
                 }
-                syst.add_eq_bc(0, INNER_BC, eqt.c_str());
-                nrec += Trumpet::throatth_row_modes(k, ntheta);
+                const std::string rn(r.first);
+                if (g1replace && (rn == "TEPHI" || rn == "TEQFN")) {
+                    // mode 0 ONLY: the ell >= 2 content of these two is
+                    // vacuous on the grade-1 block and is replaced below.
+                    Index pos_cf(space.get_domain(0)->get_nbr_coefs());
+                    syst.add_eq_mode(0, INNER_BC, (rn).c_str(), pos_cf, 0.0);
+                    nrec += 1;
+                    if (rank == 0)
+                        std::cout << "#  --grade1-replace: " << rn
+                                  << " at mode 0 only (1 condition, was "
+                                  << Trumpet::throatth_row_modes(k, ntheta)
+                                  << ")\n";
+                } else {
+                    syst.add_eq_bc(0, INNER_BC, eqt.c_str());
+                    nrec += Trumpet::throatth_row_modes(k, ntheta);
+                }
                 k++;
+            }
+            if (g1replace) {
+                int nadd = 0;
+                for (const auto& r : Trumpet::throatth_replace()) {
+                    for (int q = 1; q < ntheta; q++) {
+                        Index pos_cf(space.get_domain(0)->get_nbr_coefs());
+                        pos_cf.set(1) = q;
+                        syst.add_eq_mode(0, INNER_BC, r.first, pos_cf, 0.0);
+                        nadd++;
+                    }
+                    if (rank == 0)
+                        std::cout << "#  --grade1-replace: " << r.first
+                                  << " = " << r.second << " at modes 1.."
+                                  << ntheta - 1 << " (" << ntheta - 1
+                                  << " conditions)\n";
+                }
+                nrec += nadd;
+                emit("FJPJ_g1replace_rows", nadd);
+                emit("FJPJ_g1replace_cut", 2 * (ntheta - 1));
             }
             if (nrec != NG) {
                 if (rank == 0)

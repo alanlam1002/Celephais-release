@@ -76,6 +76,17 @@ target_compile_definitions(trumpet2d_finiteJ_probe_chi PRIVATE TRUMPET_CHI_UNKNO
 target_include_directories(trumpet2d_finiteJ_probe_chi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
 
+# Round 279: AXIS REGULARITY OF q BY BASIS (research round 578).  q = sin^2 q~,
+# so QF denotes q~ in both generated headers (finiteJ_eqs_qreg.hpp,
+# throatth_eqs_qreg.hpp).  A THIRD binary from the same source, for the same
+# reason as the chi one: the stock finiteJ_probe stays bit-for-bit the record.
+kadath_add_exec(trumpet2d_finiteJ_probe_qreg src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_qreg PROPERTIES
+    OUTPUT_NAME finiteJ_probe_qreg)
+target_compile_definitions(trumpet2d_finiteJ_probe_qreg PRIVATE TRUMPET_Q_REGULAR)
+target_include_directories(trumpet2d_finiteJ_probe_qreg PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
 # Round 106: the minimal reproducer for round 105's two evaluator defects.
 # Stock Kadath only -- Space_polar, two add_cst fields, hand-typed expressions.
 # It depends on nothing of ours by design: a defect we cannot demonstrate

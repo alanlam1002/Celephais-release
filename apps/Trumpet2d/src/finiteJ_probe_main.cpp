@@ -37,12 +37,22 @@
 // seven-unknown overnight.  TRUMPET_CHI_UNKNOWN selects the seven-unknown
 // emission and builds a SEPARATE target, so the six-unknown pipeline -- which is
 // the whole record and the permanent cross-check -- is untouched.
+#if defined(TRUMPET_CHI_UNKNOWN) && defined(TRUMPET_Q_REGULAR)
+#error "TRUMPET_CHI_UNKNOWN and TRUMPET_Q_REGULAR are separate emissions"
+#endif
 #ifdef TRUMPET_CHI_UNKNOWN
 #include "src/finiteJ_eqs_chi.hpp"
+#elif defined(TRUMPET_Q_REGULAR)
+// ⚠ Round 279: q = sin^2(theta) q~ in BOTH emissions; the unknown QF is q~.
+#include "src/finiteJ_eqs_qreg.hpp"
 #else
 #include "src/finiteJ_eqs.hpp"
 #endif
+#ifdef TRUMPET_Q_REGULAR
+#include "src/throatth_eqs_qreg.hpp"
+#else
 #include "src/throatth_eqs.hpp"
+#endif
 #include "Trumpet1d/src/table_io.hpp"
 
 #include <algorithm>
@@ -65,6 +75,17 @@ using Kadath::Scalar;
 using Kadath::System_of_eqs;
 using Kadath::Val_domain;
 
+// ⚠ eq_list / eq_int_list are PROTECTED in System_of_eqs and have no accessor.
+// A pointer-to-member formed through a derived class reads them without
+// touching the library (round 279's --dump-rowmeta needs eq_index -> name).
+struct EqListPeek : Kadath::System_of_eqs {
+    using L = std::vector<std::tuple<std::string, int, int>>;
+    static const L& eqs(const Kadath::System_of_eqs& s)
+    { return s.*(&EqListPeek::eq_list); }
+    static const L& eqints(const Kadath::System_of_eqs& s)
+    { return s.*(&EqListPeek::eq_int_list); }
+};
+
 static void emit(const std::string& k, double v)
 {
     std::cout << "RESULT " << k << " " << std::setprecision(17) << v << "\n";
@@ -72,6 +93,12 @@ static void emit(const std::string& k, double v)
 
 int main(int argc, char** argv)
 {
+#ifdef TRUMPET_Q_REGULAR
+    // ⚠ Round 236's rule: a build that changes the assembled system says so.
+    std::cout << "#  TRUMPET_Q_REGULAR: q = sin^2(theta) q~; the unknown QF is q~"
+                 " (and every dumped QF column is q~, not q)\n";
+    emit("FJP_q_regular", 1);
+#endif
     MPI_Init(&argc, &argv);
     int rank = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -266,6 +293,11 @@ int main(int argc, char** argv)
     // so lands entirely in the m = 0 mode the detector fits.
     double qlog = 0.0;      // --qlog C
     std::string jacdump;   // --dump-jacobian FILE (BULK rows only)
+    // --dump-rowmeta FILE: Kadath's own per-row metadata (FILE.rows, FILE.cols,
+    // dump_tagged_jacobian_metadata_csv) and the eq_index -> expression table
+    // (FILE.eqs), so a row is attributed to an EQUATION by the library that
+    // assembled it -- round 258's classifier failure was a map built outside.
+    std::string rowmeta;
     // ⚠ STEP 1 OF THE BVP BUILD (round 134): the row/column counts must be
     // ATTRIBUTED to named fields and equations, not inferred from the total.
     // These two let a SUBSET be registered, so the per-field column count and
@@ -631,6 +663,7 @@ int main(int argc, char** argv)
         else if (k == "--drop-tephi") droptephi = true;
         else if (k == "--qlog") qlog = std::stod(argv[++i]);
         else if (k == "--dump-jacobian") jacdump = argv[++i];
+        else if (k == "--dump-rowmeta") rowmeta = argv[++i];
         else if (k == "--jac-fields") jacfields = argv[++i];
         else if (k == "--jac-eqs") jaceqs = argv[++i];
         else if (k == "--jac-interfaces") jacinterfaces = true;
@@ -3201,6 +3234,30 @@ int main(int argc, char** argv)
             emit("FJPJ_nnz", double(nnz));
             emit("FJPJ_density", double(nnz) / (double(nrow) * double(ncol)));
             std::cout << "# bulk Jacobian written to " << jacdump << "\n";
+            if (!rowmeta.empty()) {
+                std::ofstream rm(rowmeta + ".rows"), cm(rowmeta + ".cols"),
+                    em(rowmeta + ".eqs");
+                syst.dump_tagged_jacobian_metadata_csv(rm, cm);
+                std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
+                syst.classify_equation_row_metadata(rmeta);
+                const auto& EL = EqListPeek::eqs(syst);
+                const auto& EI = EqListPeek::eqints(syst);
+                em << "# kind index dom expression\n";
+                for (std::size_t q = 0; q < EL.size(); q++)
+                    em << "eq " << q << " " << std::get<1>(EL[q]) << " "
+                       << std::get<0>(EL[q]) << "\n";
+                for (std::size_t q = 0; q < EI.size(); q++)
+                    em << "eqint " << q << " " << std::get<1>(EI[q]) << " "
+                       << std::get<0>(EI[q]) << "\n";
+                emit("FJPJ_rowmeta_rows", int(rmeta.size()));
+                emit("FJPJ_rowmeta_matches", int(rmeta.size()) == nrow ? 1 : 0);
+                emit("FJPJ_rowmeta_eqs", int(EL.size()));
+                emit("FJPJ_rowmeta_eqints", int(EI.size()));
+                std::cout << "#   --dump-rowmeta: " << rmeta.size()
+                          << " row tags (" << nrow << " rows), " << EL.size()
+                          << " equations + " << EI.size()
+                          << " integral equations -> " << rowmeta << ".*\n";
+            }
             }
         }
 

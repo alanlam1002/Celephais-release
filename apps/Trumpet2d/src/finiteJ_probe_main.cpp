@@ -31,7 +31,17 @@
 #include "For_Kadath/System_of_eqs/system_of_eqs.hpp"
 
 #include "space/space_polar_trumpet.hpp"
+// ⚠ TWO EMISSIONS, ONE BINARY EACH.  The generated headers declare the same
+// names in namespace Trumpet, so they cannot both be included; and regenerating
+// finiteJ_eqs.hpp in place would make every measurement path in the record
+// seven-unknown overnight.  TRUMPET_CHI_UNKNOWN selects the seven-unknown
+// emission and builds a SEPARATE target, so the six-unknown pipeline -- which is
+// the whole record and the permanent cross-check -- is untouched.
+#ifdef TRUMPET_CHI_UNKNOWN
+#include "src/finiteJ_eqs_chi.hpp"
+#else
 #include "src/finiteJ_eqs.hpp"
+#endif
 #include "src/throatth_eqs.hpp"
 #include "Trumpet1d/src/table_io.hpp"
 
@@ -745,6 +755,13 @@ int main(int argc, char** argv)
     const double C = 3.0 * std::sqrt(3.0) * M * M / 4.0;
 
     Scalar PS(space), PH(space), QF(space), BR(space), BT(space), QB(space);
+#ifdef TRUMPET_CHI_UNKNOWN
+    // chi promoted to an unknown (research round 554 ruling 1).  Seeded from the
+    // product AFTER the defs are registered -- see the CH seed block below --
+    // because the product is D0048, which the emission already builds, so the
+    // seed is Kadath's own evaluation and not a second transcription of it.
+    Scalar CH(space);
+#endif
     Scalar RR(space), ST(space), CT(space), C2(space), H2(space), L2(space),
            CX(space), SQ(space), T7(space), ONE(space);
     // Every domain must be allocated even though the system covers only the
@@ -757,6 +774,17 @@ int main(int argc, char** argv)
         Val_domain& vbr = BR.set_domain(d);
         Val_domain& vbt = BT.set_domain(d);
         Val_domain& vqb = QB.set_domain(d);
+#ifdef TRUMPET_CHI_UNKNOWN
+        // ⚠ every domain, even those the system does not cover: an unallocated
+        // domain segfaults inside add_cst/add_var.
+        // ⚠⚠ AND NOT IDENTICALLY ZERO.  Round 261: seeding CH to 0.0 here made
+        // the read of `D0085 = dr(CH)` segfault inside finiteJ_register -- an
+        // all-zero Val_domain has no coefficient space for dr to differentiate,
+        // and the six fields never hit it because all six have nonzero seeds.
+        // The value planted here is a PLACEHOLDER; the physical seed is written
+        // just below, from the backbone's own closed form.
+        CH.set_domain(d) = 1.0;
+#endif
         Val_domain& vrr = RR.set_domain(d);
         Val_domain& vst = ST.set_domain(d);
         Val_domain& vct = CT.set_domain(d);
@@ -933,6 +961,48 @@ int main(int argc, char** argv)
     for (Scalar* s : {&PS, &PH, &QF, &BR, &RR, &ST, &CT, &C2, &H2, &L2,
                       &CX, &SQ, &T7, &ONE})
         s->std_base();
+#ifdef TRUMPET_CHI_UNKNOWN
+    // ⚠ COS_EVEN, and that is the DECLARED basis (FIELD_BASIS['CH'] in
+    // finiteJ_emit.py, derived there): chi is a scalar whose defining product is
+    // (COS_EVEN)*(COS_EVEN*COS_EVEN + SIN_EVEN*SIN_EVEN), both halves COS_EVEN.
+    // It does NOT vanish on the axis -- beta^theta cot theta is finite there --
+    // which is why AXIS_ORDER['CH'] is 0 and no divsint may be applied to it.
+    // ⚠ THE PHYSICAL CH SEED, from the backbone's own closed form.
+    //   chi = -(psi^2/Phibar)[beta^r d_r log(psi^2 r) + beta^th (d_th log psi^2
+    //                                                            + cot th)]
+    // and on the J = 0 backbone psi^2 = R/r exactly, so psi^2 r = R(r) and
+    //   d_r log(psi^2 r) = R'/R = W/r   since dR/dr = R W / r,
+    // with beta^th = 0 there.  So  CH = -(PS/PH) BR (W/r), which is a closed
+    // form in quantities this run already has -- no quadrature, no fit.
+    //
+    // ⚠ THAT THIS IS A SECOND TRANSCRIPTION IS THE POINT, NOT A DEFECT.  The
+    // first design planted the seed by READING D0048 (the emission's own
+    // product) after registration, which would have made the J = 0 control a
+    // tautology -- CH would equal the product by construction.  Seeding from the
+    // independent closed form instead makes `max|CH - D0048|` a comparison of
+    // two evaluations that can disagree, which is what research asked for: the
+    // new unknown must reproduce the product on the backbone TO THE TRUNCATION.
+    //
+    // ⚠ The compactified domain's last node has r = infinity, where W/r -> 0;
+    // guarded, because a non-finite seed propagates into every def.
+    for (int d = 0; d <= dtop; d++) {
+        Val_domain& vc = CH.set_domain(d);
+        Index ix(space.get_domain(d)->get_nbr_points());
+        do {
+            const double rr = t.pts[d][ix(0)].r;
+            const double W = t.pts[d][ix(0)].W;
+            double v = 0.0;
+            if (std::isfinite(rr) && rr > 0.0) {
+                const double ps = PS(d)(ix), ph = PH(d)(ix), br = BR(d)(ix);
+                if (std::isfinite(ps) && std::isfinite(ph) && ph != 0.0
+                    && std::isfinite(br))
+                    v = -(ps / ph) * br * (W / rr);
+            }
+            vc.set(ix) = std::isfinite(v) ? v : 0.0;
+        } while (ix.inc());
+    }
+    CH.std_base();
+#endif
     BT.std_anti_base(1);                       // SIN_EVEN, read back below
     if (breakbasis)
         QB.std_base();                         // deliberately not the declared one
@@ -1494,6 +1564,19 @@ int main(int argc, char** argv)
         syst.add_cst("BR", BR);
         syst.add_cst("BT", BT);
         syst.add_cst("QB", QB);
+#ifdef TRUMPET_CHI_UNKNOWN
+        // ⚠ BOTH BRANCHES.  A first version registered CH only in the
+        // add_var branch, and the production invocation carries --clean, which
+        // takes THIS one -- so CH was never registered, the emitted defs
+        // referenced a name the system did not have, and registration
+        // segfaulted.  CH is a VARIABLE here too: with the six fields as
+        // constants the system is ECHI on CH alone, which is exactly the J = 0
+        // control this build exists to run.
+        syst.add_var("CH", CH);
+        if (rank == 0)
+            std::cout << "#  --chi-unknown: CH registered as a VARIABLE"
+                         " (--clean branch; the six fields are csts here)\n";
+#endif
     } else {
         auto wanted = [](const std::string& list, const char* nm) {
             if (list == "all") return true;
@@ -1506,6 +1589,18 @@ int main(int argc, char** argv)
             if (wanted(jacfields, fn[q])) syst.add_var(fn[q], *fp[q]);
             else                          syst.add_cst(fn[q], *fp[q]);
         }
+#ifdef TRUMPET_CHI_UNKNOWN
+        // ⚠ CH is ALWAYS a variable, and deliberately not subject to
+        // --jac-fields.  Its defining equation ECHI is registered for every
+        // domain by the bulk loop, so making it a constant would leave ECHI as
+        // a condition on nothing -- an over-determined system that reports a
+        // residual instead of an error.  Round 236's rule.
+        syst.add_var("CH", CH);
+        if (rank == 0)
+            std::cout << "#  --chi-unknown: CH registered as a VARIABLE"
+                         " (COS_EVEN, std_base); ECHI comes from the emission's"
+                         " own equation list\n";
+#endif
     }
     syst.add_cst("RR", RR);
     syst.add_cst("ST", ST);
@@ -3188,6 +3283,69 @@ int main(int argc, char** argv)
 
     if (rank == 0)
         std::cout << "# all six defs registered\n";
+
+#ifdef TRUMPET_CHI_UNKNOWN
+    // ---- THE CH SEED, AND THE J = 0 CONTROL ------------------------------
+    // ⚠ THE SEED IS KADATH'S OWN EVALUATION OF THE PRODUCT, not a second
+    // transcription of it.  D0048 is the product the emission already builds, so
+    // reading it and writing it into CH makes the seed consistent by
+    // construction -- and that is exactly what lets ECHI's residual be a
+    // CONTROL rather than a tautology: before the plant it must equal the
+    // product's own magnitude, after it must be at the truncation.  Both are
+    // printed.  If the "after" number is not at the truncation then CH's basis,
+    // its registration, or the emitted ECHI text disagree with the product, and
+    // nothing downstream is worth building.
+    //
+    // ⚠ Round 108: FETCHING A Val_domain IS NOT READING IT.  operator()(Index)
+    // is what forces configuration space, so the loop indexes every point.
+    if (maxdefs < 0) {
+        double before = 0.0, after = 0.0, prodmax = 0.0;
+        for (int d = 0; d <= dtop; d++) {
+            const Val_domain& ve = syst.give_val_def_scalar_domain("ECHI", d);
+            Index ix(space.get_domain(d)->get_nbr_points());
+            do {
+                const double x = ve(ix);
+                before = std::max(before, std::isfinite(x) ? std::fabs(x) : 1e300);
+            } while (ix.inc());
+        }
+        for (int d = 0; d <= dtop; d++) {
+            const Val_domain& vp = syst.give_val_def_scalar_domain("D0048", d);
+            Val_domain& vc = CH.set_domain(d);
+            Index ix(space.get_domain(d)->get_nbr_points());
+            do {
+                const double x = vp(ix);
+                vc.set(ix) = std::isfinite(x) ? x : 0.0;
+                prodmax = std::max(prodmax, std::isfinite(x) ? std::fabs(x) : 0.0);
+            } while (ix.inc());
+        }
+        CH.std_base();
+        for (int d = 0; d <= dtop; d++) {
+            const Val_domain& ve = syst.give_val_def_scalar_domain("ECHI", d);
+            Index ix(space.get_domain(d)->get_nbr_points());
+            do {
+                const double x = ve(ix);
+                after = std::max(after, std::isfinite(x) ? std::fabs(x) : 1e300);
+            } while (ix.inc());
+        }
+        if (rank == 0) {
+            std::cout << "#  --chi-unknown: max|D0048| (Kadath's own product) = "
+                      << std::setprecision(10) << prodmax << "\n";
+            std::cout << "#  ⚠ J=0 CONTROL  max|ECHI| = max|CH - D0048| = "
+                      << before << "   relative " << (prodmax > 0.0
+                          ? before / prodmax : -1.0)
+                      << "\n     (CH seeded from the INDEPENDENT closed form"
+                         " -(PS/PH) BR (W/r); this is the two evaluations"
+                         " against each other, and it can fail)\n";
+            std::cout << "#  after re-planting CH from D0048 itself, max|ECHI| = "
+                      << after << "   (a consistency check on the plant, not"
+                         " the control)\n";
+        }
+        emit("FJP_chi_prodmax", prodmax);
+        emit("FJP_chi_echi_before", before);
+        emit("FJP_chi_echi_after", after);
+        emit("FJP_chi_echi_rel", prodmax > 0.0 ? after / prodmax : -1.0);
+    }
+#endif
 
     std::vector<std::string> extra_names;
     // ⚠ The read has to INDEX the Val_domain, not just fetch the reference:

@@ -61,6 +61,21 @@ set_target_properties(trumpet2d_finiteJ_probe PROPERTIES OUTPUT_NAME finiteJ_pro
 target_include_directories(trumpet2d_finiteJ_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
 
+# Round 261: the SEVEN-unknown build.  chi is promoted to an unknown CH with its
+# own algebraic defining equation (research round 554), which needs the other
+# generated header -- finiteJ_eqs_chi.hpp.  Both headers declare the same names
+# in namespace Trumpet, so they cannot coexist in one translation unit; and
+# regenerating finiteJ_eqs.hpp in place would make every measurement path in the
+# record seven-unknown at once.  So this is a SECOND BINARY from the same source,
+# selected by TRUMPET_CHI_UNKNOWN, and the six-unknown finiteJ_probe -- the whole
+# record and the permanent cross-check -- is bit-for-bit unaffected.
+kadath_add_exec(trumpet2d_finiteJ_probe_chi src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_chi PROPERTIES
+    OUTPUT_NAME finiteJ_probe_chi)
+target_compile_definitions(trumpet2d_finiteJ_probe_chi PRIVATE TRUMPET_CHI_UNKNOWN)
+target_include_directories(trumpet2d_finiteJ_probe_chi PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
 # Round 106: the minimal reproducer for round 105's two evaluator defects.
 # Stock Kadath only -- Space_polar, two add_cst fields, hand-typed expressions.
 # It depends on nothing of ours by design: a defect we cannot demonstrate

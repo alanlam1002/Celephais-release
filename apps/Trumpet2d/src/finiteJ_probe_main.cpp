@@ -2136,6 +2136,33 @@ int main(int argc, char** argv)
                     if (kp && d == 0 && rank == 0)
                         std::cout << "#  --eq-prefactor " << ename
                                   << " -> r^" << kp << "\n";
+#ifdef TRUMPET_CHI_UNKNOWN
+                    // ⚠⚠ ECHI IS ZEROTH ORDER AND MUST NOT BE TAU-PROJECTED.
+                    // add_eq_inside is documented "assumed to be SECOND order"
+                    // (system_of_eqs.hpp:845), and that is exactly why round 262
+                    // came out 6*nt rows short: it discarded ECHI's top two
+                    // radial coefficients per (domain, angular mode) as if they
+                    // were a boundary freedom, when ECHI carries no derivative
+                    // of CH at all and every collocation point is a condition.
+                    //
+                    // Research round 556 ruled "impose every radial coefficient
+                    // via add_eq_mode".  add_eq_full IS that, and is the
+                    // library's own primitive for it -- documented
+                    // "an equation to be solved inside a domain (assumed to be
+                    // zeroth order i.e. with no derivatives)"
+                    // (system_of_eqs.hpp:1009) -- so it takes one call per
+                    // domain instead of nr*nt add_eq_mode calls and cannot get
+                    // the coefficient bookkeeping wrong.  The COUNT is the
+                    // check, not this comment.
+                    if (std::string(ename) == "ECHI") {
+                        syst.add_eq_full(d, (lhs + " = 0").c_str());
+                        if (d == 0 && rank == 0)
+                            std::cout << "#  --chi-unknown: ECHI registered by"
+                                         " add_eq_full (zeroth order, NO tau"
+                                         " projection) in every domain\n";
+                        continue;
+                    }
+#endif
                     syst.add_eq_inside(d, (lhs + " = 0").c_str());
                 }
         if (jacinterfaces) {

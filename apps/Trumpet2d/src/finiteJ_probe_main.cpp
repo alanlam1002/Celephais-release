@@ -174,6 +174,20 @@ int main(int argc, char** argv)
     // "cancelling at the grid maximum".  The theta-mode decomposition is done
     // offline against the collocation angles written here.
     std::string eqvalsout;  // --dump-eqvals FILE
+#ifdef TRUMPET_CHI_UNKNOWN
+    // --chi-seed FILE: plant CH from a --dump-eqvals file's `D P48 ...` lines,
+    // i.e. from D0048 evaluated ON A STATE by an earlier run.
+    // ⚠ WHY A FILE AND NOT A RE-PLANT IN PLACE.  Round 263 re-planted CH from
+    // D0048 after xx_to_vars_delta and it was a no-op; round 264 measured why.
+    // The plant DOES reach the Scalar -- a direct Val_domain comparison gives
+    // max|CH - D0048| = 0 exactly -- but ECHI still reads the old value, because
+    // add_var makes the system hold its own Term_eq copy and neither
+    // vars_to_terms() nor std_base() propagates a post-registration write into
+    // the already-built def tree.  Seeding BEFORE add_var is the path the system
+    // honours, and a file is how a state-dependent value gets there: run once to
+    // dump D0048 on the state, run again with --chi-seed.
+    std::string chiseed;    // --chi-seed FILE
+#endif
     // --jac-balance: impose the BALANCE at every harmonic (research round 528).
     // The shooting reads `E_Phi/Ph + 2 E_sigma` at ell = 0 only; its ell >= 2
     // harmonics are Gate 1, which round 127's state satisfies to 1e-10 and
@@ -592,6 +606,9 @@ int main(int argc, char** argv)
         else if (k == "--dump-fields") fieldsout = argv[++i];
         else if (k == "--dump-fields-post") fieldspost = argv[++i];
         else if (k == "--dump-eqvals") eqvalsout = argv[++i];
+#ifdef TRUMPET_CHI_UNKNOWN
+        else if (k == "--chi-seed") chiseed = argv[++i];
+#endif
         else if (k == "--jac-balance") jacbalance = true;
         else if (k == "--jac-axisres") jacaxisres = true;
         else if (k == "--drop-tephi") droptephi = true;
@@ -1000,6 +1017,62 @@ int main(int argc, char** argv)
             }
             vc.set(ix) = std::isfinite(v) ? v : 0.0;
         } while (ix.inc());
+    }
+    // ⚠ --chi-seed OVERRIDES the backbone closed form with D0048 evaluated on a
+    // STATE by an earlier run.  Planted HERE, before add_var, which is the only
+    // place the system will honour it (see the --chi-seed declaration).
+    if (!chiseed.empty()) {
+        std::ifstream cf(chiseed);
+        if (!cf) {
+            if (rank == 0)
+                std::cerr << "FATAL: cannot open --chi-seed " << chiseed << "\n";
+            MPI_Finalize();
+            return 5;
+        }
+        long got = 0;
+        std::string ln;
+        while (std::getline(cf, ln)) {
+            if (ln.empty() || ln[0] != 'D') continue;
+            std::istringstream is(ln);
+            std::string tag, nm;
+            int d, ir, ith;
+            // ⚠ r AND theta ARE READ AS STRINGS AND DISCARDED.  The compactified
+            // domain's last node has r = "inf" in the dump (NOTES 10.4), and
+            // `>> double` on that token fails on this libstdc++ -- which lost
+            // exactly the 13 theta points at that node, 1066 of 1079, and the
+            // count check is what caught it.  The values are addressed by
+            // (d, ir, ith); the coordinates are decoration.
+            std::string rr, tt;
+            double v;
+            if (!(is >> tag >> nm >> d >> ir >> ith >> rr >> tt >> v)) continue;
+            if (nm != "P48" || d < 0 || d > dtop) continue;
+            Index ix(space.get_domain(d)->get_nbr_points());
+            for (int k = 0; k < ir + ith * space.get_domain(d)->get_nbr_points()(0); k++)
+                ix.inc();
+            CH.set_domain(d).set(ix) = std::isfinite(v) ? v : 0.0;
+            got++;
+        }
+        // ⚠ Round 236: a flag that silently does nothing produces a number, not
+        // an error.  The count is asserted against the grid, not trusted.
+        long want = 0;
+        for (int d = 0; d <= dtop; d++) {
+            const Kadath::Domain* dm = space.get_domain(d);
+            want += static_cast<long>(dm->get_nbr_points()(0))
+                    * dm->get_nbr_points()(1);
+        }
+        if (rank == 0)
+            std::cout << "#  --chi-seed: " << got << " of " << want
+                      << " points planted from " << chiseed
+                      << (got == want ? "  OK\n" : "  ⚠ INCOMPLETE\n");
+        emit("FJP_chi_seed_points", double(got));
+        emit("FJP_chi_seed_want", double(want));
+        if (got != want) {
+            if (rank == 0)
+                std::cerr << "FATAL: --chi-seed planted " << got << " of "
+                          << want << " points\n";
+            MPI_Finalize();
+            return 5;
+        }
     }
     CH.std_base();
 #endif
@@ -3346,6 +3419,40 @@ int main(int argc, char** argv)
             } while (ix.inc());
         }
         CH.std_base();
+        // ⚠⚠ WITHOUT THIS THE RE-PLANT IS A NO-OP, and round 263 shipped it as
+        // one: max|ECHI| came back identical to ten digits before and after,
+        // which I recorded as "a cached read".  It is not a cache.  add_var
+        // registers CH as an unknown and the system holds its own Term_eq COPY
+        // of it, so writing into the Scalar afterwards changes nothing the
+        // equations can see.  vars_to_terms() is the documented sync --
+        // "copies the various unknowns into their Term_eq counterparts"
+        // (system_of_eqs.hpp:1236).
+        // ⚠ AND THIS IS THE SEED FIX RESEARCH ROUND 557 RULED.  This block runs
+        // AFTER xx_to_vars_delta, so D0048 here is the product on THE STATE, not
+        // on the backbone -- CH starts 60% closer and no chain spends its first
+        // iterations re-discovering the seed.
+        syst.vars_to_terms();
+        // ⚠ DIRECT DIFF, not through ECHI.  Separates "the plant did not take"
+        // from "the def read is cached": this compares the two Val_domains
+        // itself, so it cannot be answered by a stale ECHI.
+        {
+            double direct = 0.0, chmax = 0.0;
+            for (int d = 0; d <= dtop; d++) {
+                const Val_domain& vp = syst.give_val_def_scalar_domain("D0048", d);
+                const Val_domain& vc = CH(d);
+                Index ix(space.get_domain(d)->get_nbr_points());
+                do {
+                    const double a = vc(ix), b2 = vp(ix);
+                    if (std::isfinite(a)) chmax = std::max(chmax, std::fabs(a));
+                    if (std::isfinite(a) && std::isfinite(b2))
+                        direct = std::max(direct, std::fabs(a - b2));
+                } while (ix.inc());
+            }
+            if (rank == 0)
+                std::cout << "#  ⚠ DIRECT max|CH - D0048| after the plant = "
+                          << direct << "   max|CH| = " << chmax << "\n";
+            emit("FJP_chi_direct_after", direct);
+        }
         for (int d = 0; d <= dtop; d++) {
             const Val_domain& ve = syst.give_val_def_scalar_domain("ECHI", d);
             Index ix(space.get_domain(d)->get_nbr_points());
@@ -3363,9 +3470,12 @@ int main(int argc, char** argv)
                       << "\n     (CH seeded from the INDEPENDENT closed form"
                          " -(PS/PH) BR (W/r); this is the two evaluations"
                          " against each other, and it can fail)\n";
-            std::cout << "#  after re-planting CH from D0048 itself, max|ECHI| = "
-                      << after << "   (a consistency check on the plant, not"
-                         " the control)\n";
+            std::cout << "#  ⚠ AFTER re-planting CH from D0048 ON THE STATE"
+                         " (the round-557 seed fix), max|ECHI| = " << after
+                      << "   relative " << (prodmax > 0.0 ? after / prodmax
+                                            : -1.0)
+                      << "\n     (at J = 0 this must fall to the truncation;"
+                         " at finite J it is the seed CH now starts from)\n";
         }
         emit("FJP_chi_prodmax", prodmax);
         emit("FJP_chi_echi_before", before);

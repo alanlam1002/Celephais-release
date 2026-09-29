@@ -320,6 +320,18 @@ int main(int argc, char** argv)
     // offline correction, done at the seed).  Seed only: rows, Jacobian and
     // RECON are untouched, and without the flag nothing changes.
     bool physh = false;        // --physical-h
+    // --grade2-u2 (research rounds 622/623; code round 295): THE MINIMAL
+    // GRADE-2 CLOSURE.  With physical H the rows TESIG, TBAL carry the grade-2
+    // amplitude u2 of psi^2 at O(1) (and, through O(j^2), only u2 and H_BT).
+    // u2 becomes a THROAT-ONLY unknown U2 = sum_k UUk ACEk (COS_EVEN, nt
+    // modes; not a matching unknown), E_sigma(-2) with u2 is imposed at all nt
+    // modes as TSIGU, and TESIG, TBAL gain their u2 parts DTSIG, DTBAL
+    // (throat_emit.py --grade2-u2).  P2, q2, b2 truncated.
+    //     rows +nt (TSIGU), cols +nt (UU)                      -> still SQUARE
+    // Seeded at u2 = -5 W^2/24, W = G_PH/G_PS (the J = 0 closed form).  Needs
+    // --physical-h, --balance-l2, --maximality; refuses --grade1-replace,
+    // --jac-axisres, --drop-tephi, --jac-recursion-early.
+    bool g2u2 = false;         // --grade2-u2
     // ⚠ AND A PLANTED LOGARITHM, so the detector can be shown to FIRE.  Round
     // 154 grouped three defects of one family -- checks whose failure mode was
     // unreachable -- and a detector that has never recovered a known signal is
@@ -695,6 +707,7 @@ int main(int argc, char** argv)
         else if (k == "--balance-l2") { balancel2 = true; jacbalance = true; }
         else if (k == "--maximality") maximality = true;
         else if (k == "--physical-h") physh = true;
+        else if (k == "--grade2-u2") g2u2 = true;
         else if (k == "--jac-axisres") jacaxisres = true;
         else if (k == "--grade1-replace") g1replace = true;
         else if (k == "--drop-tephi") droptephi = true;
@@ -768,6 +781,25 @@ int main(int argc, char** argv)
     }
     // ⚠ --physical-h acts only where the grade-1 seed is written (--seed-match
     // with --jac-recursion); anywhere else it would register and do nothing.
+    if (g2u2) {
+#ifndef THROATTH_HAS_U2
+        if (rank == 0)
+            std::cerr << "FATAL: --grade2-u2: this binary's throat header has"
+                         " no grade-2 u2 rows (throat_emit.py --grade2-u2)\n";
+        MPI_Finalize();
+        return 1;
+#endif
+        if (!physh || !balancel2 || !maximality || g1replace || jacaxisres
+            || droptephi || jacrecearly) {
+            if (rank == 0)
+                std::cerr << "FATAL: --grade2-u2 needs --physical-h, "
+                             "--balance-l2 and --maximality, and refuses "
+                             "--grade1-replace, --jac-axisres, --drop-tephi, "
+                             "--jac-recursion-early\n";
+            MPI_Finalize();
+            return 1;
+        }
+    }
     if (physh && !(seedmatch && jacrec)) {
         if (rank == 0)
             std::cerr << "FATAL: --physical-h needs --seed-match and "
@@ -2274,6 +2306,30 @@ int main(int argc, char** argv)
                 syst.add_var("SBAL", sbal_storage);
                 sbal_ptr = &sbal_storage;
             }
+            // ⚠ STATIC, as sbal_storage is.  u2's nt COS_EVEN coefficients,
+            // registered right after SBAL, so they sit at columns
+            // [2ng + 1, 2ng + 1 + nt), ahead of every field column.
+            if (g2u2 && jacrec) {
+                static std::vector<double> u2_storage;
+                u2_storage.assign(ntheta, 0.0);
+                // the J = 0 closed form u2 = -5 W^2/24 with W = G_PH/G_PS,
+                // on the (physical-h) seed's grade-0 amplitudes
+                const double Wg = matchv[NCE] / matchv[0];
+                u2_storage[0] = -5.0 * Wg * Wg / 24.0;
+                char un[16];
+                for (int q = 0; q < ntheta; q++) {
+                    std::snprintf(un, sizeof un, "UU%02d", q);
+                    syst.add_var(un, u2_storage[q]);
+                }
+                emit("FJPJ_grade2u2_cols", ntheta);
+                emit("FJPJ_grade2u2_seed", u2_storage[0]);
+                if (rank == 0)
+                    std::cout << std::setprecision(17)
+                              << "#  --grade2-u2: " << ntheta << " unknowns UU00..UU"
+                              << ntheta - 1 << " registered after SBAL; seed u2 mode 0"
+                                 " = -5 W^2/24 = " << u2_storage[0]
+                              << " (W = G_PH/G_PS = " << Wg << ")\n";
+            }
             // ⚠ STATIC, as sbal_storage is: add_var keeps a pointer and these
             // must outlive `syst`.
             if (droptephi && jacrec) {
@@ -2904,6 +2960,9 @@ int main(int argc, char** argv)
 #ifdef THROATTH_HAS_MAX
                                    , maximality
 #endif
+#ifdef THROATTH_HAS_U2
+                                   , g2u2
+#endif
                                    );
             } catch (const std::exception& ex) {
                 if (rank == 0)
@@ -2958,6 +3017,13 @@ int main(int argc, char** argv)
                                   << " ...\n";
                 }
                 const std::string rn(r.first);
+                if (g2u2 && rn == "TESIG") {
+                    // TESIG with its u2 part (E_q(-2) + 2 E_sigma(-2), u2 in)
+                    eqt = "TESIG + DTSIG = 0";
+                    if (rank == 0)
+                        std::cout << "#  --grade2-u2: TESIG registered as "
+                                  << eqt << "\n";
+                }
                 if (balancel2 && rn == "TEPHI") {
                     // mode 0 ONLY: its ell >= 2 is replaced by the balance's.
                     Index pos_cf(space.get_domain(0)->get_nbr_coefs());
@@ -3104,9 +3170,12 @@ int main(int argc, char** argv)
                               << " ...\n";
             }
             if (jacbalance && Trumpet::throatth_balance() != nullptr) {
-                syst.add_eq_bc(0, INNER_BC,
-                    (std::string(Trumpet::throatth_balance())
-                     + " - SPH * SBAL = 0").c_str());
+                const std::string bal = std::string(Trumpet::throatth_balance())
+                    + (g2u2 ? " + DTBAL" : "") + " - SPH * SBAL = 0";
+                syst.add_eq_bc(0, INNER_BC, bal.c_str());
+                if (g2u2 && rank == 0)
+                    std::cout << "#  --grade2-u2: TBAL registered as " << bal
+                              << "\n";
                 emit("FJPJ_balance_rows", ntheta);
                 if (rank == 0)
                     std::cout << "#  --jac-balance: TBAL - SPH*SBAL registered"
@@ -3114,6 +3183,19 @@ int main(int argc, char** argv)
                               << ntheta - 1 << " conditions against 1 new "
                                  "unknown)\n";
             }
+#ifdef THROATTH_HAS_U2
+            if (g2u2) {
+                // E_sigma(-2) with u2, all nt COS_EVEN modes: the nt rows that
+                // pay for the nt UU columns.
+                syst.add_eq_bc(0, INNER_BC, "TSIGU = 0");
+                emit("FJPJ_grade2u2_rows", ntheta);
+                if (rank == 0)
+                    std::cout << "#  --grade2-u2: TSIGU = E_sigma(-2) (u2 in) = 0"
+                                 " registered, declared " << ntheta << " modes"
+                                 " (rows +" << ntheta << ", cols +" << ntheta
+                              << ")\n";
+            }
+#endif
             emit("FJPJ_recursion_rows", nrec);
             if (rank == 0)
                 std::cout << "#  --jac-recursion: " << nrec

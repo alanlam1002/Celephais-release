@@ -2120,6 +2120,86 @@ namespace Trumpet
             return D;
         }
 
+        inline const std::vector<ThDef>& subdefs_u2()
+        {
+            static const std::vector<ThDef> D = {
+                {"ZA2068", "((1 / 2) * (ZA0113))"},
+                {"ZA2069", "((1 / 2) * (ZA0607))"},
+                {"ZA2070", "(-1 * (ZA0623))"},
+                {"ZA2071", "(2 * (ZA0628))"},
+                {"ZA2072", "(-1 * (ZA2071))"},
+                {"ZA2073", "((1 / 2) * (ZA0714))"},
+                {"ZA2074", "(-1 * (ZA0693))"},
+                {"ZA2075", "(2 * (ZA0700))"},
+                {"ZA2076", "(-1 * (ZA2075))"},
+                {"ZA2077", "(ZA0056 * ZA0029)"},
+                {"ZA2078", "(ZA2077 * ZA0034)"},
+                {"ZA2079", "(ZA2078 * U2)"},
+                {"ZA2080", "((nexp * nexp) * ZA2079)"},
+                {"ZA2081", "(2 * (ZA2080))"},
+                {"ZA2082", "(-1 * (ZA2081))"},
+                {"ZA2083", "((1 / 2) * (ZA0742))"},
+                {"ZA2084", "(-1 * (ZA0786))"},
+                {"ZA2085", "(-1 * (ZA0763))"},
+                {"ZA2086", "(-1 * (ZA0769))"},
+                {"ZA2087", "(-1 * (ZA0784))"},
+                {"ZA2088", "(2 * (ZA0776))"},
+                {"ZA2089", "(-1 * (ZA2088))"},
+                {"ZA2090", "((1 / 2) * (ZA0726))"},
+                {"ZA2091", "(-1 * (ZA2090))"},
+                {"ZA2092", "(4 * (ZA0821))"},
+                {"ZA2093", "(-1 * (ZA2092))"},
+                {"ZA2094", "((1 / 2) * (ZA0796))"},
+                {"ZA2095", "(-1 * (ZA2094))"},
+                {"ZA2096", "((1 / 2) * (ZA0824))"},
+                {"ZA2097", "(-1 * (ZA0827))"},
+                {"ZA2098", "((-1 * ((1 / 2))) + ZA0423)"},
+                {"ZA2099", "(ZA2098 + ZA0594)"},
+                {"ZA2100", "(ZA2099 + ZA0590)"},
+                {"ZA2101", "(ZA2100 + ZA0605)"},
+                {"ZA2102", "(ZA2101 + ZA2068)"},
+                {"ZA2103", "(ZA2102 + ZA2069)"},
+                {"ZA2104", "(ZA2103 + ZA0612)"},
+                {"ZA2105", "(ZA2104 + ZA2070)"},
+                {"ZA2106", "(ZA2105 + ZA2072)"},
+                {"ZA2107", "(ZA2106 + ZA0687)"},
+                {"ZA2108", "(ZA2107 + ZA2073)"},
+                {"ZA2109", "(ZA2108 + ZA2074)"},
+                {"ZA2110", "(ZA2109 + ZA2076)"},
+                {"ZA2111", "(ZA2110 + ZA2082)"},
+                {"ZA2112", "(ZA2111 + ZA0756)"},
+                {"ZA2113", "(ZA2112 + ZA2083)"},
+                {"ZA2114", "(ZA2113 + ZA2084)"},
+                {"ZA2115", "(ZA2114 + ZA2085)"},
+                {"ZA2116", "(ZA2115 + ZA2086)"},
+                {"ZA2117", "(ZA2116 + ZA2087)"},
+                {"ZA2118", "(ZA2117 + ZA2089)"},
+                {"ZA2119", "(ZA2118 + ZA2091)"},
+                {"ZA2120", "(ZA2119 + ZA0807)"},
+                {"ZA2121", "(ZA2120 + ZA0814)"},
+                {"ZA2122", "(ZA2121 + ZA2093)"},
+                {"ZA2123", "(ZA2122 + ZA2095)"},
+                {"ZA2124", "(ZA2123 + ZA2096)"},
+                {"ZA2125", "(ZA2124 + ZA2097)"},
+                {"ZA2126", "(ZA2125 + ZA0350)"},
+                {"ZA2127", "(ZA0546 * U2)"},
+                {"ZA2128", "(2 * (ZA2127))"},
+                {"ZA2129", "(4 * (ZA2080))"},
+                {"ZA2130", "(ZA2128 + ZA2129)"},
+                {"ZA2131", "(ZA0518 * U2)"},
+                {"ZA2132", "(6 * (ZA2131))"},
+                {"ZA2133", "(-1 * (ZA2132))"},
+                {"ZA2134", "(ZA0985 * ZA0029)"},
+                {"ZA2135", "(ZA2134 * ZA0034)"},
+                {"ZA2136", "(ZA2135 * U2)"},
+                {"ZA2137", "((nexp * nexp) * ZA2136)"},
+                {"ZA2138", "(12 * (ZA2137))"},
+                {"ZA2139", "(-1 * (ZA2138))"},
+                {"ZA2140", "(ZA2133 + ZA2139)"},
+            };
+            return D;
+        }
+
         /// ⚠ READ, not merely fetched (round 108): the value only
         /// exists once operator()(Index) has been called.
         inline void read_def(Kadath::System_of_eqs& syst,
@@ -2196,6 +2276,36 @@ namespace Trumpet
         return "ZA2067";
     }
 
+#define THROATTH_HAS_U2 1
+    /// The minimal grade-2 closure (research rounds 622/623): u2 = U2,
+    /// a throat-only COS_EVEN unknown (UU00..), E_sigma(-2) with u2
+    /// imposed at nt modes as TSIGU, and the u2 parts DTSIG, DTBAL the
+    /// probe adds to TESIG and TBAL.  P2, q2, b2 truncated (they enter
+    /// these groups only through (dth bh)^2).
+    inline const std::vector<std::pair<const char*, const char*>>&
+    throatth_grade2u2()
+    {
+        static const std::vector<std::pair<const char*, const char*>> R = {
+            {"TSIGU", "ZA2126"},   // E_sigu2
+            {"DTSIG", "ZA2130"},   // D_tesig
+            {"DTBAL", "ZA2140"},   // D_tbal
+        };
+        return R;
+    }
+
+    /// U2 = sum_k UUk ACEk, the throat-only grade-2 amplitude of psi^2.
+    inline std::string throatth_u2_def(int nt)
+    {
+        std::string s;
+        char b[32];
+        for (int j = 0; j < nt; j++) {
+            std::snprintf(b, sizeof b, "%sUU%02d * ACE%02d",
+                          j ? " + " : "", j, j);
+            s += b;
+        }
+        return "(" + s + ")";
+    }
+
     /**
      * The twelve amplitude defs, built from the matching unknowns.
      *
@@ -2256,7 +2366,8 @@ namespace Trumpet
                                   int nt, int dmin, int dmax,
                                   bool read_defs = true,
                                   bool with_replace = false,
-                                  bool with_max = false)
+                                  bool with_max = false,
+                                  bool with_u2 = false)
     {
         // ⚠ EVERY add_def NAMES ITSELF ON FAILURE.  Kadath throws
         // "bad valence in definition" with no indication of WHICH,
@@ -2305,6 +2416,11 @@ namespace Trumpet
         if (maxdef < 0 && with_max) {
             for (const auto& d : throatth_detail::subdefs_max()) one(d.name, d.def);
             one("TMAX", throatth_maximality());
+        }
+        if (maxdef < 0 && with_u2) {
+            one("U2", throatth_u2_def(nt));
+            for (const auto& d : throatth_detail::subdefs_u2()) one(d.name, d.def);
+            for (const auto& r : throatth_grade2u2()) one(r.first, r.second);
         }
     }
 } // namespace Trumpet

@@ -309,6 +309,17 @@ int main(int argc, char** argv)
     // Only on the balanced q-regular binary: needs --balance-l2, refuses
     // --grade1-replace (which also rewrites TEQFN) and --jac-axisres.
     bool maximality = false;   // --maximality
+    // --physical-h (research round 622; code round 294): THE SEED'S GRADE-1
+    // NORMALISATION.  Round 176's closed forms take w0 = t.W0 = alpha(r_m),
+    // i.e. they are written in rho = (r/r_m)^n; throat_th2, the emitted rows,
+    // RECON and the NPS family (r^{g0+n}) are all rho = r^n.  So the seed's H
+    // is the physical H times r_m^n (the backbone's own grade-1 coefficient is
+    // 1610.5/1611.4/1612.6 x the seed's; 1/r_m^n = 1610.2), and G = F(r_m)/r_m^g0
+    // carries the grade-1 term at r_m.  This flag seeds H x r_m^-n and moves
+    // the grade-1 term out of G: G <- G - H r_m^n (scripts/rescale_h.py's
+    // offline correction, done at the seed).  Seed only: rows, Jacobian and
+    // RECON are untouched, and without the flag nothing changes.
+    bool physh = false;        // --physical-h
     // ⚠ AND A PLANTED LOGARITHM, so the detector can be shown to FIRE.  Round
     // 154 grouped three defects of one family -- checks whose failure mode was
     // unreachable -- and a detector that has never recovered a known signal is
@@ -683,6 +694,7 @@ int main(int argc, char** argv)
         else if (k == "--jac-balance") jacbalance = true;
         else if (k == "--balance-l2") { balancel2 = true; jacbalance = true; }
         else if (k == "--maximality") maximality = true;
+        else if (k == "--physical-h") physh = true;
         else if (k == "--jac-axisres") jacaxisres = true;
         else if (k == "--grade1-replace") g1replace = true;
         else if (k == "--drop-tephi") droptephi = true;
@@ -753,6 +765,15 @@ int main(int argc, char** argv)
                                      bramp = std::stod(argv[++i]);
                                      brB = std::stod(argv[++i]); }
         else if (k == "--manufactured") manfile = argv[++i];
+    }
+    // ⚠ --physical-h acts only where the grade-1 seed is written (--seed-match
+    // with --jac-recursion); anywhere else it would register and do nothing.
+    if (physh && !(seedmatch && jacrec)) {
+        if (rank == 0)
+            std::cerr << "FATAL: --physical-h needs --seed-match and "
+                         "--jac-recursion (the grade-1 seed it rescales)\n";
+        MPI_Finalize();
+        return 1;
     }
 
     // ---- A1's manufactured data (round 125) -------------------------------
@@ -1382,6 +1403,25 @@ int main(int argc, char** argv)
             matchv[NG + NT + 0]           = 2.0 * matchv[0] * u1;
             matchv[NG + NT + NCE]         = matchv[NCE] * P1;
             matchv[NG + NT + 3 * NCE]     = matchv[3 * NCE] * b1;
+            if (physh) {
+                // H_phys = H_seed r_m^-n; G <- G - H_phys r_m^n = G - H_seed.
+                // Same order as rescale_h.py: H from the old G, then G.
+                const double rmn = std::pow(rm, ne);
+                const int fam[3] = {0, NCE, 3 * NCE};   // PS, PH, BR
+                for (int f : fam) {
+                    const double hs = matchv[NG + NT + f];
+                    matchv[NG + NT + f] = hs / rmn;
+                    matchv[f] -= hs;
+                }
+                emit("FJPJ_physical_h", 1.0);
+                emit("FJPJ_physical_h_rmn", rmn);
+                if (rank == 0)
+                    std::cout << std::setprecision(17)
+                              << "#  --physical-h: H x r_m^-n (r_m^n = " << rmn
+                              << "), G <- G - H r_m^n:  G_PS = " << matchv[0]
+                              << "  G_PH = " << matchv[NCE]
+                              << "  G_BR = " << matchv[3 * NCE] << "\n";
+            }
             emit("FJPJ_seed_grade1", 1.0);
             emit("FJPJ_seed_w0", w0);
             if (rank == 0)

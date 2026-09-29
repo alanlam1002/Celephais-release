@@ -298,6 +298,17 @@ int main(int argc, char** argv)
     // meant for finiteJ_probe_qreg and refuses --grade1-replace.
     bool balancel2 = false;    // --balance-l2
     double* sbal_ptr = nullptr;
+    // --maximality (research rounds 590/594/596): THE THROAT'S GRADE-n
+    // MAXIMALITY M(theta), the r^n coefficient of D_i beta^i on throat_th2's
+    // ansatz, emitted by throat_emit.py --maximality from
+    // analysis_na/maximality_gradeN.py as TMAX, with B_h = BTH = SBT (the G_BT
+    // columns, beta^theta's LEADING amplitude) and u1, b1, q1 from H_PS, H_BR,
+    // sin^2 HQF.  Imposed at modes 1..nt-1 by add_eq_mode IN PLACE OF TEQFN's
+    // modes 1..nt-1 (identically zero at J = 0); TEQFN keeps mode 0.
+    //     rows  -(nt-1) + (nt-1) = 0,  cols +0            -> still SQUARE
+    // Only on the balanced q-regular binary: needs --balance-l2, refuses
+    // --grade1-replace (which also rewrites TEQFN) and --jac-axisres.
+    bool maximality = false;   // --maximality
     // ⚠ AND A PLANTED LOGARITHM, so the detector can be shown to FIRE.  Round
     // 154 grouped three defects of one family -- checks whose failure mode was
     // unreachable -- and a detector that has never recovered a known signal is
@@ -671,6 +682,7 @@ int main(int argc, char** argv)
 #endif
         else if (k == "--jac-balance") jacbalance = true;
         else if (k == "--balance-l2") { balancel2 = true; jacbalance = true; }
+        else if (k == "--maximality") maximality = true;
         else if (k == "--jac-axisres") jacaxisres = true;
         else if (k == "--grade1-replace") g1replace = true;
         else if (k == "--drop-tephi") droptephi = true;
@@ -2636,6 +2648,22 @@ int main(int argc, char** argv)
                 MPI_Finalize();
                 return 23;
             }
+            if (maximality && (!balancel2 || g1replace || jacaxisres)) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --maximality needs --balance-l2 and"
+                                 " refuses --grade1-replace and --jac-axisres\n";
+                MPI_Finalize();
+                return 24;
+            }
+#ifndef THROATTH_HAS_MAX
+            if (maximality) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --maximality: this binary's throat"
+                                 " header carries no TMAX (q-regular only)\n";
+                MPI_Finalize();
+                return 25;
+            }
+#endif
             if (g1replace && (jacrecearly || droptephi || !jacrec)) {
                 if (rank == 0)
                     std::cerr << "FATAL: --grade1-replace needs --jac-recursion"
@@ -2832,7 +2860,11 @@ int main(int argc, char** argv)
                 Trumpet::throatth_register(syst, space, ntheta,
                                    0, dtop,
                                    std::getenv("THROATTH_NOREAD")
-                                   == nullptr, g1replace);
+                                   == nullptr, g1replace
+#ifdef THROATTH_HAS_MAX
+                                   , maximality
+#endif
+                                   );
             } catch (const std::exception& ex) {
                 if (rank == 0)
                 std::cerr << "FATAL: throatth_register threw: "
@@ -2897,6 +2929,14 @@ int main(int argc, char** argv)
                                      " condition, was " << ntheta << "); its "
                                   << ntheta - 1 << " ell >= 2 modes go to the"
                                      " balance\n";
+                } else if (maximality && rn == "TEQFN") {
+                    // mode 0 ONLY: its ell >= 2 modes go to TMAX below.
+                    Index pos_cf(space.get_domain(0)->get_nbr_coefs());
+                    syst.add_eq_mode(0, INNER_BC, rn.c_str(), pos_cf, 0.0);
+                    nrec += 1;
+                    if (rank == 0)
+                        std::cout << "#  --maximality: TEQFN at mode 0 only (1"
+                                     " condition, was " << ntheta << ")\n";
                 } else if (g1replace && (rn == "TEPHI" || rn == "TEQFN")) {
                     // mode 0 ONLY: the ell >= 2 content of these two is
                     // vacuous on the grade-1 block and is replaced below.
@@ -2932,6 +2972,20 @@ int main(int argc, char** argv)
                 nrec += nadd;
                 emit("FJPJ_g1replace_rows", nadd);
                 emit("FJPJ_g1replace_cut", 2 * (ntheta - 1));
+            }
+            if (maximality) {
+                for (int q = 1; q < ntheta; q++) {
+                    Index pos_cf(space.get_domain(0)->get_nbr_coefs());
+                    pos_cf.set(1) = q;
+                    syst.add_eq_mode(0, INNER_BC, "TMAX", pos_cf, 0.0);
+                }
+                nrec += ntheta - 1;
+                emit("FJPJ_maximality_rows", ntheta - 1);
+                emit("FJPJ_maximality_teqfn_cut", ntheta - 1);
+                if (rank == 0)
+                    std::cout << "#  --maximality: TMAX = M(theta) registered at"
+                                 " modes 1.." << ntheta - 1 << " by add_eq_mode ("
+                              << ntheta - 1 << " conditions), in place of TEQFN's\n";
             }
             if (balancel2 && nrec == NG - (ntheta - 1)) {
                 // the cut is paid for by the balance's nt rows below, less

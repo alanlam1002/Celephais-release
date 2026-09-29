@@ -2099,6 +2099,27 @@ namespace Trumpet
             return D;
         }
 
+        inline const std::vector<ThDef>& subdefs_max()
+        {
+            static const std::vector<ThDef> D = {
+                {"ZA2054", "(6 * (ZA0235))"},
+                {"ZA2055", "(6 * (ZA0447))"},
+                {"ZA2056", "(BH * Q1F)"},
+                {"ZA2057", "(nexp * ZA2056)"},
+                {"ZA2058", "multsint(ZA2057)"},
+                {"ZA2059", "multsint(ZA2058)"},
+                {"ZA2060", "(2 * (ZA2059))"},
+                {"ZA2061", "(ZA2054 + ZA0442)"},
+                {"ZA2062", "(ZA2061 + ZA0244)"},
+                {"ZA2063", "(ZA2062 + ZA0250)"},
+                {"ZA2064", "(ZA2063 + ZA2055)"},
+                {"ZA2065", "(ZA2064 + ZA2060)"},
+                {"ZA2066", "(ZA2065 + ZA0282)"},
+                {"ZA2067", "(ZA2066 + ZA0043)"},
+            };
+            return D;
+        }
+
         /// ⚠ READ, not merely fetched (round 108): the value only
         /// exists once operator()(Index) has been called.
         inline void read_def(Kadath::System_of_eqs& syst,
@@ -2166,6 +2187,15 @@ namespace Trumpet
         return R;
     }
 
+#define THROATTH_HAS_MAX 1
+    /// The throat's grade-n MAXIMALITY M(theta) (research rounds
+    /// 590/594; from analysis_na/maximality_gradeN.py), B_h = BTH =
+    /// SBT: imposed at modes 1..nt-1 in place of E_q(-n-2)'s.
+    inline const char* throatth_maximality()
+    {
+        return "ZA2067";
+    }
+
     /**
      * The twelve amplitude defs, built from the matching unknowns.
      *
@@ -2225,7 +2255,8 @@ namespace Trumpet
                                   const Kadath::Space& sp,
                                   int nt, int dmin, int dmax,
                                   bool read_defs = true,
-                                  bool with_replace = false)
+                                  bool with_replace = false,
+                                  bool with_max = false)
     {
         // ⚠ EVERY add_def NAMES ITSELF ON FAILURE.  Kadath throws
         // "bad valence in definition" with no indication of WHICH,
@@ -2270,6 +2301,10 @@ namespace Trumpet
         if (maxdef < 0 && with_replace) {
             for (const auto& d : throatth_detail::subdefs_replace()) one(d.name, d.def);
             for (const auto& r : throatth_replace()) one(r.first, r.second);
+        }
+        if (maxdef < 0 && with_max) {
+            for (const auto& d : throatth_detail::subdefs_max()) one(d.name, d.def);
+            one("TMAX", throatth_maximality());
         }
     }
 } // namespace Trumpet

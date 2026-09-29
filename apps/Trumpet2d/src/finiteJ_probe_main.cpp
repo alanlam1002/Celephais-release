@@ -285,6 +285,18 @@ int main(int argc, char** argv)
     // Those are Eq_int rows and land AFTER the field equations in the row
     // order; the count check below is what says the system is still square.
     bool g1replace = false;    // --grade1-replace
+    // --balance-l2 (research round 584): THE BALANCE RE-IMPOSED AT ell >= 2, in
+    // place of TEPHI's modes 1..nt-1, which are vacuous at linear order.  It is
+    // --jac-balance's registration (TBAL - Ph*SBAL at all nt COS_EVEN modes,
+    // SBAL one trailing scalar unknown, so the ell = 0 balance comes back as
+    // SBAL: READ, not imposed) with TEPHI cut to mode 0 by add_eq_mode.
+    //     rows  +nt (TBAL) - (nt-1) (TEPHI's ell >= 2)  = +1
+    //     cols  +1  (SBAL)                                     -> SQUARE
+    // Round 555 demoted the ell >= 2 balance to a read because imposing it on
+    // the floor-contaminated, axis-irregular states broke the outer loop; the
+    // floor is fixed by --rhs-subtract and the axis by q = sin^2 q~, so this is
+    // meant for finiteJ_probe_qreg and refuses --grade1-replace.
+    bool balancel2 = false;    // --balance-l2
     double* sbal_ptr = nullptr;
     // ⚠ AND A PLANTED LOGARITHM, so the detector can be shown to FIRE.  Round
     // 154 grouped three defects of one family -- checks whose failure mode was
@@ -658,6 +670,7 @@ int main(int argc, char** argv)
         else if (k == "--chi-seed") chiseed = argv[++i];
 #endif
         else if (k == "--jac-balance") jacbalance = true;
+        else if (k == "--balance-l2") { balancel2 = true; jacbalance = true; }
         else if (k == "--jac-axisres") jacaxisres = true;
         else if (k == "--grade1-replace") g1replace = true;
         else if (k == "--drop-tephi") droptephi = true;
@@ -2615,6 +2628,14 @@ int main(int argc, char** argv)
             // added after them, is fine.  So the defs go in immediately
             // before the rows that need them, which is also where they
             // belong: nothing earlier reads them.
+            if (balancel2 && (g1replace || droptephi || jacrecearly || !jacrec)) {
+                if (rank == 0)
+                    std::cerr << "FATAL: --balance-l2 needs --jac-recursion at"
+                                 " the LATE site, and refuses --grade1-replace"
+                                 " and --drop-tephi (all three rewrite TEPHI)\n";
+                MPI_Finalize();
+                return 23;
+            }
             if (g1replace && (jacrecearly || droptephi || !jacrec)) {
                 if (rank == 0)
                     std::cerr << "FATAL: --grade1-replace needs --jac-recursion"
@@ -2865,7 +2886,18 @@ int main(int argc, char** argv)
                                   << " ...\n";
                 }
                 const std::string rn(r.first);
-                if (g1replace && (rn == "TEPHI" || rn == "TEQFN")) {
+                if (balancel2 && rn == "TEPHI") {
+                    // mode 0 ONLY: its ell >= 2 is replaced by the balance's.
+                    Index pos_cf(space.get_domain(0)->get_nbr_coefs());
+                    syst.add_eq_mode(0, INNER_BC, rn.c_str(), pos_cf, 0.0);
+                    nrec += 1;
+                    emit("FJPJ_balancel2_tephi_cut", ntheta - 1);
+                    if (rank == 0)
+                        std::cout << "#  --balance-l2: TEPHI at mode 0 only (1"
+                                     " condition, was " << ntheta << "); its "
+                                  << ntheta - 1 << " ell >= 2 modes go to the"
+                                     " balance\n";
+                } else if (g1replace && (rn == "TEPHI" || rn == "TEQFN")) {
                     // mode 0 ONLY: the ell >= 2 content of these two is
                     // vacuous on the grade-1 block and is replaced below.
                     Index pos_cf(space.get_domain(0)->get_nbr_coefs());
@@ -2900,6 +2932,11 @@ int main(int argc, char** argv)
                 nrec += nadd;
                 emit("FJPJ_g1replace_rows", nadd);
                 emit("FJPJ_g1replace_cut", 2 * (ntheta - 1));
+            }
+            if (balancel2 && nrec == NG - (ntheta - 1)) {
+                // the cut is paid for by the balance's nt rows below, less
+                // the SBAL column: checked as SQUARE by FJPJ_rows/FJPJ_cols
+                nrec += ntheta - 1;
             }
             if (nrec != NG) {
                 if (rank == 0)

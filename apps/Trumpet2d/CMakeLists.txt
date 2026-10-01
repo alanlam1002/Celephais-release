@@ -87,6 +87,17 @@ target_compile_definitions(trumpet2d_finiteJ_probe_qreg PRIVATE TRUMPET_Q_REGULA
 target_include_directories(trumpet2d_finiteJ_probe_qreg PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
 
+# Round 307: the q-regular build with the D_r V^th Christoffel fix in the BULK
+# rows (finiteJ_eqs_qreg_drvt.hpp, emitted with TH2_DRVT_FIX=1).  A FOURTH binary
+# on the same pattern: finiteJ_probe_qreg stays bit-for-bit the record.  Its
+# throat rows are still throatth_eqs_qreg.hpp (unfixed).
+kadath_add_exec(trumpet2d_finiteJ_probe_qreg_drvt src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_qreg_drvt PROPERTIES
+    OUTPUT_NAME finiteJ_probe_qreg_drvt)
+target_compile_definitions(trumpet2d_finiteJ_probe_qreg_drvt PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX)
+target_include_directories(trumpet2d_finiteJ_probe_qreg_drvt PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
 # Round 106: the minimal reproducer for round 105's two evaluator defects.
 # Stock Kadath only -- Space_polar, two add_cst fields, hand-typed expressions.
 # It depends on nothing of ours by design: a defect we cannot demonstrate

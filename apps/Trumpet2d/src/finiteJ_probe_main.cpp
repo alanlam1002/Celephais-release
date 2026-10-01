@@ -42,6 +42,10 @@
 #endif
 #ifdef TRUMPET_CHI_UNKNOWN
 #include "src/finiteJ_eqs_chi.hpp"
+#elif defined(TRUMPET_Q_REGULAR) && defined(TRUMPET_DRVT_FIX)
+// ⚠ Round 307: the q-regular emission with D_r V^th = d_r V^th + V^th/r
+// (scripts/throat_th2.py, TH2_DRVT_FIX=1).  Its own binary only.
+#include "src/finiteJ_eqs_qreg_drvt.hpp"
 #elif defined(TRUMPET_Q_REGULAR)
 // ⚠ Round 279: q = sin^2(theta) q~ in BOTH emissions; the unknown QF is q~.
 #include "src/finiteJ_eqs_qreg.hpp"

@@ -98,6 +98,16 @@ target_compile_definitions(trumpet2d_finiteJ_probe_qreg_drvt PRIVATE TRUMPET_Q_R
 target_include_directories(trumpet2d_finiteJ_probe_qreg_drvt PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
 
+# Round 309: the FIXED system -- bulk rows finiteJ_eqs_qreg_drvt.hpp AND throat rows throatth_eqs_qreg_drvt.hpp,
+# both emitted with TH2_DRVT_FIX=1.  A FIFTH binary: finiteJ_probe_qreg (the record) and finiteJ_probe_qreg_drvt
+# (round 307, bulk-only fix) are untouched.
+kadath_add_exec(trumpet2d_finiteJ_probe_qreg_fix src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_qreg_fix PROPERTIES
+    OUTPUT_NAME finiteJ_probe_qreg_fix)
+target_compile_definitions(trumpet2d_finiteJ_probe_qreg_fix PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT)
+target_include_directories(trumpet2d_finiteJ_probe_qreg_fix PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
 # Round 106: the minimal reproducer for round 105's two evaluator defects.
 # Stock Kadath only -- Space_polar, two add_cst fields, hand-typed expressions.
 # It depends on nothing of ours by design: a defect we cannot demonstrate

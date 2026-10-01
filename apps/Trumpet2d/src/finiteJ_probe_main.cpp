@@ -52,7 +52,11 @@
 #else
 #include "src/finiteJ_eqs.hpp"
 #endif
-#ifdef TRUMPET_Q_REGULAR
+#if defined(TRUMPET_Q_REGULAR) && defined(TRUMPET_DRVT_FIX_THROAT)
+// ⚠ Round 309: the throat rows emitted from deep5/deep6 regenerated with TH2_DRVT_FIX=1
+// (throat_emit.py --q-regular --grade1-replace --maximality --grade2-u2).  Own binary only.
+#include "src/throatth_eqs_qreg_drvt.hpp"
+#elif defined(TRUMPET_Q_REGULAR)
 #include "src/throatth_eqs_qreg.hpp"
 #else
 #include "src/throatth_eqs.hpp"

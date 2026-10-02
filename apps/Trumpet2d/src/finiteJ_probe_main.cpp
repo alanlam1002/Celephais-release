@@ -42,6 +42,10 @@
 #endif
 #ifdef TRUMPET_CHI_UNKNOWN
 #include "src/finiteJ_eqs_chi.hpp"
+#elif defined(TRUMPET_BULK2)
+// ⚠ Round 335 (research round 664, step 2): the q-regular D_r V^th emission with D0081 re-emitted as (r^2 K)^2
+// (scripts/finiteJ_emit.py --q-regular --r-into-square D0081, TH2_DRVT_FIX=1).  Its own binary only.
+#include "src/finiteJ_eqs_qreg_drvt_r2k.hpp"
 #elif defined(TRUMPET_Q_REGULAR) && defined(TRUMPET_DRVT_FIX)
 // ⚠ Round 307: the q-regular emission with D_r V^th = d_r V^th + V^th/r
 // (scripts/throat_th2.py, TH2_DRVT_FIX=1).  Its own binary only.
@@ -346,6 +350,13 @@ int main(int argc, char** argv)
     // the fourth.  --qlog C adds C log(r) to q, which is theta-independent and
     // so lands entirely in the m = 0 mode the detector fits.
     double qlog = 0.0;      // --qlog C
+#ifdef TRUMPET_BULK2
+    // ⚠ ROUND 335 (research round 664, step 2): the bulk changes, each OFF by default and announced when registered.
+    bool eqfnsin2 = false;          // --eqfn-sin2: EQFN imposed as multsint(multsint(EQFN)) (sin^2-weighted tests)
+    std::string amaxtable;          // --amax-table FILE: domain-0 rows x W<eq>(r) (no underscore: Kadath reads _ as an index) = 1 / (largest d_rr coefficient)
+    bool komar = false;             // --komar: integ(KG) = 4 pi M (M = 1) on the domain-1/2 interface, mode 0
+    double komar_m = 1.0;           // --komar-m M
+#endif
     std::string jacdump;   // --dump-jacobian FILE (BULK rows only)
     // --dump-rowmeta FILE: Kadath's own per-row metadata (FILE.rows, FILE.cols,
     // dump_tagged_jacobian_metadata_csv) and the eq_index -> expression table
@@ -720,6 +731,12 @@ int main(int argc, char** argv)
         else if (k == "--grade1-replace") g1replace = true;
         else if (k == "--drop-tephi") droptephi = true;
         else if (k == "--qlog") qlog = std::stod(argv[++i]);
+#ifdef TRUMPET_BULK2
+        else if (k == "--eqfn-sin2") eqfnsin2 = true;
+        else if (k == "--amax-table") amaxtable = argv[++i];
+        else if (k == "--komar") komar = true;
+        else if (k == "--komar-m") komar_m = std::stod(argv[++i]);
+#endif
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--dump-rowmeta") rowmeta = argv[++i];
         else if (k == "--jac-fields") jacfields = argv[++i];
@@ -1842,6 +1859,55 @@ int main(int argc, char** argv)
     // `ones` is a field the apps register themselves (BH2d/NS2d do the same);
     // the emitted monomials materialise against it.
     syst.add_cst("ones", ONE);
+#ifdef TRUMPET_BULK2
+    // ⚠ --amax-table: one weight field per equation, W(r) on domain 0 (Chebyshev series in domain 0's ln r, from
+    // scripts/python_bulk.py --write-amax), 1 in every other domain.  STATIC: add_cst keeps a reference.
+    static std::vector<std::unique_ptr<Scalar>> amaxw;
+    std::map<std::string, bool> amaxhas;
+    if (!amaxtable.empty()) {
+        std::ifstream fin(amaxtable);
+        std::string tag;
+        double lo = 0, hi = 0;
+        int deg = 0;
+        fin >> tag >> lo >> hi >> deg;
+        if (!fin || tag != "domain0") {
+            std::cerr << "FATAL: --amax-table " << amaxtable << " unreadable\n";
+            return 1;
+        }
+        std::string nm;
+        while (fin >> nm) {
+            std::vector<double> co(deg + 1);
+            for (int q = 0; q <= deg; q++) fin >> co[q];
+            amaxw.emplace_back(new Scalar(space));
+            Scalar& W = *amaxw.back();
+            double wmin = 1e300, wmax = -1e300;
+            for (int d = 0; d < ndom; d++) {
+                const Kadath::Domain* dm = space.get_domain(d);
+                Val_domain& vw = W.set_domain(d);
+                vw.allocate_conf();
+                Index idx(dm->get_nbr_points());
+                do {
+                    double w = 1.0;
+                    if (d == 0) {
+                        const double rr = dm->get_radius()(idx);
+                        const double x = 2.0 * std::log(rr / lo) / std::log(hi / lo) - 1.0;
+                        double b1 = 0, b2 = 0;              // Clenshaw
+                        for (int q = deg; q >= 1; q--) { const double t = 2 * x * b1 - b2 + co[q]; b2 = b1; b1 = t; }
+                        w = x * b1 - b2 + co[0];
+                        wmin = std::min(wmin, w); wmax = std::max(wmax, w);
+                    }
+                    vw.set(idx) = w;
+                } while (idx.inc());
+            }
+            W.std_base();
+            syst.add_cst(("W" + nm).c_str(), W);
+            amaxhas[nm] = true;
+            if (rank == 0)
+                std::cout << "#  --amax-table: W" << nm << " registered, domain 0 range " << wmin << " .. " << wmax
+                          << " (1 elsewhere)\n";
+        }
+    }
+#endif
     syst.add_cst("PHP", PHP);
     syst.add_cst("ALP", ALP);
     syst.add_cst("DEL", sdefdelta);
@@ -2373,6 +2439,18 @@ int main(int argc, char** argv)
                     std::string lhs = proj
                         ? "multsint(" + std::string(ename) + ")"
                         : std::string(ename);
+#ifdef TRUMPET_BULK2
+                    if (eqfnsin2 && std::string(ename) == "EQFN") {
+                        lhs = "multsint(multsint(" + lhs + "))";
+                        if (d == 0 && rank == 0)
+                            std::cout << "#  --eqfn-sin2: EQFN registered as " << lhs << " in every domain\n";
+                    }
+                    if (d == 0 && amaxhas.count(ename)) {
+                        lhs = "W" + std::string(ename) + " * " + lhs;
+                        if (rank == 0)
+                            std::cout << "#  --amax-table: domain 0 " << ename << " registered as " << lhs << "\n";
+                    }
+#endif
                     // r^k, applied to the EXPRESSION and so before the tau
                     // projection.  k is read from --eq-prefactor NAME:k.
                     int kp = 0;
@@ -2463,6 +2541,26 @@ int main(int argc, char** argv)
                 syst.add_eq_bc(dtop, OUTER_BC, "multr(PH) = multr(PHP)");
                 nout++;
             }
+#ifdef TRUMPET_BULK2
+            // ⚠ ROUND 335 (research round 664): PH's mode 0 is the VALUE Phibar(inf) = 1; modes >= 1 keep the derivative
+            // row multr(PH) = multr(PHP).  Mode by mode (add_eq_mode), in place of `phb`, which must not be listed too.
+            if (want.find(",phm,") != std::string::npos) {
+                if (want.find(",phb,") != std::string::npos) {
+                    std::cerr << "FATAL: phm and phb are alternatives\n";
+                    return 1;
+                }
+                for (int j = 0; j < ntheta; j++) {
+                    Index pos_cf(space.get_domain(dtop)->get_nbr_coefs());
+                    pos_cf.set(1) = j;
+                    if (j == 0) syst.add_eq_mode(dtop, OUTER_BC, "PH", pos_cf, 1.0);
+                    else        syst.add_eq_mode(dtop, OUTER_BC, "multr(PH) - multr(PHP)", pos_cf, 0.0);
+                }
+                if (rank == 0)
+                    std::cout << "#  outer phm: PH mode 0 = 1 (value), modes 1.." << ntheta - 1
+                              << " multr(PH) = multr(PHP), " << ntheta << " rows by add_eq_mode\n";
+                nout++;
+            }
+#endif
             // ⚠ CONTROLS, and they are the point of the measurement rather
             // than an extra.  "Most of the q row lies inside the bulk row
             // space" means nothing until it is known what a boundary row looks
@@ -2541,6 +2639,39 @@ int main(int argc, char** argv)
             }
             emit("FJPJ_outer_conditions", nout);
         }
+#ifdef TRUMPET_BULK2
+        // ⚠ ROUND 335: the KOMAR row on the domain-1/2 interface (research round 664; radius-independent, round 333).
+        // M = (1/4 pi) int (D^i alpha - K^i_j beta^j) dS_i;  Kadath's integ(f) at a boundary is 2 pi r^2 int_0^pi f sin th
+        // dth, so with KG = psi^2 d_r alpha - psi^6 e^{2q} (K^r_r beta^r + K^r_th beta^th) the row is integ(KG) = 4 pi M.
+        // K_ij = (D_i beta_j + D_j beta_i) / (2 alpha):  K^r_r = (beta^r d_r ln g + beta^th d_th ln g + 2 d_r beta^r) /
+        // (2 alpha), K^r_th = (d_th beta^r + r^2 d_r beta^th) / (2 alpha), g = psi^4 e^{2q}, psi^2 = PS, alpha = PH / PS,
+        // q = sin^2 th QF.  K^r_phi beta^phi (J^2) is NOT carried (step 2, J = 0; research round 664).
+        // integ() is a SCALAR term; `* ones` makes it a field whose mode-0 coefficient is the integral.
+        if (komar) {
+            const char* kd[] = {
+                "KMQ = multsint(multsint(QF))",
+                "KMAL = PH / PS",
+                "KMALR = dr(KMAL)",
+                "KMLGR = 2 * dr(PS) / PS + 2 * dr(KMQ)",
+                "KMLGT = 2 * dt(PS) / PS + 2 * dt(KMQ)",
+                "KMKRR = (BR * KMLGR + BT * KMLGT + 2 * dr(BR)) / (2 * KMAL)",
+                "KMKRT = (dt(BR) + multr(multr(dr(BT)))) / (2 * KMAL)",
+                "KMG = PS * KMALR - PS * PS * PS * exp(2 * KMQ) * (KMKRR * BR + KMKRT * BT)"};
+            // ⚠ the read-state contract (round 108): each def is READ right after it is registered, as finiteJ_register does
+            for (const char* x : kd) {
+                syst.add_def(1, x);
+                const std::string nm(x, std::string(x).find(' '));
+                const Kadath::Val_domain& kv = syst.give_val_def_scalar_domain(nm.c_str(), 1);
+                Kadath::Index kix(space.get_domain(1)->get_nbr_points());
+                (void)kv(kix);
+            }
+            Index pos_cf(space.get_domain(1)->get_nbr_coefs());
+            syst.add_eq_mode(1, OUTER_BC, "integ(KMG) * ones", pos_cf, 4.0 * M_PI * komar_m);
+            if (rank == 0)
+                std::cout << "#  --komar: integ(KMG) = 4 pi x " << komar_m << " on the domain-1/2 interface (1 row)\n";
+            emit("FJPJ_komar_row", 1);
+        }
+#endif
         int inner_row_begin = -1, inner_row_end = -1;
         if (jacinner) {
             // C0 and C1 at the inner face of domain 0, for all six fields.

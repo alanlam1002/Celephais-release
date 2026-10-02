@@ -114,3 +114,21 @@ target_include_directories(trumpet2d_finiteJ_probe_qreg_fix PRIVATE
 # outside our own emitter is one we carry forever.
 kadath_add_exec(trumpet2d_expr_repro src/kadath_expr_repro_main.cpp)
 set_target_properties(trumpet2d_expr_repro PROPERTIES OUTPUT_NAME kadath_expr_repro)
+
+# Research round 664 (code round 335), gate T1: a STANDALONE smoke test -- a
+# scalar unknown NN inside a matching-type row's exp(K NN log r) -- Kadath's
+# Jacobian column against a central finite difference.  Part of no production
+# binary; stock Kadath only.
+kadath_add_exec(trumpet2d_t1_nscalar src/t1_nscalar_main.cpp)
+set_target_properties(trumpet2d_t1_nscalar PROPERTIES OUTPUT_NAME t1_nscalar)
+
+# Research round 664 (code round 335), step 2: the BULK CHANGES in a SIXTH probe binary.  Bulk rows
+# finiteJ_eqs_qreg_drvt_r2k.hpp (round 333's D0081 fix, (r^2 K)^2), throat rows as qreg_fix; under TRUMPET_BULK2 the
+# runtime flags --eqfn-sin2, --amax-table FILE, --komar and the outer token `phm` (Phibar -> 1 at mode 0), all OFF by
+# default.  Every other probe binary is untouched (TRUMPET_BULK2 guards every change in the shared source).
+kadath_add_exec(trumpet2d_finiteJ_probe_bulk2 src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_bulk2 PROPERTIES
+    OUTPUT_NAME finiteJ_probe_bulk2)
+target_compile_definitions(trumpet2d_finiteJ_probe_bulk2 PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2)
+target_include_directories(trumpet2d_finiteJ_probe_bulk2 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)

@@ -397,6 +397,7 @@ int main(int argc, char** argv)
 #ifdef TRUMPET_BULK2
     // ⚠ ROUND 335 (research round 664, step 2): the bulk changes, each OFF by default and announced when registered.
     bool eqfnsin2 = false;          // --eqfn-sin2: EQFN imposed as multsint(multsint(EQFN)) (sin^2-weighted tests)
+    bool eqfndrop = false;          // --eqfn-sin2-droptop (round 337): the same tests with k = nt-1 dropped per radial index
     std::string amaxtable;          // --amax-table FILE: domain-0 rows x W<eq>(r) (no underscore: Kadath reads _ as an index) = 1 / (largest d_rr coefficient)
     bool komar = false;             // --komar: integ(KG) = 4 pi M (M = 1) on the domain-1/2 interface, mode 0
     double komar_m = 1.0;           // --komar-m M
@@ -778,6 +779,7 @@ int main(int argc, char** argv)
         else if (k == "--qlog") qlog = std::stod(argv[++i]);
 #ifdef TRUMPET_BULK2
         else if (k == "--eqfn-sin2") eqfnsin2 = true;
+        else if (k == "--eqfn-sin2-droptop") eqfndrop = true;
         else if (k == "--amax-table") amaxtable = argv[++i];
         else if (k == "--komar") komar = true;
         else if (k == "--komar-m") komar_m = std::stod(argv[++i]);
@@ -2486,10 +2488,25 @@ int main(int argc, char** argv)
                         ? "multsint(" + std::string(ename) + ")"
                         : std::string(ename);
 #ifdef TRUMPET_BULK2
+                    if (eqfnsin2 && eqfndrop) {
+                        std::cerr << "FATAL: --eqfn-sin2 and --eqfn-sin2-droptop are alternatives\n";
+                        return 1;
+                    }
                     if (eqfnsin2 && std::string(ename) == "EQFN") {
                         lhs = "multsint(multsint(" + lhs + "))";
                         if (d == 0 && rank == 0)
                             std::cout << "#  --eqfn-sin2: EQFN registered as " << lhs << " in every domain\n";
+                    }
+                    // ⚠ ROUND 337 (research round 666): multsint(multsint(EQFN))'s coefficient tau satisfies sum_k c_k = 0 (its
+                    // value on the axis) at every radial index -- one exact dependency each (round 336).  Ruled: drop
+                    // k = nt-1.  Kadath has no per-mode volume registration; multsint(EQFN) is SIN_ODD, whose tau keeps
+                    // j = 0..nt-2, and since sin th sin(2j+1) th = (cos 2j th - cos(2j+2) th) / 2 its rows are an invertible
+                    // (bidiagonal) recombination of c_0..c_{nt-2}: the SAME row space as the ruled drop (checked on the dumps).
+                    if (eqfndrop && std::string(ename) == "EQFN") {
+                        lhs = "multsint(" + lhs + ")";
+                        if (d == 0 && rank == 0)
+                            std::cout << "#  --eqfn-sin2-droptop: EQFN registered as " << lhs << " in every domain (SIN_ODD tau:"
+                                         " nt-1 rows per radial index = sin^2 tests with k = nt-1 dropped)\n";
                     }
                     if (d == 0 && amaxhas.count(ename)) {
                         lhs = "W" + std::string(ename) + " * " + lhs;

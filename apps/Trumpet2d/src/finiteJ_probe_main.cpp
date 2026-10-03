@@ -403,6 +403,7 @@ int main(int argc, char** argv)
     double komar_m = 1.0;           // --komar-m M
     std::string horizontable;       // --horizon-table FILE (round 336): the horizon rows at r_H, from python_bulk --write-horizon
     bool thetapad = false;          // --theta-pad (round 341): the per-basis theta pad, COS_EVEN / SIN_EVEN / SIN_ODD 1, COS_ODD 2
+    std::string stageA;             // --stageA FILE (round 342): the J = 0 throat closure (columns + C0 / C1), replacing the inherited throat
 #endif
     std::string jacdump;   // --dump-jacobian FILE (BULK rows only)
     // --dump-rowmeta FILE: Kadath's own per-row metadata (FILE.rows, FILE.cols,
@@ -786,6 +787,7 @@ int main(int argc, char** argv)
         else if (k == "--komar-m") komar_m = std::stod(argv[++i]);
         else if (k == "--horizon-table") horizontable = argv[++i];
         else if (k == "--theta-pad") thetapad = true;
+        else if (k == "--stageA") stageA = argv[++i];
 #endif
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--dump-rowmeta") rowmeta = argv[++i];
@@ -882,6 +884,20 @@ int main(int argc, char** argv)
         MPI_Finalize();
         return 1;
     }
+#ifdef TRUMPET_BULK2
+    // ⚠ ROUND 342 (research round 671, STAGE_A_SPEC.md): --stageA REPLACES the inherited throat -- the matching
+    // unknowns G / H, SBAL, UU (u2), the grade-0/1 theta-ODE (--jac-recursion), TBAL, TESIG, TSIGU, TESHT, TMAX and the
+    // old C0 / C1 rows.  Every flag that registers any of them is refused rather than silently combined.
+    if (!stageA.empty() && (!thetapad || jacdump.empty() || jacmatch || jacinner || jacrec || balancel2 || maximality
+                            || g2u2 || physh || seedmatch)) {
+        if (rank == 0)
+            std::cerr << "FATAL: --stageA needs --theta-pad and --dump-jacobian, and refuses --jac-match*, --jac-inner*, "
+                         "--jac-recursion*, --balance-l2, --maximality, --grade2-u2, --physical-h, --seed-match (the "
+                         "inherited throat it replaces)\n";
+        MPI_Finalize();
+        return 1;
+    }
+#endif
 
     // ---- A1's manufactured data (round 125) -------------------------------
     // The generator writes, per collocation point, the six FIELD values and the
@@ -1940,6 +1956,86 @@ int main(int argc, char** argv)
     // the emitted monomials materialise against it.
     syst.add_cst("ones", ONE);
 #ifdef TRUMPET_BULK2
+    // ⚠ ROUND 342: --stageA FILE (scripts/stageA_throat.py --write): the J = 0 throat closure's columns.  Each column c
+    // is ONE scalar unknown TAcc; its value (d = 0) and r-derivative (d = 1) at r_m, per field, on the field's own
+    // padded angular functions (PS PH QF BR cos 2k th, BT sin 2k th, QB cos (2k+1) th) enter as r-independent PROFILE
+    // constants Z<d><F><cc>.  The seed is subtracted (ZS<F>, a copy of the field at registration): at J = 0 the seed is
+    // the backbone, which the throat carries with every amplitude 0.  STATIC: add_cst keeps a reference.
+    static std::vector<std::unique_ptr<Scalar>> sacst;
+    std::map<std::string, std::vector<int>> saprof;     // "<d><F>" -> the columns with a profile there
+    int sancol = 0;
+    if (!stageA.empty()) {
+        std::ifstream fin(stageA);
+        if (!fin) {
+            std::cerr << "FATAL: --stageA: cannot read " << stageA << "\n";
+            return 1;
+        }
+        std::map<std::string, std::map<int, double>> zv;  // "<d><F><cc>" -> k -> value
+        std::map<std::string, int> nsec;
+        std::string ln;
+        int nz = 0;
+        while (std::getline(fin, ln)) {
+            std::istringstream is(ln);
+            std::string tag;
+            if (!(is >> tag) || tag[0] == '#') continue;
+            if (tag == "col") {
+                int c; std::string sec;
+                is >> c >> sec;
+                if (c != sancol) { std::cerr << "FATAL: --stageA: columns out of order at " << c << "\n"; return 1; }
+                sancol++;
+                nsec[sec]++;
+            } else if (tag == "z") {
+                int c, d, k; std::string F; double v;
+                is >> c >> F >> d >> k >> v;
+                if (c >= sancol || (d != 0 && d != 1) || k < 0) { std::cerr << "FATAL: --stageA: bad line " << ln << "\n"; return 1; }
+                char b[24]; std::snprintf(b, sizeof b, "%d%s%02d", d, F.c_str(), c);
+                zv[b][k] = v;
+                nz++;
+            } else {
+                std::cerr << "FATAL: --stageA: unknown tag " << tag << "\n";
+                return 1;
+            }
+        }
+        const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+        Scalar* fp[6] = {&PS, &PH, &QF, &BR, &BT, &QB};
+        for (int q = 0; q < 6; q++) {
+            sacst.push_back(std::make_unique<Scalar>(*fp[q]));
+            syst.add_cst((std::string("ZS") + fn[q]).c_str(), *sacst.back());
+        }
+        for (const auto& e : zv) {
+            const std::string key = e.first;
+            const std::string F = key.substr(1, 2);
+            const int kind = (F == "BT") ? 2 : (F == "QB") ? 1 : 0;
+            auto sp = std::make_unique<Scalar>(space);
+            for (int d = 0; d < ndom; d++) {
+                const Kadath::Domain* dm = space.get_domain(d);
+                Val_domain& v = sp->set_domain(d);
+                v.allocate_conf();
+                Index ix(dm->get_nbr_points());
+                do {
+                    const double th = dm->get_coloc(2)(ix(1));
+                    double a = 0.0;
+                    for (const auto& kv : e.second)
+                        a += kv.second * ((kind == 0) ? std::cos(2.0 * kv.first * th)
+                                        : (kind == 1) ? std::cos((2.0 * kv.first + 1.0) * th)
+                                                      : std::sin(2.0 * kv.first * th));
+                    v.set(ix) = a;
+                } while (ix.inc());
+            }
+            if      (kind == 0) sp->std_base();
+            else if (kind == 1) sp->std_anti_base();
+            else                sp->std_anti_base(1);
+            sacst.push_back(std::move(sp));
+            syst.add_cst(("Z" + key).c_str(), *sacst.back());
+            saprof[key.substr(0, 3)].push_back(std::stoi(key.substr(3)));
+        }
+        emit("FJPJ_stageA_cols", sancol);
+        if (rank == 0) {
+            std::cout << "#  --stageA: " << sancol << " throat columns from " << stageA << " (";
+            for (const auto& ns : nsec) std::cout << ns.first << " " << ns.second << " ";
+            std::cout << "), " << zv.size() << " profiles (" << nz << " coefficients), seed copies ZSPS..ZSQB\n";
+        }
+    }
     // ⚠ --amax-table: one weight field per equation, W(r) on domain 0 (Chebyshev series in domain 0's ln r, from
     // scripts/python_bulk.py --write-amax), 1 in every other domain.  STATIC: add_cst keeps a reference.
     static std::vector<std::unique_ptr<Scalar>> amaxw;
@@ -2506,6 +2602,19 @@ int main(int argc, char** argv)
             emit("FJPJ_match_tower", jacmatchnotower ? 0 : NT);
             emit("FJPJ_match_notower", jacmatchnotower ? 1.0 : 0.0);
         }
+#ifdef TRUMPET_BULK2
+        // ⚠ ROUND 342: the stage-A throat amplitudes, one scalar per column, registered BEFORE any equation is parsed
+        // (columns [0, ncol) of Kadath's layout).  STATIC: add_var stores a pointer.
+        if (!stageA.empty()) {
+            static std::vector<double> sata;
+            sata.assign(sancol, 0.0);
+            char nm[16];
+            for (int c = 0; c < sancol; c++) {
+                std::snprintf(nm, sizeof nm, "TA%02d", c);
+                syst.add_var(nm, sata[c]);
+            }
+        }
+#endif
         auto wanted_eq = [&](const char* nm) {
             if (jaceqs == "all") return true;
             return (',' + jaceqs + ',').find(std::string(",") + nm + ",")
@@ -2839,6 +2948,36 @@ int main(int argc, char** argv)
             emit("FJPJ_horizon_rows", nrows);
             emit("FJPJ_horizon_twist", ntw);
             emit("FJPJ_horizon_scalar", nsc);
+        }
+#endif
+#ifdef TRUMPET_BULK2
+        // ⚠ ROUND 342: the stage-A MATCHING rows, C0 and C1 per field at the inner face of domain 0, none dropped:
+        //     F - ZS<F> - sum_c TAc Z0<F>c = 0,     dr(F) - dr(ZS<F>) - sum_c TAc Z1<F>c = 0
+        // add_eq_bc projects on the field's own tau basis, so the padded core sets the mode count (PS PH QF BR nt-1,
+        // BT nt-3, QB nt-3).
+        if (!stageA.empty()) {
+            const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+            int nrow = 0;
+            for (int q = 0; q < 6; q++)
+                for (int d = 0; d < 2; d++) {
+                    std::string e = d ? std::string("dr(") + fn[q] + ") - dr(ZS" + fn[q] + ")"
+                                      : std::string(fn[q]) + " - ZS" + fn[q];
+                    const std::string key = std::to_string(d) + fn[q];
+                    int nt_ = 0;
+                    if (saprof.count(key))
+                        for (int c : saprof[key]) {
+                            char b[40];
+                            std::snprintf(b, sizeof b, " - TA%02d * Z%s%02d", c, key.c_str(), c);
+                            e += b;
+                            nt_++;
+                        }
+                    syst.add_eq_bc(0, INNER_BC, (e + " = 0").c_str());
+                    nrow++;
+                    if (rank == 0)
+                        std::cout << "#  --stageA: C" << d << " " << fn[q] << " registered at the inner face (" << nt_
+                                  << " throat columns)\n";
+                }
+            emit("FJPJ_stageA_row_eqs", nrow);
         }
 #endif
         int inner_row_begin = -1, inner_row_end = -1;

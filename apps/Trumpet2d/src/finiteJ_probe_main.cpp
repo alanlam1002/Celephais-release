@@ -79,6 +79,9 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#ifdef TRUMPET_BULK2
+#include <set>
+#endif
 #include <memory>
 #include <sstream>
 #include <string>
@@ -404,6 +407,7 @@ int main(int argc, char** argv)
     std::string horizontable;       // --horizon-table FILE (round 336): the horizon rows at r_H, from python_bulk --write-horizon
     bool thetapad = false;          // --theta-pad (round 341): the per-basis theta pad, COS_EVEN / SIN_EVEN / SIN_ODD 1, COS_ODD 2
     std::string stageA;             // --stageA FILE (round 342): the J = 0 throat closure (columns + C0 / C1), replacing the inherited throat
+    std::string stageAdrop;         // --stageA-drop FILE (round 343): C1 matching rows dropped, "F k" per line (k the wavenumber)
 #endif
     std::string jacdump;   // --dump-jacobian FILE (BULK rows only)
     // --dump-rowmeta FILE: Kadath's own per-row metadata (FILE.rows, FILE.cols,
@@ -788,6 +792,7 @@ int main(int argc, char** argv)
         else if (k == "--horizon-table") horizontable = argv[++i];
         else if (k == "--theta-pad") thetapad = true;
         else if (k == "--stageA") stageA = argv[++i];
+        else if (k == "--stageA-drop") stageAdrop = argv[++i];
 #endif
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--dump-rowmeta") rowmeta = argv[++i];
@@ -2958,6 +2963,23 @@ int main(int argc, char** argv)
         if (!stageA.empty()) {
             const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
             int nrow = 0;
+            std::map<std::string, std::set<int>> sadrop;
+            if (!stageAdrop.empty()) {
+                std::ifstream fd(stageAdrop);
+                if (!fd) { std::cerr << "FATAL: --stageA-drop: cannot read " << stageAdrop << "\n"; return 1; }
+                std::string ln;
+                int nd = 0;
+                while (std::getline(fd, ln)) {
+                    std::istringstream is(ln);
+                    std::string F; int kk;
+                    if (!(is >> F) || F[0] == '#') continue;
+                    if (!(is >> kk) || F == "QB") { std::cerr << "FATAL: --stageA-drop: bad line " << ln << "\n"; return 1; }
+                    sadrop[F].insert(kk);
+                    nd++;
+                }
+                emit("FJPJ_stageA_dropped", nd);
+                if (rank == 0) std::cout << "#  --stageA-drop: " << nd << " C1 rows dropped from " << stageAdrop << "\n";
+            }
             for (int q = 0; q < 6; q++)
                 for (int d = 0; d < 2; d++) {
                     std::string e = d ? std::string("dr(") + fn[q] + ") - dr(ZS" + fn[q] + ")"
@@ -2971,7 +2993,25 @@ int main(int argc, char** argv)
                             e += b;
                             nt_++;
                         }
-                    syst.add_eq_bc(0, INNER_BC, (e + " = 0").c_str());
+                    // ⚠ ROUND 343: a field with dropped C1 modes takes its C1 rows MODE BY MODE (add_eq_mode on the kept
+                    // padded modes: COS_EVEN k <= nt-2, SIN_EVEN 1 <= k <= nt-3); every other row stays one add_eq_bc.
+                    const bool permode = d == 1 && sadrop.count(fn[q]);
+                    if (!permode) {
+                        syst.add_eq_bc(0, INNER_BC, (e + " = 0").c_str());
+                    } else {
+                        const bool se = std::string(fn[q]) == "BT";
+                        int kept = 0;
+                        for (int kk = se ? 1 : 0; kk <= (se ? ntheta - 3 : ntheta - 2); kk++) {
+                            if (sadrop[fn[q]].count(kk)) continue;
+                            Index pos_cf(space.get_domain(0)->get_nbr_coefs());
+                            pos_cf.set(1) = kk;
+                            syst.add_eq_mode(0, INNER_BC, e.c_str(), pos_cf, 0.0);
+                            kept++;
+                        }
+                        if (rank == 0)
+                            std::cout << "#  --stageA-drop: C1 " << fn[q] << " mode by mode, " << kept << " kept, "
+                                      << sadrop[fn[q]].size() << " dropped\n";
+                    }
                     nrow++;
                     if (rank == 0)
                         std::cout << "#  --stageA: C" << d << " " << fn[q] << " registered at the inner face (" << nt_

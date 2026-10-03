@@ -44,19 +44,19 @@ namespace Kadath
             int baset = (*so.get_base().bases_1d[1])(0);
             switch (baset) {
                 case COS_EVEN:
-                    if ((j == 0) && (mquant != 0))
+                    if (((j == 0) && (mquant != 0)) || (j >= nbr_coefs(1) - theta_pad(COS_EVEN)))
                         indic = false;
                     break;
                 case COS_ODD:
-                    if ((j == nbr_coefs(1) - 1) || ((j == 0) && (mquant != 0)))
+                    if ((j >= nbr_coefs(1) - 1 - theta_pad(COS_ODD)) || ((j == 0) && (mquant != 0)))
                         indic = false;
                     break;
                 case SIN_EVEN:
-                    if (((j == 1) && (mquant > 1)) || (j == 0) || (j == nbr_coefs(1) - 1))
+                    if (((j == 1) && (mquant > 1)) || (j == 0) || (j >= nbr_coefs(1) - 1 - theta_pad(SIN_EVEN)))
                         indic = false;
                     break;
                 case SIN_ODD:
-                    if (((j == 0) && (mquant > 1)) || (j == nbr_coefs(1) - 1))
+                    if (((j == 0) && (mquant > 1)) || (j >= nbr_coefs(1) - 1 - theta_pad(SIN_ODD)))
                         indic = false;
                     break;
                 default:

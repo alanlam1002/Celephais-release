@@ -49,19 +49,19 @@ namespace Kadath
             bool true_tet = true;
             switch (baset) {
                 case COS_EVEN:
-                    if ((j == 0) && (mquant != 0))
+                    if (((j == 0) && (mquant != 0)) || (j >= nbr_coefs(1) - theta_pad(COS_EVEN)))
                         true_tet = false;
                     break;
                 case COS_ODD:
-                    if ((j == nbr_coefs(1) - 1) || ((j == 0) && (mquant != 0)))
+                    if ((j >= nbr_coefs(1) - 1 - theta_pad(COS_ODD)) || ((j == 0) && (mquant != 0)))
                         true_tet = false;
                     break;
                 case SIN_EVEN:
-                    if (((j == 1) && (mquant > 1)) || (j == 0) || (j == nbr_coefs(1) - 1))
+                    if (((j == 1) && (mquant > 1)) || (j == 0) || (j >= nbr_coefs(1) - 1 - theta_pad(SIN_EVEN)))
                         true_tet = false;
                     break;
                 case SIN_ODD:
-                    if (((j == 0) && (mquant > 1)) || (j == nbr_coefs(1) - 1))
+                    if (((j == 0) && (mquant > 1)) || (j >= nbr_coefs(1) - 1 - theta_pad(SIN_ODD)))
                         true_tet = false;
                     break;
                 default:

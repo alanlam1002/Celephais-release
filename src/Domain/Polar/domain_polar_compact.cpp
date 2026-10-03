@@ -535,4 +535,18 @@ namespace Kadath
             res = 1;
         return res;
     }
+
+    // Celephais (research round 670): the per-basis theta pad, set per instance by the application.
+    void Domain_polar_compact::set_theta_pad(int base, int pad)
+    {
+        if (pad < 0)
+            KADATH_THROW("set_theta_pad: the pad must be >= 0");
+        switch (base) {
+            case COS_EVEN: theta_pad_[0] = pad; break;
+            case COS_ODD: theta_pad_[1] = pad; break;
+            case SIN_EVEN: theta_pad_[2] = pad; break;
+            case SIN_ODD: theta_pad_[3] = pad; break;
+            default: KADATH_THROW("set_theta_pad: base must be COS_EVEN, COS_ODD, SIN_EVEN or SIN_ODD");
+        }
+    }
 } // namespace Kadath

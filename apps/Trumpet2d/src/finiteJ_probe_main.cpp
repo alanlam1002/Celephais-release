@@ -402,6 +402,7 @@ int main(int argc, char** argv)
     bool komar = false;             // --komar: integ(KG) = 4 pi M (M = 1) on the domain-1/2 interface, mode 0
     double komar_m = 1.0;           // --komar-m M
     std::string horizontable;       // --horizon-table FILE (round 336): the horizon rows at r_H, from python_bulk --write-horizon
+    bool thetapad = false;          // --theta-pad (round 341): the per-basis theta pad, COS_EVEN / SIN_EVEN / SIN_ODD 1, COS_ODD 2
 #endif
     std::string jacdump;   // --dump-jacobian FILE (BULK rows only)
     // --dump-rowmeta FILE: Kadath's own per-row metadata (FILE.rows, FILE.cols,
@@ -784,6 +785,7 @@ int main(int argc, char** argv)
         else if (k == "--komar") komar = true;
         else if (k == "--komar-m") komar_m = std::stod(argv[++i]);
         else if (k == "--horizon-table") horizontable = argv[++i];
+        else if (k == "--theta-pad") thetapad = true;
 #endif
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--dump-rowmeta") rowmeta = argv[++i];
@@ -947,6 +949,36 @@ int main(int argc, char** argv)
     centre.set(1) = 0.0;
     centre.set(2) = 0.0;
     Trumpet::Space_polar_trumpet space(CHEB_TYPE, centre, res, bounds, logshell);
+#ifdef TRUMPET_BULK2
+    // ⚠ ROUND 341 (research round 670): the per-basis THETA PAD (Celephais core, Domain_polar_shell / _compact::
+    // set_theta_pad), set on every polar domain BEFORE any variable or equation is registered -- the unknown and tau
+    // counts are taken then.  Depth = the power of sin th in the field's representation (round 340): 1 for the scalar
+    // bases (q = sin^2 th q~), 2 for COS_ODD (Q = sin^4 th QB).  The domains are the space's own heap objects; the
+    // const_cast only reaches the per-instance setter.
+    if (thetapad) {
+        if (!eqfnsin2) {
+            std::cerr << "FATAL: --theta-pad needs --eqfn-sin2 (EQFN = multsint(multsint(EQFN)), COS_EVEN, padded once)\n";
+            return 1;
+        }
+        const int pads[4][2] = {{COS_EVEN, 1}, {SIN_EVEN, 1}, {SIN_ODD, 1}, {COS_ODD, 2}};
+        for (int d = 0; d < space.get_nbr_domains(); d++) {
+            Kadath::Domain* dm = const_cast<Kadath::Domain*>(space.get_domain(d));
+            auto* sh = dynamic_cast<Kadath::Domain_polar_shell*>(dm);
+            auto* cp = dynamic_cast<Kadath::Domain_polar_compact*>(dm);
+            if (!sh && !cp) {
+                std::cerr << "FATAL: --theta-pad: domain " << d << " is not a polar shell / compact domain\n";
+                return 1;
+            }
+            for (const auto& pb : pads) {
+                if (sh) sh->set_theta_pad(pb[0], pb[1]);
+                else cp->set_theta_pad(pb[0], pb[1]);
+            }
+        }
+        if (rank == 0)
+            std::cout << "#  --theta-pad: COS_EVEN 1, SIN_EVEN 1, SIN_ODD 1, COS_ODD 2 on all " << space.get_nbr_domains()
+                      << " polar domains\n";
+    }
+#endif
 
     // The compact domain carries r = infinity, where the seed's R/r and C r/R^3
     // are 0/0 in floating point.  The probe therefore runs on the SHELLS only
@@ -2612,15 +2644,16 @@ int main(int argc, char** argv)
                     std::cerr << "FATAL: phm and phb are alternatives\n";
                     return 1;
                 }
-                for (int j = 0; j < ntheta; j++) {
+                const int jmax = thetapad ? ntheta - 1 : ntheta;     // round 341: the padded PH mode nt-1 gets no row
+                for (int j = 0; j < jmax; j++) {
                     Index pos_cf(space.get_domain(dtop)->get_nbr_coefs());
                     pos_cf.set(1) = j;
                     if (j == 0) syst.add_eq_mode(dtop, OUTER_BC, "PH", pos_cf, 1.0);
                     else        syst.add_eq_mode(dtop, OUTER_BC, "multr(PH) - multr(PHP)", pos_cf, 0.0);
                 }
                 if (rank == 0)
-                    std::cout << "#  outer phm: PH mode 0 = 1 (value), modes 1.." << ntheta - 1
-                              << " multr(PH) = multr(PHP), " << ntheta << " rows by add_eq_mode\n";
+                    std::cout << "#  outer phm: PH mode 0 = 1 (value), modes 1.." << jmax - 1
+                              << " multr(PH) = multr(PHP), " << jmax << " rows by add_eq_mode\n";
                 nout++;
             }
 #endif

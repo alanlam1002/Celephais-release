@@ -48,19 +48,19 @@ namespace Kadath
 
             switch (baset) {
                 case COS_EVEN:
-                    if ((pos(1) == 0) && (mquant != 0))
+                    if (((pos(1) == 0) && (mquant != 0)) || (pos(1) >= nbr_coefs(1) - theta_pad(COS_EVEN)))
                         indic = false;
                     break;
                 case COS_ODD:
-                    if ((pos(1) == nbr_coefs(1) - 1) || ((pos(1) == 0) && (mquant != 0)))
+                    if ((pos(1) >= nbr_coefs(1) - 1 - theta_pad(COS_ODD)) || ((pos(1) == 0) && (mquant != 0)))
                         indic = false;
                     break;
                 case SIN_EVEN:
-                    if (((pos(1) == 1) && (mquant > 1)) || (pos(1) == 0) || (pos(1) == nbr_coefs(1) - 1))
+                    if (((pos(1) == 1) && (mquant > 1)) || (pos(1) == 0) || (pos(1) >= nbr_coefs(1) - 1 - theta_pad(SIN_EVEN)))
                         indic = false;
                     break;
                 case SIN_ODD:
-                    if (((pos(1) == 0) && (mquant > 1)) || (pos(1) == nbr_coefs(1) - 1))
+                    if (((pos(1) == 0) && (mquant > 1)) || (pos(1) >= nbr_coefs(1) - 1 - theta_pad(SIN_ODD)))
                         indic = false;
                     break;
                 default:

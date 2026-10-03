@@ -54,6 +54,8 @@ namespace Kadath
                     pos_cf.set(0) = i;
                     switch (baset) {
                         case COS_EVEN:
+                            if (j >= nbr_coefs(1) - theta_pad(COS_EVEN))
+                                break;
                             if (mquant == 0) {
                                 sec.set(pos_sec) = (*so.cf)(pos_cf);
                                 pos_sec++;
@@ -66,7 +68,7 @@ namespace Kadath
                             }
                             break;
                         case COS_ODD:
-                            if (j != nbr_coefs(1) - 1) {
+                            if (j < nbr_coefs(1) - 1 - theta_pad(COS_ODD)) {
                                 if (mquant == 0) {
                                     sec.set(pos_sec) = (*so.cf)(pos_cf);
                                     pos_sec++;
@@ -80,7 +82,7 @@ namespace Kadath
                             }
                             break;
                         case SIN_EVEN:
-                            if ((j != 0) && (j != nbr_coefs(1) - 1)) {
+                            if ((j != 0) && (j < nbr_coefs(1) - 1 - theta_pad(SIN_EVEN))) {
                                 if (mquant <= 1) {
                                     sec.set(pos_sec) = (*so.cf)(pos_cf);
                                     pos_sec++;
@@ -94,7 +96,7 @@ namespace Kadath
                             }
                             break;
                         case SIN_ODD:
-                            if (j != nbr_coefs(1) - 1) {
+                            if (j < nbr_coefs(1) - 1 - theta_pad(SIN_ODD)) {
                                 if (mquant <= 1) {
                                     sec.set(pos_sec) = (*so.cf)(pos_cf);
                                     pos_sec++;

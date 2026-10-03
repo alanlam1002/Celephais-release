@@ -111,6 +111,27 @@ namespace Kadath
     {
 
       private:
+        /// Per-basis theta pad (Celephais, research round 670): the top \c theta_pad_[b] VALID theta modes of basis
+        /// b (COS_EVEN, COS_ODD, SIN_EVEN, SIN_ODD) are neither unknowns nor tau conditions.  Default 0 (Kadath's
+        /// behaviour); set per instance by the application after the space is built.
+        int theta_pad_[4] = {0, 0, 0, 0};
+
+      public:
+        /// The theta pad of basis \c base (0 for any basis other than the four polar theta bases).
+        int theta_pad(int base) const
+        {
+            switch (base) {
+                case COS_EVEN: return theta_pad_[0];
+                case COS_ODD: return theta_pad_[1];
+                case SIN_EVEN: return theta_pad_[2];
+                case SIN_ODD: return theta_pad_[3];
+                default: return 0;
+            }
+        }
+        /// Sets the theta pad of one basis (COS_EVEN, COS_ODD, SIN_EVEN or SIN_ODD); pad >= 0.
+        void set_theta_pad(int base, int pad);
+
+      private:
         double alpha;
         double beta;
         Point center;
@@ -250,6 +271,27 @@ namespace Kadath
 
     class Domain_polar_compact : public Domain
     {
+
+      private:
+        /// Per-basis theta pad (Celephais, research round 670): the top \c theta_pad_[b] VALID theta modes of basis
+        /// b (COS_EVEN, COS_ODD, SIN_EVEN, SIN_ODD) are neither unknowns nor tau conditions.  Default 0 (Kadath's
+        /// behaviour); set per instance by the application after the space is built.
+        int theta_pad_[4] = {0, 0, 0, 0};
+
+      public:
+        /// The theta pad of basis \c base (0 for any basis other than the four polar theta bases).
+        int theta_pad(int base) const
+        {
+            switch (base) {
+                case COS_EVEN: return theta_pad_[0];
+                case COS_ODD: return theta_pad_[1];
+                case SIN_EVEN: return theta_pad_[2];
+                case SIN_ODD: return theta_pad_[3];
+                default: return 0;
+            }
+        }
+        /// Sets the theta pad of one basis (COS_EVEN, COS_ODD, SIN_EVEN or SIN_ODD); pad >= 0.
+        void set_theta_pad(int base, int pad);
 
       private:
         double alpha;

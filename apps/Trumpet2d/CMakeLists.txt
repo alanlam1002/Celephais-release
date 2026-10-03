@@ -122,6 +122,14 @@ set_target_properties(trumpet2d_expr_repro PROPERTIES OUTPUT_NAME kadath_expr_re
 kadath_add_exec(trumpet2d_t1_nscalar src/t1_nscalar_main.cpp)
 set_target_properties(trumpet2d_t1_nscalar PROPERTIES OUTPUT_NAME t1_nscalar)
 
+# Research round 665 (code round 336), step 3a: does Kadath's existing point evaluation (add_eq_point -> Ope_point)
+# give a field's value, r-derivative and Jacobian column at an INTERIOR point (r_H)?  Standalone, part of no production
+# binary; stock Kadath plus the app's Space_polar_trumpet (the production layout).
+kadath_add_exec(trumpet2d_t3a_point src/t3a_point_main.cpp)
+set_target_properties(trumpet2d_t3a_point PROPERTIES OUTPUT_NAME t3a_point)
+target_include_directories(trumpet2d_t3a_point PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
 # Research round 664 (code round 335), step 2: the BULK CHANGES in a SIXTH probe binary.  Bulk rows
 # finiteJ_eqs_qreg_drvt_r2k.hpp (round 333's D0081 fix, (r^2 K)^2), throat rows as qreg_fix; under TRUMPET_BULK2 the
 # runtime flags --eqfn-sin2, --amax-table FILE, --komar and the outer token `phm` (Phibar -> 1 at mode 0), all OFF by

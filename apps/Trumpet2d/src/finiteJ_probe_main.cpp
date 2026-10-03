@@ -29,6 +29,11 @@
 #include "For_Kadath/Scalar/scalar.hpp"
 #include "For_Kadath/Space/space.hpp"
 #include "For_Kadath/System_of_eqs/system_of_eqs.hpp"
+#ifdef TRUMPET_BULK2
+#include "For_Kadath/Ope_eq/ope_eq.hpp"
+#include "For_Kadath/Term_eq/term_eq.hpp"
+#include "For_Kadath/Utilities/name_tools.hpp"
+#endif
 
 #include "space/space_polar_trumpet.hpp"
 // ⚠ TWO EMISSIONS, ONE BINARY EACH.  The generated headers declare the same
@@ -97,6 +102,45 @@ struct EqListPeek : Kadath::System_of_eqs {
     static const L& eqints(const Kadath::System_of_eqs& s)
     { return s.*(&EqListPeek::eq_int_list); }
 };
+
+#ifdef TRUMPET_BULK2
+// ⚠ ROUND 336 (research round 665, step 3b): the HORIZON ROWS at r_H.  A row is ONE Eq_int whose parts are
+// w_m * (Ope_point(X at (x_H, th_m)) - v0_m)  -- Kadath's own point evaluation (round 336 step 3a: value / dr / Jacobian
+// column exact at interior points), scaled and shifted by Ope_wscale.  Eq_int sums its parts.  System_of_eqs has no public way to add a multi-part Eq_int, so the protected members are reached through a
+// pointer-to-member formed in a derived class, as EqListPeek does -- nothing in the library is touched.
+class Ope_wscale : public Kadath::Ope_eq {
+    double w, v0;
+  public:
+    Ope_wscale(const Kadath::System_of_eqs* s, double ww, Kadath::Ope_eq* so, double vv0 = 0.0)
+        : Kadath::Ope_eq(s, so->get_dom(), 1), w(ww), v0(vv0) { parts[0].reset(so); }
+    Kadath::Term_eq action() const override
+    {
+        Kadath::Term_eq t(parts[0]->action());
+        Kadath::Term_eq res(dom, w * (t.get_val_d() - v0));
+        const int nl = t.get_derivative_lane_count();
+        if (t.has_der_d(0)) res.set_der_d(w * t.get_der_d());
+        res.set_derivative_lane_count(nl);
+        for (int lane = 1; lane < nl; ++lane)
+            if (t.has_der_d(lane)) res.set_der_d(lane, w * t.get_der_d(lane));
+        return res;
+    }
+};
+struct EqIntAdd : Kadath::System_of_eqs {
+    static void add_sum(Kadath::System_of_eqs& s, int dom, const std::string& label,
+                        const std::vector<Kadath::Ope_eq*>& ops)
+    {
+        (s.*(&EqIntAdd::eq_int_list)).push_back(std::make_tuple(label, dom, -1));
+        (s.*(&EqIntAdd::ensure_eq_int_slot))();
+        auto& eqi = s.*(&EqIntAdd::eq_int);
+        int& nei = s.*(&EqIntAdd::neq_int);
+        eqi[nei].reset(new Kadath::Eq_int(static_cast<int>(ops.size())));
+        for (std::size_t k = 0; k < ops.size(); k++)
+            eqi[nei]->set_part(static_cast<int>(k), ops[k]);
+        nei++;
+        s.*(&EqIntAdd::nbr_conditions) = -1;
+    }
+};
+#endif
 
 static void emit(const std::string& k, double v)
 {
@@ -356,6 +400,7 @@ int main(int argc, char** argv)
     std::string amaxtable;          // --amax-table FILE: domain-0 rows x W<eq>(r) (no underscore: Kadath reads _ as an index) = 1 / (largest d_rr coefficient)
     bool komar = false;             // --komar: integ(KG) = 4 pi M (M = 1) on the domain-1/2 interface, mode 0
     double komar_m = 1.0;           // --komar-m M
+    std::string horizontable;       // --horizon-table FILE (round 336): the horizon rows at r_H, from python_bulk --write-horizon
 #endif
     std::string jacdump;   // --dump-jacobian FILE (BULK rows only)
     // --dump-rowmeta FILE: Kadath's own per-row metadata (FILE.rows, FILE.cols,
@@ -736,6 +781,7 @@ int main(int argc, char** argv)
         else if (k == "--amax-table") amaxtable = argv[++i];
         else if (k == "--komar") komar = true;
         else if (k == "--komar-m") komar_m = std::stod(argv[++i]);
+        else if (k == "--horizon-table") horizontable = argv[++i];
 #endif
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--dump-rowmeta") rowmeta = argv[++i];
@@ -2670,6 +2716,79 @@ int main(int argc, char** argv)
             if (rank == 0)
                 std::cout << "#  --komar: integ(KMG) = 4 pi x " << komar_m << " on the domain-1/2 interface (1 row)\n";
             emit("FJPJ_komar_row", 1);
+        }
+        // ⚠ ROUND 336 (research round 665, step 3b): the HORIZON ROWS, l . (B0 F'(r_H) + C0 F(r_H)) = 0 (round 331's ruling;
+        // twist: every test mode, scalar: l >= 2 with drop-top), in domain 1 at r_H, from python_bulk.py --write-horizon:
+        //   `f F D th w`  w * ((d/dr)^D F(r_H, th) - the same on the seed): the LITERAL row -- B0, C0 and l are the J = 0
+        //                 numbers, F_j(r_H) the field's own theta modes by an exact midpoint rule; the row is the
+        //                 linearisation about the seed, so the seed's value (read at registration) is subtracted
+        //   `p EQ th w`   w * EQ(r_H, th): a theta quadrature of the equations themselves (diagnostic; round 336 measured
+        //                 that Kadath's point value of a PRODUCT carries its truncation -- it is not the Python row)
+        // No domain boundary at r_H; J = 0 only (r_H a fixed sphere).
+        if (!horizontable.empty()) {
+            std::ifstream fin(horizontable);
+            std::string tag;
+            int hnt = 0, nth = 0;
+            double rh = 0, hlo = 0, hhi = 0;
+            fin >> tag >> hnt >> rh >> hlo >> hhi >> nth;
+            if (!fin || tag != "horizon" || hnt != ntheta) {
+                std::cerr << "FATAL: --horizon-table " << horizontable << " unreadable or for nt " << hnt << " (run: "
+                          << ntheta << ")\n";
+                return 1;
+            }
+            if (std::fabs(hlo - t.doms[1].r_int) > 1e-12 * hlo || std::fabs(hhi - t.doms[2].r_int) > 1e-12 * hhi) {
+                std::cerr << "FATAL: --horizon-table domain-1 bounds " << hlo << " " << hhi << " differ from the table's\n";
+                return 1;
+            }
+            int nrows = 0, ntw = 0, nsc = 0, nparts = 0;
+            bool nfield = false, fieldform = false;
+            double xh = 0;
+            std::string w0, sec;
+            while (fin >> w0) {
+                int q = 0, np = 0;
+                double sc = 0;
+                fin >> sec >> q >> sc >> np;
+                if (w0 != "row" || !fin) { std::cerr << "FATAL: --horizon-table malformed\n"; return 1; }
+                std::vector<Kadath::Ope_eq*> ops;
+                for (int a = 0; a < np; a++) {
+                    std::string pp, eq;
+                    int der = 0;
+                    double th = 0, w = 0;
+                    fin >> pp >> eq;
+                    if (pp == "f") { fin >> der; fieldform = true; }
+                    fin >> th >> w;
+                    Point M(2);
+                    M.set(1) = rh * std::sin(th);
+                    M.set(2) = rh * std::cos(th);
+                    const Point num(space.get_domain(1)->absol_to_num(M));
+                    xh = num(1);
+                    // ⚠ Kadath stores every name with ONE trailing space ("QB ", "EQTW ") and its parser only matches that
+                    // form; trim_spaces normalises an expression to it, exactly as System_of_eqs::add_eq_point does
+                    char nrm[Kadath::LMAX];
+                    if (pp == "f") {
+                        Kadath::trim_spaces(nrm, (der ? "dr(" + eq + ")" : eq).c_str());
+                        Kadath::Ope_eq* pt = new Kadath::Ope_point(&syst, num, syst.give_ope(1, nrm));
+                        const double v0 = pt->action().get_val_d();     // the seed (no Newton step has been taken)
+                        ops.push_back(new Ope_wscale(&syst, sc * w, pt, v0));
+                    } else {
+                        Kadath::trim_spaces(nrm, eq.c_str());
+                        ops.push_back(new Ope_wscale(&syst, sc * w, new Kadath::Ope_point(&syst, num, syst.give_ope(1, nrm))));
+                    }
+                }
+                EqIntAdd::add_sum(syst, 1, "HZ " + sec + " " + std::to_string(q), ops);
+                nrows++;
+                nparts += np;
+                (sec == "twist" ? ntw : nsc)++;
+                nfield = nfield || (np > 0 && fieldform);
+            }
+            if (rank == 0)
+                std::cout << "#  --horizon-table: " << nrows << " horizon rows (twist " << ntw << ", scalar " << nsc
+                          << ") at r_H = " << std::setprecision(12) << rh << " (domain 1, x_H = " << xh << "), "
+                          << nparts << " point evaluations on " << nth << " theta nodes (form "
+                          << (nfield ? "field: F and dr(F), seed subtracted" : "eq: the equations") << ")\n";
+            emit("FJPJ_horizon_rows", nrows);
+            emit("FJPJ_horizon_twist", ntw);
+            emit("FJPJ_horizon_scalar", nsc);
         }
 #endif
         int inner_row_begin = -1, inner_row_end = -1;

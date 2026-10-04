@@ -6,6 +6,11 @@
 //   * A0, B0, C0 at the surface: the linearised radial operator A F'' + B F' + C F of each equation's test row (equation,
 //     k) on each field-mode column (F, j), theta-projected as python_bulk.abc_at -- the partials of the equations in the
 //     36 field jets come from the generated stageB_gen.hpp (sbg::eq_*), the jets from Kadath's own fields at the points;
+//   * ROUND 348 (research round 679, STAGE_B_SPEC section 10): the CONORMAL construction.  The principal symbol degenerates
+//     for xi along the conormal beta_A (beta^A lowered with gamma: psi^4 e^{2q} (BR, r^2 BT)); at each node
+//     xi = (1, r^2 BT / BR) -- beta_A up to a per-node factor, which cannot move an exact kernel (its vectors annihilate
+//     A_beta node by node) and makes A_beta = A0 exactly where BT = 0 -- and
+//     A_beta = p_20 xi_r^2 + p_11 xi_r xi_th + p_02 xi_th^2 (the d_r^2, d_r d_th, d_th^2 jets), projected as A0 was;
 //   * per sector (twist: EQTW rows; scalar: the rest), on the padded tests / columns (EQTW, QB by 2, the rest by 1:
 //     round 341's --horizon-pad), rows normalised by max |A, B, C|: the left kernel l of A0 (singular values < 1e-9, as
 //     python_bulk.horizon_rows mode 'all'), w = l / rs;
@@ -169,7 +174,10 @@ struct HZShared {
     std::vector<int> re, rk, cF, cj;                             // row: equation, k; column: field, j
     std::vector<int> rowsec;                                     // per registered row: 0 twist, 1 scalar
     std::vector<std::vector<double>> w;                          // per registered row: weights over the global test rows
-    std::vector<double> sc, val, G, A0, B0, C0;
+    std::vector<double> sc, val, G, A0, B0, C0, Ab, xith, rHprev;  // Ab: A_beta; xith: xi_theta per node
+    double drH = 0;                                              // the last rebuild's max |x_H change|
+    std::vector<double> nodesv;                                  // per node: the pointwise symbol's singular values (6, descending)
+    std::vector<double> drHhist;
     std::vector<std::vector<double>> dval;                       // per registered row, per lane
     std::vector<std::array<double, 36>> Jt;                      // the jets at the nodes (this state)
     std::vector<int> nker;                                       // kernel dimension per sector at the last rebuild
@@ -244,19 +252,25 @@ struct HZShared {
     {
         const auto t0 = std::chrono::steady_clock::now();
         const char* fix = std::getenv("HZ_RH_FIX");                 // diagnostic only: the surface pinned to a given sphere
+        rHprev = rH;
         for (int m = 0; m < NTH; m++) rH[m] = fix ? std::atof(fix) : locate(T, m, built ? rH[m] : r0, fres);
+        drH = 0;
+        if (built) for (int m = 0; m < NTH; m++) drH = std::max(drH, std::fabs(rH[m] - rHprev[m]));
+        drHhist.push_back(built ? drH : -1.0);
         double rmin = 1e300, rmax = -1e300, rbar = 0;
         for (int m = 0; m < NTH; m++) { rmin = std::min(rmin, rH[m]); rmax = std::max(rmax, rH[m]); rbar += rH[m] / NTH; }
         xHspread = rmax - rmin;
         Jt.assign(NTH, {});
         const int NR = static_cast<int>(re.size()), NC = static_cast<int>(cF.size());
-        A0.assign(static_cast<size_t>(NR) * NC, 0.0); B0 = A0; C0 = A0;
+        A0.assign(static_cast<size_t>(NR) * NC, 0.0); B0 = A0; C0 = A0; Ab = A0;
+        xith.assign(NTH, 0.0);
         std::vector<double> E(static_cast<size_t>(NTH) * 6), P(static_cast<size_t>(NTH) * 6 * 36);
         std::vector<sbg::cplx> Hbuf(4096);
         for (int m = 0; m < NTH; m++) {
             num[m] = point(rH[m], th[m]);
             sbg::cplx jc[36];
             for (int a = 0; a < 36; a++) { Jt[m][a] = at(vd(T[a].get_val_t(), dom), num[m]); jc[a] = Jt[m][a]; }
+            xith[m] = rH[m] * rH[m] * Jt[m][18] / Jt[m][12];          // r^2 BT / BR (bt_00, br_00)
             for (int e = 0; e < 6; e++) {
                 sbg::cplx Ev, Pv[36];
                 for (auto& x : Pv) x = 0.0;
@@ -265,19 +279,35 @@ struct HZShared {
                 for (int a = 0; a < 36; a++) P[(static_cast<size_t>(m) * 6 + e) * 36 + a] = Pv[a].real();
             }
         }
+        // the POINTWISE principal symbol at the conormal, per node: S[e][F] = p20 + p11 xi + p02 xi^2 (6 x 6), its singular values
+        nodesv.assign(static_cast<size_t>(NTH) * 6, 0.0);
+        for (int m = 0; m < NTH; m++) {
+            std::vector<double> Sm(36);
+            for (int e = 0; e < 6; e++)
+                for (int F = 0; F < 6; F++) {
+                    const double* p = &P[(static_cast<size_t>(m) * 6 + e) * 36 + JBLK[F]];
+                    Sm[e * 6 + F] = p[5] + p[4] * xith[m] + p[2] * xith[m] * xith[m];
+                }
+            int nk = 0;
+            std::vector<double> sv;
+            (void)left_kernel(Sm, 6, 6, 0.0, nk, sv);
+            for (int a = 0; a < 6; a++) nodesv[static_cast<size_t>(m) * 6 + a] = sv[a];
+        }
         // A0, B0, C0 (python_bulk.abc_at at the surface): jets within a block 00 01 02 10 11 20
         for (int i = 0; i < NR; i++)
             for (int c = 0; c < NC; c++) {
-                double a = 0, b = 0, cc = 0, ang[3];
+                double a = 0, b = 0, cc = 0, ab = 0, ang[3];
                 const int bk = JBLK[cF[c]];
                 for (int m = 0; m < NTH; m++) {
                     angular(cF[c], cj[c], th[m], ang);
                     const double tw = W[m] * test(re[i], rk[i], th[m]);
                     const double* p = &P[(static_cast<size_t>(m) * 6 + re[i]) * 36 + bk];
                     a += tw * p[5] * ang[0];
+                    ab += tw * (p[5] + p[4] * xith[m] + p[2] * xith[m] * xith[m]) * ang[0];
                     b += tw * (p[3] * ang[0] + p[4] * ang[1]);
                     cc += tw * (p[0] * ang[0] + p[1] * ang[1] + p[2] * ang[2]);
                 }
+                Ab[static_cast<size_t>(i) * NC + c] = ab;
                 A0[static_cast<size_t>(i) * NC + c] = a; B0[static_cast<size_t>(i) * NC + c] = b; C0[static_cast<size_t>(i) * NC + c] = cc;
             }
         // per sector: the left kernel of A0 (sector rows x every padded column), rows normalised by max |A, B, C|
@@ -292,9 +322,9 @@ struct HZShared {
             for (int a = 0; a < m; a++) {
                 for (int c = 0; c < NC; c++) {
                     const size_t ix = static_cast<size_t>(ri[a]) * NC + c;
-                    rs[a] = std::max({rs[a], std::fabs(A0[ix]), std::fabs(B0[ix]), std::fabs(C0[ix])});
+                    rs[a] = std::max({rs[a], std::fabs(Ab[ix]), std::fabs(B0[ix]), std::fabs(C0[ix])});
                 }
-                for (int c = 0; c < NC; c++) A[static_cast<size_t>(a) * NC + c] = A0[static_cast<size_t>(ri[a]) * NC + c] / rs[a];
+                for (int c = 0; c < NC; c++) A[static_cast<size_t>(a) * NC + c] = Ab[static_cast<size_t>(ri[a]) * NC + c] / rs[a];
             }
             int nk = 0;
             std::vector<double> sv;

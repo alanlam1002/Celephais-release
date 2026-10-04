@@ -541,6 +541,9 @@ int main(int argc, char** argv)
     bool komarbphi = false;         // --komar-betaphi (round 347, needs --stageB --komar): Komar's K^r_phi beta^phi term
     double hzp1 = 0.0, hzp2 = 0.0;  // --hz-perturb E1 E2 (round 347, gate iv-b): BR *= 1 + E1 cos 2th, BT += E2 sin 2th
     std::string hzdump;             // --hz-dump FILE (round 347): the horizon rebuild's nodes, jets, A0 B0 C0, rows
+    std::string fdkomar;            // --fd-komar FILE (round 348, gate h-c): the Komar row's Jacobian columns vs 4th-order FD
+    std::string solveout;           // --solve-out PREFIX (round 348): per Newton step the residual (PREFIX.res<it>); at the end the
+                                    // fields (PREFIX.fields, the --dump-fields format), stage-B unknowns (PREFIX.sb), x_H (PREFIX.hz)
     bool jacmpi = false;            // --jac-dump-mpi (round 346): the dumped Jacobian's columns assembled across MPI ranks
                                     // (do_newton's round-robin), gathered to rank 0, written in the serial format
 #endif
@@ -938,6 +941,8 @@ int main(int argc, char** argv)
         else if (k == "--komar-betaphi") komarbphi = true;
         else if (k == "--hz-perturb") { hzp1 = std::stod(argv[++i]); hzp2 = std::stod(argv[++i]); }
         else if (k == "--hz-dump") hzdump = argv[++i];
+        else if (k == "--fd-komar") fdkomar = argv[++i];
+        else if (k == "--solve-out") solveout = argv[++i];
 #endif
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--dump-rowmeta") rowmeta = argv[++i];
@@ -2169,6 +2174,7 @@ int main(int argc, char** argv)
     sbh::Ope_kbphi* kbphi = nullptr;                    // round 347: --komar-betaphi (owned by the Komar Eq_int)
     std::map<std::string, std::vector<int>> saprof;     // "<d><F>" -> the columns with a profile there
     int sancol = 0;
+    int komar_row = -1;                                 // round 348: the Komar row's Eq_int index (= its residual row)
     if (!stageA.empty()) {
         std::ifstream fin(stageA);
         if (!fin) {
@@ -3207,6 +3213,7 @@ int main(int argc, char** argv)
             if (komarbphi) {
                 if (stageB.empty()) { std::cerr << "FATAL: --komar-betaphi needs --stageB\n"; return 1; }
                 const int ki = SysPeek::neqint(syst) - 1;
+                komar_row = ki;
                 Kadath::Eq_int& e = SysPeek::eqint(syst, ki);
                 kbphi = new sbh::Ope_kbphi(&syst, &space, dtop, t.doms[2].r_int, havejj ? jjoverride : 0.0);
                 EqIntPeek::parts_of(e).emplace_back(kbphi);
@@ -4275,6 +4282,67 @@ int main(int argc, char** argv)
             dfs.close();
             std::cout << "#  --defect-store: " << ni << " Eq_int rows and the bulk / interface fields -> " << defstore << "\n";
         }
+        // ⚠ ROUND 348 gate (h-c): --fd-komar FILE -- for each listed column c, the Komar row's Jacobian entry (do_col_J) against
+        // the fourth-order central difference (-f(2h) + 8 f(h) - 8 f(-h) + f(-2h)) / 12h of the row's value (sec_member), the
+        // unknown moved by Kadath's own update (xx_to_vars_delta subtracts its argument); at h and h/2
+        if (!fdkomar.empty() && komar_row >= 0) {
+            std::ifstream fc(fdkomar);
+            std::vector<int> cols;
+            double h0 = 1e-4;
+            std::string w0;
+            int frow = komar_row;                       // "row N" in the file: test row N instead of the Komar row
+            bool part = false;                          // "kbphi": difference the beta^phi PART's value alone (its only QB
+                                                        // dependence: the row's QB columns are that part's derivative)
+            while (fc >> w0) {
+                if (w0 == "h") fc >> h0;
+                else if (w0 == "row") fc >> frow;
+                else if (w0 == "kbphi") part = true;
+                else cols.push_back(std::stoi(w0));
+            }
+            const int nu = syst.get_nbr_unknowns();
+            auto shift = [&](int c, double d) {
+                Kadath::Array<double> X(nu);
+                X = 0.0;
+                X.set(c) = -d;
+                int conte = 0;
+                syst.xx_to_vars_delta(X, conte);
+            };
+            // (the part's value is read from the residual evaluation itself: Kadath refreshes the variables' terms there)
+            auto f = [&]() { const double v = Kadath::Array<double>(syst.sec_member())(frow); return part ? kbphi->last : v; };
+            double worst = 0;
+            // the Jacobian entries from ONE sequential pass over every column, as the dump loop computes them: do_col_J
+            // called on isolated columns returned different values (round 348; the first column of each field / domain
+            // block agreed, later ones did not), and the dump's sequential values are what the finite difference matches
+            std::map<int, double> jcol;
+            {
+                const std::set<int> want(cols.begin(), cols.end());
+                for (int c = 0; c < nu; c++) {
+                    Kadath::Array<double> col(syst.do_col_J(c));
+                    if (want.count(c)) jcol[c] = col(frow);
+                }
+            }
+            for (int c : cols) {
+                const double jc = jcol[c];
+                double fd[2];
+                for (int lev = 0; lev < 2; lev++) {
+                    const double h = h0 / (1 << lev);
+                    shift(c, h);      const double f1 = f();
+                    shift(c, h);      const double f2 = f();
+                    shift(c, -3 * h); const double fm1 = f();
+                    shift(c, -h);     const double fm2 = f();
+                    shift(c, 2 * h);
+                    fd[lev] = (-f2 + 8 * f1 - 8 * fm1 + fm2) / (12 * h);
+                }
+                const double rel = std::fabs(jc - fd[1]) / std::max(std::fabs(jc), 1e-300);
+                if (std::fabs(jc) > 0) worst = std::max(worst, rel);
+                if (rank == 0)
+                    std::cout << "#  --fd-komar: column " << c << "  J " << std::setprecision(15) << jc << "  FD(h) " << fd[0]
+                              << "  FD(h/2) " << fd[1] << "  |J - FD(h/2)| / |J| " << std::setprecision(3) << rel
+                              << "  (FD(h) vs FD(h/2) " << std::fabs(fd[0] - fd[1]) / std::max(std::fabs(fd[1]), 1e-300) << ")\n";
+            }
+            emit("FJPK_fd_worst_rel", worst);
+            if (rank == 0) std::cout << "#  --fd-komar: " << cols.size() << " columns, row " << frow << ", worst relative " << worst << " (h " << h0 << ")\n";
+        }
         // ⚠ ROUND 347: --hz-dump, the live horizon's state (for the independent check of gate iv-b)
         if (hzshared && !hzdump.empty() && rank == 0) {
             std::ofstream hf(hzdump);
@@ -4288,9 +4356,14 @@ int main(int argc, char** argv)
             }
             for (std::size_t i = 0; i < h.re.size(); i++) hf << "row " << h.re[i] << " " << h.rk[i] << "\n";
             for (std::size_t c = 0; c < h.cF.size(); c++) hf << "col " << h.cF[c] << " " << h.cj[c] << "\n";
-            for (const auto* M : {&h.A0, &h.B0, &h.C0}) {
+            for (const auto* M : {&h.A0, &h.B0, &h.C0, &h.Ab}) {
                 hf << "mat";
                 for (double x : *M) hf << " " << x;
+                hf << "\n";
+            }
+            for (int m = 0; m < h.NTH; m++) {
+                hf << "nodesv " << h.xith[m];
+                for (int a = 0; a < 6; a++) hf << " " << h.nodesv[static_cast<size_t>(m) * 6 + a];
                 hf << "\n";
             }
             for (std::size_t q = 0; q < h.w.size(); q++) {
@@ -4499,7 +4572,9 @@ int main(int argc, char** argv)
             if (hzshared && rank == 0) {
                 std::cout << "#  --horizon-live cost: " << hzshared->nbuild << " rebuilds " << hzshared->tbuild << " s; "
                           << hzshared->nder << " derivative evaluations " << hzshared->tder << " s; " << hzshared->ncall
-                          << " row calls; r_H spread " << hzshared->xHspread << "\n";
+                          << " row calls; r_H spread " << hzshared->xHspread << "; max |x_H change| per rebuild:";
+                for (double d : hzshared->drHhist) std::cout << " " << d;
+                std::cout << "\n";
                 emit("FJPH_nbuild", hzshared->nbuild);
                 emit("FJPH_tbuild", hzshared->tbuild);
                 emit("FJPH_nder", hzshared->nder);
@@ -4621,6 +4696,17 @@ int main(int argc, char** argv)
 #endif
                     ok = syst.do_newton(newtonprec, err);
 #ifdef TRUMPET_BULK2
+                    if (!solveout.empty()) {     // ⚠ ROUND 348: the residual after this step (rows in Kadath's order)
+                        const Kadath::Array<double> rr(syst.sec_member());
+                        if (rank == 0) {
+                            std::ofstream fo(solveout + ".res" + std::to_string(it));
+                            fo << std::setprecision(17);
+                            for (int r = 0; r < rr.get_size(0); r++) fo << rr(r) << "\n";
+                        }
+                        if (hzshared && rank == 0)
+                            std::cout << "#  solve: after step " << it << " max|residual| " << std::setprecision(6)
+                                      << max(fabs(rr)) << ", x_H change at the last rebuild " << hzshared->drH << "\n";
+                    }
                     {
                         const double tn = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_nw0).count();
                         emit("FJPT_newton_step_s_" + std::to_string(it), tn);
@@ -4642,10 +4728,41 @@ int main(int argc, char** argv)
             emit("FJPN_ok", ok ? 1.0 : 0.0);
             emit("FJPN_iters", it);
 #ifdef TRUMPET_BULK2
+            if (!solveout.empty() && rank == 0) {      // ⚠ ROUND 348: the solved state
+                std::ofstream ff(solveout + ".fields");
+                ff << "# field values after the Newton solve, by --solve-out\n";
+                ff << "fields PS PH QF BR BT QB\n";
+                ff << std::setprecision(17);
+                const Scalar* fp[6] = {&PS, &PH, &QF, &BR, &BT, &QB};
+                for (int d = 0; d <= dtop; d++) {
+                    Index ix(space.get_domain(d)->get_nbr_points());
+                    do {
+                        ff << "val " << d << " " << ix(0) << " " << ix(1) << " " << t.pts[d][ix(0)].r << " "
+                           << space.get_domain(d)->get_coloc(2)(ix(1));
+                        for (int q = 0; q < 6; q++) ff << " " << (*fp[q])(d)(ix);
+                        ff << "\n";
+                    } while (ix.inc());
+                }
+                if (sbshared) {
+                    std::ofstream fs(solveout + ".sb");
+                    fs << std::setprecision(17);
+                    for (int q = 0; q < sbshared->ev.NU; q++)
+                        fs << q << " " << sbshared->ev.unk[q].t << " " << sbshared->ev.unk[q].key << " " << sbshared->ev.unk[q].ia
+                           << " " << sbshared->terms[q]->get_val_d() << " " << sbshared->ev.unk[q].u0 << "\n";
+                }
+                if (hzshared) {
+                    std::ofstream fh(solveout + ".hz");
+                    fh << std::setprecision(17);
+                    for (int m = 0; m < hzshared->NTH; m++) fh << hzshared->th[m] << " " << hzshared->rH[m] << "\n";
+                }
+                std::cout << "#  --solve-out: " << solveout << ".{fields,sb,hz,res*}\n";
+            }
             if (hzshared && rank == 0) {
                 std::cout << "#  --horizon-live cost: " << hzshared->nbuild << " rebuilds " << hzshared->tbuild << " s; "
                           << hzshared->nder << " derivative evaluations " << hzshared->tder << " s; " << hzshared->ncall
-                          << " row calls; r_H spread " << hzshared->xHspread << "\n";
+                          << " row calls; r_H spread " << hzshared->xHspread << "; max |x_H change| per rebuild:";
+                for (double d : hzshared->drHhist) std::cout << " " << d;
+                std::cout << "\n";
                 emit("FJPH_nbuild", hzshared->nbuild);
                 emit("FJPH_tbuild", hzshared->tbuild);
                 emit("FJPH_nder", hzshared->nder);

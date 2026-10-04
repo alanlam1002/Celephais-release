@@ -144,6 +144,79 @@ struct EqIntAdd : Kadath::System_of_eqs {
     }
 };
 #endif
+#ifdef TRUMPET_BULK2
+// ⚠ ROUND 345 (research round 675): STAGE B, sub-step (iii).  The nonlinear throat expansion (scripts/stageB_codegen.py
+// -> stageB_gen.hpp, generated; stageB_eval.hpp, hand-written) as ONE shared evaluator read by many app-side Opes:
+// each throat row and each matching row's throat part is an Ope_sb returning one entry of the evaluator's output and,
+// in every derivative lane, sum_q dOut/du_q * der(u_q) over the stage-B scalar unknowns.  Values are recomputed when
+// the unknowns change; the Jacobian (analytic for the throat rows, a complex step for the matching) only when a lane
+// carries a nonzero derivative of a stage-B unknown.
+#include "stageB_eval.hpp"
+struct SBShared {
+    sbe::Eval ev;
+    double Jv;
+    const Kadath::System_of_eqs* sys = nullptr;
+    int base = 0;
+    std::vector<const Kadath::Term_eq*> terms;
+    std::vector<double> u, rv, mv, Jr, Jm;
+    bool hv = false, hj = false;
+    long nval = 0, njac = 0;
+    double tv = 0, tj = 0;
+    SBShared(const std::string& p, double J) : ev(p), Jv(J) {}
+    void bind(const Kadath::System_of_eqs* s, int b)
+    {
+        sys = s; base = b; terms.resize(ev.NU);
+        for (int q = 0; q < ev.NU; q++) terms[q] = s->give_term_double(base + q, 0);
+    }
+    void sync()
+    {
+        bool same = static_cast<int>(u.size()) == ev.NU;
+        if (same)
+            for (int q = 0; q < ev.NU; q++) if (terms[q]->get_val_d() != u[q]) { same = false; break; }
+        if (!same) {
+            u.resize(ev.NU);
+            for (int q = 0; q < ev.NU; q++) u[q] = terms[q]->get_val_d();
+            hv = hj = false;
+        }
+        if (!hv) { ev.values(u, Jv, rv, mv); hv = true; nval++; tv += ev.tval + ev.tmatch; }
+    }
+    void needjac() { if (!hj) { ev.jacobian(u, Jv, Jr, Jm); hj = true; njac++; tj += ev.tjac; } }
+};
+class Ope_sb : public Kadath::Ope_eq {
+    SBShared* sh;
+    int out;
+    bool match;
+    double sign;
+  public:
+    Ope_sb(const Kadath::System_of_eqs* s, SBShared* h, int o, bool m, double sg)
+        : Kadath::Ope_eq(s, 0, 0), sh(h), out(o), match(m), sign(sg) {}
+    Kadath::Term_eq action() const override
+    {
+        sh->sync();
+        const double v = sign * (match ? sh->mv[out] : sh->rv[out]);
+        Kadath::Term_eq res(dom, v);
+        const Kadath::Term_eq* t0 = sh->terms[0];
+        if (!t0->has_der_d(0)) return res;
+        const int nl = std::max(1, t0->get_derivative_lane_count());
+        double d[Kadath::Term_eq::max_derivative_lanes] = {0.0};
+        const int NU = sh->ev.NU;
+        for (int q = 0; q < NU; q++) {
+            const Kadath::Term_eq* tq = sh->terms[q];
+            for (int lane = 0; lane < nl; lane++) {
+                if (!tq->has_der_d(lane)) continue;
+                const double dq = lane == 0 ? tq->get_der_d() : tq->get_der_d(lane);
+                if (dq == 0.0) continue;
+                sh->needjac();
+                d[lane] += (match ? sh->Jm : sh->Jr)[static_cast<size_t>(out) * NU + q] * dq;
+            }
+        }
+        res.set_der_d(sign * d[0]);
+        res.set_derivative_lane_count(nl);
+        for (int lane = 1; lane < nl; ++lane) res.set_der_d(lane, sign * d[lane]);
+        return res;
+    }
+};
+#endif
 
 static void emit(const std::string& k, double v)
 {
@@ -408,6 +481,9 @@ int main(int argc, char** argv)
     bool thetapad = false;          // --theta-pad (round 341): the per-basis theta pad, COS_EVEN / SIN_EVEN / SIN_ODD 1, COS_ODD 2
     std::string stageA;             // --stageA FILE (round 342): the J = 0 throat closure (columns + C0 / C1), replacing the inherited throat
     std::string stageAdrop;         // --stageA-drop FILE (round 343): C1 matching rows dropped, "F k" per line (k the wavenumber)
+    std::string stageB;             // --stageB FILE (round 345): the nonlinear throat closure (stageB_kadath.py export)
+    std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
+    std::string sbtestin, sbtestout; // --stageB-eval-test IN OUT (round 345): run the evaluator on states, write rows / Jacobians, exit
 #endif
     std::string jacdump;   // --dump-jacobian FILE (BULK rows only)
     // --dump-rowmeta FILE: Kadath's own per-row metadata (FILE.rows, FILE.cols,
@@ -793,6 +869,9 @@ int main(int argc, char** argv)
         else if (k == "--theta-pad") thetapad = true;
         else if (k == "--stageA") stageA = argv[++i];
         else if (k == "--stageA-drop") stageAdrop = argv[++i];
+        else if (k == "--stageB") stageB = argv[++i];
+        else if (k == "--stageB-rows") stageBrows = argv[++i];
+        else if (k == "--stageB-eval-test") { sbtestin = argv[++i]; sbtestout = argv[++i]; }
 #endif
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--dump-rowmeta") rowmeta = argv[++i];
@@ -899,6 +978,42 @@ int main(int argc, char** argv)
             std::cerr << "FATAL: --stageA needs --theta-pad and --dump-jacobian, and refuses --jac-match*, --jac-inner*, "
                          "--jac-recursion*, --balance-l2, --maximality, --grade2-u2, --physical-h, --seed-match (the "
                          "inherited throat it replaces)\n";
+        MPI_Finalize();
+        return 1;
+    }
+    if (!sbtestin.empty()) {
+        // ⚠ ROUND 345 gate (iii-a): the generated evaluator alone, on states from a file -- no system is built
+        if (stageB.empty()) { std::cerr << "FATAL: --stageB-eval-test needs --stageB DATA\n"; MPI_Finalize(); return 1; }
+        sbe::Eval ev(stageB);
+        std::ifstream fin(sbtestin);
+        std::ofstream fo(sbtestout);
+        fo << std::setprecision(17);
+        int ns = 0;
+        double Jv;
+        while (fin >> Jv) {
+            std::vector<double> u(ev.NU);
+            for (double& v : u) fin >> v;
+            std::vector<double> rv, mv, Jr, Jm;
+            ev.values(u, Jv, rv, mv);
+            const double tv = ev.tval, tm = ev.tmatch;
+            ev.jacobian(u, Jv, Jr, Jm);
+            fo << "STATE " << ns << " " << ev.NROW << " " << ev.NMK << " " << ev.NU << " " << tv << " " << tm << " " << ev.tjac << "\n";
+            for (double v : rv) fo << v << "\n";
+            for (double v : mv) fo << v << "\n";
+            for (double v : Jr) fo << v << "\n";
+            for (double v : Jm) fo << v << "\n";
+            if (rank == 0)
+                std::cout << "#  --stageB-eval-test: state " << ns << "  values " << tv << " s, matching " << tm
+                          << " s, Jacobian " << ev.tjac << " s\n";
+            ns++;
+        }
+        MPI_Finalize();
+        return 0;
+    }
+    if (!stageB.empty() && (!stageA.empty() || !thetapad || jacmatch || jacinner || jacrec || balancel2 || maximality
+                            || g2u2 || physh || seedmatch)) {
+        if (rank == 0)
+            std::cerr << "FATAL: --stageB needs --theta-pad and refuses --stageA and the inherited throat flags\n";
         MPI_Finalize();
         return 1;
     }
@@ -1967,6 +2082,7 @@ int main(int argc, char** argv)
     // constants Z<d><F><cc>.  The seed is subtracted (ZS<F>, a copy of the field at registration): at J = 0 the seed is
     // the backbone, which the throat carries with every amplitude 0.  STATIC: add_cst keeps a reference.
     static std::vector<std::unique_ptr<Scalar>> sacst;
+    static std::unique_ptr<SBShared> sbshared;
     std::map<std::string, std::vector<int>> saprof;     // "<d><F>" -> the columns with a profile there
     int sancol = 0;
     if (!stageA.empty()) {
@@ -2619,6 +2735,28 @@ int main(int argc, char** argv)
                 syst.add_var(nm, sata[c]);
             }
         }
+        // ⚠ ROUND 345: the stage-B unknowns, one scalar each (STATIC: add_var stores a pointer), seeded from the data
+        if (!stageB.empty()) {
+            sbshared.reset(new SBShared(stageB, havejj ? jjoverride : 0.0));
+            static std::vector<double> sbu;
+            sbu.resize(sbshared->ev.NU);
+            char nm[16];
+            for (int q = 0; q < sbshared->ev.NU; q++) {
+                sbu[q] = sbshared->ev.unk[q].u0;
+                std::snprintf(nm, sizeof nm, "SB%03d", q);
+                syst.add_var(nm, sbu[q]);
+            }
+            sbshared->bind(&syst, 0);
+            for (int q = 0; q < sbshared->ev.NU; q++)
+                if (sbshared->terms[q]->get_val_d() != sbu[q]) {
+                    std::cerr << "FATAL: --stageB: scalar unknown " << q << " is not where it was registered\n";
+                    return 1;
+                }
+            emit("FJPJ_stageB_unknowns", sbshared->ev.NU);
+            if (rank == 0)
+                std::cout << "#  --stageB: " << sbshared->ev.NU << " scalar unknowns SB000.. (J = " << sbshared->Jv
+                          << "), data " << stageB << "\n";
+        }
 #endif
         auto wanted_eq = [&](const char* nm) {
             if (jaceqs == "all") return true;
@@ -2956,6 +3094,48 @@ int main(int argc, char** argv)
         }
 #endif
 #ifdef TRUMPET_BULK2
+        // ⚠ ROUND 345: the stage-B rows.  MATCHING (the square set of round 343): one Eq_int per kept (field, d, mode),
+        // Kadath's own mode coefficient of F or dr(F) at the inner face (Ope_mode, as add_eq_mode) MINUS the ansatz
+        // part (Ope_sb).  THROAT: one Eq_int per registered row (Ope_sb), all rows or the --stageB-rows subset.
+        if (sbshared) {
+            const char* fnm[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+            int nmr = 0;
+            for (int q = 0; q < sbshared->ev.NMK; q++) {
+                const sbe::MKey& K = sbshared->ev.mk[q];
+                if (!K.kept) continue;
+                const std::string ex = K.d ? std::string("dr(") + fnm[K.F] + ")" : std::string(fnm[K.F]);
+                Index pos_cf(space.get_domain(0)->get_nbr_coefs());
+                pos_cf.set(1) = K.k;
+                std::vector<Kadath::Ope_eq*> ops;
+                char auxi[512];
+                Kadath::trim_spaces(auxi, ex.c_str());           // Kadath's names carry a trailing space (round 336)
+                ops.push_back(new Kadath::Ope_mode(&syst, INNER_BC, pos_cf, 0.0, syst.give_ope(0, auxi, INNER_BC)));
+                ops.push_back(new Ope_sb(&syst, sbshared.get(), q, true, -1.0));
+                char lb[64];
+                std::snprintf(lb, sizeof lb, "SBM %s d%d k%d", fnm[K.F], K.d, K.k);
+                EqIntAdd::add_sum(syst, 0, lb, ops);
+                nmr++;
+            }
+            std::vector<int> sel;
+            if (!stageBrows.empty()) {
+                std::ifstream fr(stageBrows);
+                int v;
+                while (fr >> v) sel.push_back(v);
+            } else {
+                for (int ro = 0; ro < sbshared->ev.NROW; ro++) sel.push_back(ro);
+            }
+            for (int ro : sel) {
+                const sbe::RowInfo& R = sbshared->ev.rows[ro];
+                char lb[64];
+                std::snprintf(lb, sizeof lb, "SBT %s g%d #%d y%d", sbshared->ev.eqs[R.e].name.c_str(), R.g, R.i, R.part);
+                EqIntAdd::add_sum(syst, 0, lb, {new Ope_sb(&syst, sbshared.get(), ro, false, 1.0)});
+            }
+            emit("FJPJ_stageB_match_rows", nmr);
+            emit("FJPJ_stageB_throat_rows", static_cast<double>(sel.size()));
+            if (rank == 0)
+                std::cout << "#  --stageB: " << nmr << " matching rows (Ope_mode - ansatz), " << sel.size()
+                          << " throat rows" << (stageBrows.empty() ? " (all)" : " (subset " + stageBrows + ")") << "\n";
+        }
         // ⚠ ROUND 342: the stage-A MATCHING rows, C0 and C1 per field at the inner face of domain 0, none dropped:
         //     F - ZS<F> - sum_c TAc Z0<F>c = 0,     dr(F) - dr(ZS<F>) - sum_c TAc Z1<F>c = 0
         // add_eq_bc projects on the field's own tau basis, so the padded core sets the mode count (PS PH QF BR nt-1,

@@ -346,6 +346,212 @@ struct DefectData {
         ok = true;
     }
 };
+
+// ⚠ ROUND 351 (research round 683): --lsolve MODE, an app-side Newton step replacing do_newton's linear solve only.
+// The residual (sec_member) and the Jacobian's columns (do_col_J, column c on rank c mod nproc, after
+// reset_do_col_J_cache) as do_newton builds them; the columns gathered on rank 0; the dense system solved there with
+// LAPACK; the step broadcast and applied by the same two calls as do_newton (Space::xx_to_vars_variable_domains,
+// System_of_eqs::xx_to_vars_delta: var -= X).  MODE:
+//   plain   dgetrf / dgetrs (partial pivoting), no scaling -- the control of this path against Kadath's pdgesv
+//   equil   two-sided (Ruiz) equilibration, every factor a power of two (exact): rows and columns to unit max norm,
+//           A_s = R A C, solve A_s z = R b, X = C z
+//   refine  iterative refinement: r = b - A X with every product accumulated in long double, A d = r by the same
+//           factorisation, X += d, NREF (= 3) times
+//   equil+refine  both
+// Every mode also records READ (a): the smallest singular triplet (sigma, u, v) of the ROW-equilibrated Jacobian
+// (rows to unit max, as rounds 350's spectra), by inverse iteration on its own LU (B^T w = v, B v' = w; u = w / |w|,
+// sigma = 1 / |w|); the scaled residual's projection on u (the RESIDUAL's share of the step along v, (u.R0 b) / sigma --
+// algebraically v.B^-1 R0 b through the same LU, so it is not an independent check of v.X) and the applied step's on v;
+// with refinement, the correction's component along v (the first solve's error along v).  And the 1-norm reciprocal
+// condition (dgecon) of the matrix factorised.
+extern "C" {
+void dgetrf_(const int*, const int*, double*, const int*, int*, int*);
+void dgetrs_(const char*, const int*, const int*, const double*, const int*, const int*, double*, const int*, int*);
+void dgecon_(const char*, const int*, const double*, const int*, const double*, double*, double*, int*, int*);
+double dlange_(const char*, const int*, const int*, const double*, const int*, double*);
+}
+struct LsolveStats { double rcond_plain = 0, rcond_used = 0, lin0 = 0, lin1 = 0, sigma = 0, ub = 0, bnorm = 0, vx = 0, xnorm = 0,
+                     vpred = 0, srow = 0, vdref = 0, dref = 0; int nref = 0; };
+static bool app_newton(Kadath::System_of_eqs& syst, const std::string& mode, double prec, double& err, int it, int rank)
+{
+    int nproc = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &nproc);
+    const bool equil = mode == "equil" || mode == "equil+refine", refine = mode == "refine" || mode == "equil+refine";
+    if (!equil && !refine && mode != "plain") throw std::runtime_error("--lsolve: unknown mode " + mode);
+    const Kadath::Array<double> sec(syst.sec_member());
+    const int n = syst.get_nbr_unknowns(), m = sec.get_size(0);
+    if (m != n) throw std::runtime_error("--lsolve: not square");
+    err = 0.0;
+    for (int r = 0; r < m; r++) err = std::max(err, std::fabs(sec(r)));
+    if (rank == 0) std::cout << "#  lsolve step " << it << " (" << mode << "): max|resid| before " << std::setprecision(10) << err << "\n";
+    if (err < prec) return true;
+    // the columns
+    const auto t0 = std::chrono::steady_clock::now();
+    syst.reset_do_col_J_cache();
+    std::vector<double> mine;
+    for (int c = rank; c < n; c += nproc) {
+        Kadath::Array<double> col(syst.do_col_J(c));
+        for (int r = 0; r < m; r++) mine.push_back(col(r));
+    }
+    std::vector<double> A;                                           // column-major, rank 0
+    if (rank == 0) {
+        A.assign(static_cast<size_t>(n) * m, 0.0);
+        for (int p = 0; p < nproc; p++) {
+            std::vector<double> buf;
+            const int cnt = p < n ? (n - p + nproc - 1) / nproc : 0;
+            if (p == 0) buf.swap(mine);
+            else {
+                buf.resize(static_cast<size_t>(cnt) * m);
+                if (cnt) MPI_Recv(buf.data(), cnt * m, MPI_DOUBLE, p, 351, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+            for (int a = 0; a < cnt; a++)
+                std::memcpy(&A[static_cast<size_t>(p + a * nproc) * m], &buf[static_cast<size_t>(a) * m], sizeof(double) * m);
+        }
+    } else if (!mine.empty()) {
+        MPI_Send(mine.data(), static_cast<int>(mine.size()), MPI_DOUBLE, 0, 351, MPI_COMM_WORLD);
+    }
+    const double tasm = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    Kadath::Array<double> X(n);
+    LsolveStats st;
+    if (rank == 0) {
+        const auto t1 = std::chrono::steady_clock::now();
+        const size_t NN = static_cast<size_t>(n) * n;
+        std::vector<double> b(n);
+        for (int r = 0; r < n; r++) b[r] = sec(r);
+        auto Aat = [&](int r, int c) -> double& { return A[static_cast<size_t>(c) * n + r]; };
+        auto pow2 = [](double s) { int e; std::frexp(s, &e); return std::ldexp(1.0, e - 1); };   // largest 2^k <= s
+        int info = 0;
+        std::vector<double> work(4 * static_cast<size_t>(n));
+        std::vector<int> iwork(n);
+        auto rcond_of = [&](const std::vector<double>& LU, double anorm) {
+            double rc = 0; int inf = 0;
+            dgecon_("1", &n, LU.data(), &n, &anorm, &rc, work.data(), iwork.data(), &inf);
+            return rc;
+        };
+        // READ (a) and the plain condition: the row-equilibrated B = R0 A, its LU
+        std::vector<double> R0(n, 0.0);
+        for (int c = 0; c < n; c++) for (int r = 0; r < n; r++) R0[r] = std::max(R0[r], std::fabs(Aat(r, c)));
+        for (int r = 0; r < n; r++) R0[r] = R0[r] > 0 ? 1.0 / R0[r] : 1.0;
+        std::vector<double> B(NN);
+        for (int c = 0; c < n; c++) for (int r = 0; r < n; r++) B[static_cast<size_t>(c) * n + r] = R0[r] * Aat(r, c);
+        std::vector<int> pB(n);
+        dgetrf_(&n, &n, B.data(), &n, pB.data(), &info);
+        {
+            std::vector<double> v(n), w(n);
+            for (int i = 0; i < n; i++) v[i] = std::sin(1.0 + 0.37 * i);
+            double nv = 0; for (double x : v) nv += x * x; nv = std::sqrt(nv); for (double& x : v) x /= nv;
+            const int one = 1;
+            double nw = 1;
+            for (int k = 0; k < 30; k++) {
+                w = v;
+                dgetrs_("T", &n, &one, B.data(), &n, pB.data(), w.data(), &n, &info);        // B^T w = v
+                nw = 0; for (double x : w) nw += x * x; nw = std::sqrt(nw);
+                v = w;
+                dgetrs_("N", &n, &one, B.data(), &n, pB.data(), v.data(), &n, &info);        // B v' = w
+                nv = 0; for (double x : v) nv += x * x; nv = std::sqrt(nv); for (double& x : v) x /= nv;
+            }
+            w = v;
+            dgetrs_("T", &n, &one, B.data(), &n, pB.data(), w.data(), &n, &info);
+            nw = 0; for (double x : w) nw += x * x; nw = std::sqrt(nw);
+            st.sigma = 1.0 / nw;
+            double ub = 0, bn = 0;
+            for (int i = 0; i < n; i++) { ub += (w[i] / nw) * R0[i] * b[i]; bn += (R0[i] * b[i]) * (R0[i] * b[i]); }
+            st.ub = ub; st.bnorm = std::sqrt(bn); st.vpred = ub / st.sigma;
+            mine.assign(v.begin(), v.end());                              // keep v for after the solve
+            double bn1 = 0;
+            for (int c = 0; c < n; c++) { double s = 0; for (int r = 0; r < n; r++) s += std::fabs(R0[r] * Aat(r, c)); bn1 = std::max(bn1, s); }
+            st.srow = bn1;                                                // ||R0 A||_1
+        }
+        // the matrix factorised for the step
+        std::vector<double> Rs(n, 1.0), Cs(n, 1.0);
+        if (equil) {
+            for (int sweep = 0; sweep < 20; sweep++) {
+                std::vector<double> rm(n, 0.0), cm(n, 0.0);
+                for (int c = 0; c < n; c++)
+                    for (int r = 0; r < n; r++) {
+                        const double a = std::fabs(Rs[r] * Aat(r, c) * Cs[c]);
+                        rm[r] = std::max(rm[r], a); cm[c] = std::max(cm[c], a);
+                    }
+                double dev = 0;
+                for (int i = 0; i < n; i++) {
+                    if (rm[i] > 0) Rs[i] /= pow2(std::sqrt(rm[i]));
+                    if (cm[i] > 0) Cs[i] /= pow2(std::sqrt(cm[i]));
+                    dev = std::max({dev, std::fabs(std::log2(std::max(rm[i], 1e-300))), std::fabs(std::log2(std::max(cm[i], 1e-300)))});
+                }
+                if (dev <= 1.0) break;
+            }
+        }
+        std::vector<double> LU(NN);
+        for (int c = 0; c < n; c++) for (int r = 0; r < n; r++) LU[static_cast<size_t>(c) * n + r] = Rs[r] * Aat(r, c) * Cs[c];
+        const double anorm_used = dlange_("1", &n, &n, LU.data(), &n, work.data());
+        std::vector<int> piv(n);
+        dgetrf_(&n, &n, LU.data(), &n, piv.data(), &info);
+        if (info != 0) throw std::runtime_error("--lsolve: dgetrf info " + std::to_string(info));
+        st.rcond_used = rcond_of(LU, anorm_used);
+        if (equil) {                                                      // the unscaled matrix's condition, for comparison
+            std::vector<double> P(A);
+            const double an = dlange_("1", &n, &n, P.data(), &n, work.data());
+            std::vector<int> pp(n);
+            dgetrf_(&n, &n, P.data(), &n, pp.data(), &info);
+            st.rcond_plain = rcond_of(P, an);
+        } else st.rcond_plain = st.rcond_used;
+        const int one = 1;
+        auto solve = [&](const std::vector<double>& rhs, std::vector<double>& x) {
+            std::vector<double> z(n);
+            for (int i = 0; i < n; i++) z[i] = Rs[i] * rhs[i];
+            dgetrs_("N", &n, &one, LU.data(), &n, piv.data(), z.data(), &n, &info);
+            x.resize(n);
+            for (int i = 0; i < n; i++) x[i] = Cs[i] * z[i];
+        };
+        auto linres = [&](const std::vector<double>& x, std::vector<double>& r) {   // r = b - A x, long double
+            std::vector<long double> acc(n);
+            for (int i = 0; i < n; i++) acc[i] = b[i];
+            for (int c = 0; c < n; c++) {
+                const long double xc = x[c];
+                const double* col = &A[static_cast<size_t>(c) * n];
+                for (int i = 0; i < n; i++) acc[i] -= static_cast<long double>(col[i]) * xc;
+            }
+            r.resize(n);
+            double mx = 0;
+            for (int i = 0; i < n; i++) { r[i] = static_cast<double>(acc[i]); mx = std::max(mx, std::fabs(r[i] * R0[i])); }
+            return mx;                                                    // max over rows of |r| / row max |A|
+        };
+        std::vector<double> x, r, d;
+        solve(b, x);
+        const std::vector<double> x0 = x;
+        st.lin0 = linres(x, r);
+        st.lin1 = st.lin0;
+        if (refine)
+            for (int k = 0; k < 3; k++) {
+                solve(r, d);
+                for (int i = 0; i < n; i++) x[i] += d[i];
+                st.lin1 = linres(x, r);
+                st.nref++;
+            }
+        double vx = 0, xn = 0, vd = 0, dn = 0;
+        for (int i = 0; i < n; i++) {
+            vx += mine[i] * x[i]; xn += x[i] * x[i];
+            vd += mine[i] * (x[i] - x0[i]); dn += (x[i] - x0[i]) * (x[i] - x0[i]);
+        }
+        st.vdref = vd; st.dref = std::sqrt(dn);
+        st.vx = vx; st.xnorm = std::sqrt(xn);
+        for (int i = 0; i < n; i++) X.set(i) = x[i];
+        const double tsol = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+        std::cout << "#  lsolve step " << it << " (" << mode << "): assembly " << tasm << " s, rank-0 linear algebra " << tsol
+                  << " s;  rcond(1) plain " << std::setprecision(4) << st.rcond_plain << ", factorised " << st.rcond_used
+                  << ";  linear residual (max |b - A X| / row max |A|) " << st.lin0 << " -> " << st.lin1 << " (" << st.nref
+                  << " refinements)\n";
+        std::cout << "#  lsolve read-a step " << it << ": sigma_min(R0 A) " << std::setprecision(6) << st.sigma << " (||R0 A||_1 "
+                  << st.srow << ");  u.(R0 b) " << st.ub << " of |R0 b| " << st.bnorm << ";  v.X " << st.vx << " of |X| " << st.xnorm
+                  << ";  u.(R0 b) / sigma " << st.vpred << ";  the refinement's total correction |dX| " << st.dref << ", v.dX "
+                  << st.vdref << "\n";
+    }
+    MPI_Bcast(X.set_data(), n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    int conte = 0;
+    syst.get_space().xx_to_vars_variable_domains(&syst, X, conte);
+    syst.xx_to_vars_delta(X, conte);
+    return false;
+}
 #endif
 
 static void emit(const std::string& k, double v)
@@ -612,6 +818,7 @@ int main(int argc, char** argv)
     std::string stageA;             // --stageA FILE (round 342): the J = 0 throat closure (columns + C0 / C1), replacing the inherited throat
     std::string stageAdrop;         // --stageA-drop FILE (round 343): C1 matching rows dropped, "F k" per line (k the wavenumber)
     std::string stageB;             // --stageB FILE (round 345): the nonlinear throat closure (stageB_kadath.py export)
+    std::string lsolve;             // --lsolve MODE (round 351): app-side Newton linear solve (plain / equil / refine / equil+refine)
     std::string stageBxform;        // --stageB-xform FILE (round 349, needs --stageB): the throat unknowns in matching-visible coordinates
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
     std::string sbtestin, sbtestout; // --stageB-eval-test IN OUT (round 345): run the evaluator on states, write rows / Jacobians, exit
@@ -1013,6 +1220,7 @@ int main(int argc, char** argv)
         else if (k == "--stageB") stageB = argv[++i];
         else if (k == "--stageB-rows") stageBrows = argv[++i];
         else if (k == "--stageB-xform") stageBxform = argv[++i];
+        else if (k == "--lsolve") lsolve = argv[++i];
         else if (k == "--stageB-eval-test") { sbtestin = argv[++i]; sbtestout = argv[++i]; }
         else if (k == "--jac-dump-mpi") jacmpi = true;
         else if (k == "--defect-store") defstore = argv[++i];
@@ -4781,7 +4989,11 @@ int main(int argc, char** argv)
 #ifdef TRUMPET_BULK2
                     const auto t_nw0 = std::chrono::steady_clock::now();
 #endif
+#ifdef TRUMPET_BULK2
+                    ok = lsolve.empty() ? syst.do_newton(newtonprec, err) : app_newton(syst, lsolve, newtonprec, err, it, rank);
+#else
                     ok = syst.do_newton(newtonprec, err);
+#endif
 #ifdef TRUMPET_BULK2
                     if (!solveout.empty()) {     // ⚠ ROUND 348: the residual after this step (rows in Kadath's order)
                         const Kadath::Array<double> rr(syst.sec_member());

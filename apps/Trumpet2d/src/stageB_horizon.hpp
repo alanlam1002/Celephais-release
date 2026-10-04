@@ -252,8 +252,13 @@ struct HZShared {
     {
         const auto t0 = std::chrono::steady_clock::now();
         const char* fix = std::getenv("HZ_RH_FIX");                 // diagnostic only: the surface pinned to a given sphere
+        // round 350, diagnostic only: HZ_FREEZE_AFTER=N -- after N rebuilds x_H, the kernel weights l and the row scales are
+        // held (the values and their jet derivatives are still evaluated on the current state: Newton exact for fixed rows)
+        const char* frz = std::getenv("HZ_FREEZE_AFTER");
+        const bool frozen = frz && built && nbuild >= std::atoi(frz);
         rHprev = rH;
-        for (int m = 0; m < NTH; m++) rH[m] = fix ? std::atof(fix) : locate(T, m, built ? rH[m] : r0, fres);
+        if (!frozen)
+            for (int m = 0; m < NTH; m++) rH[m] = fix ? std::atof(fix) : locate(T, m, built ? rH[m] : r0, fres);
         drH = 0;
         if (built) for (int m = 0; m < NTH; m++) drH = std::max(drH, std::fabs(rH[m] - rHprev[m]));
         drHhist.push_back(built ? drH : -1.0);
@@ -341,6 +346,7 @@ struct HZShared {
             }
         }
         if (!built) { w = wn; rowsec = secn; }
+        else if (frozen) {}                                           // round 350 diagnostic: l held
         else if (wn.size() != w.size())
             throw std::runtime_error("horizon: the left kernel changed dimension (" + std::to_string(w.size()) + " -> " +
                                      std::to_string(wn.size()) + ")");
@@ -355,7 +361,7 @@ struct HZShared {
             const double s0 = std::sqrt(std::max(1e-300, 1 - x0 * x0));
             T1[i] = (i == 0 ? 0.0 : i * std::sin(i * std::acos(x0)) / s0) * xr;
         }
-        sc.assign(nrow, 0.0);
+        if (!frozen) sc.assign(nrow, 0.0);
         val.assign(nrow, 0.0);
         G.assign(static_cast<size_t>(nrow) * NTH * 36, 0.0);
         for (int q = 0; q < nrow; q++) {
@@ -365,7 +371,7 @@ struct HZShared {
                 for (int i = 0; i < NR; i++) { b += w[q][i] * B0[static_cast<size_t>(i) * NC + c]; cc += w[q][i] * C0[static_cast<size_t>(i) * NC + c]; }
                 for (int i = 0; i < NR1; i++) vmax = std::max(vmax, std::fabs(b * T1[i] + cc * T0[i]));
             }
-            sc[q] = 1.0 / vmax;
+            if (!frozen) sc[q] = 1.0 / vmax;
             for (int i = 0; i < NR; i++) {
                 if (w[q][i] == 0.0) continue;
                 for (int m = 0; m < NTH; m++) {

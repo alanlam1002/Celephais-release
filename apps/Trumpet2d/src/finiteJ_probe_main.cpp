@@ -484,6 +484,8 @@ int main(int argc, char** argv)
     std::string stageB;             // --stageB FILE (round 345): the nonlinear throat closure (stageB_kadath.py export)
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
     std::string sbtestin, sbtestout; // --stageB-eval-test IN OUT (round 345): run the evaluator on states, write rows / Jacobians, exit
+    bool jacmpi = false;            // --jac-dump-mpi (round 346): the dumped Jacobian's columns assembled across MPI ranks
+                                    // (do_newton's round-robin), gathered to rank 0, written in the serial format
 #endif
     std::string jacdump;   // --dump-jacobian FILE (BULK rows only)
     // --dump-rowmeta FILE: Kadath's own per-row metadata (FILE.rows, FILE.cols,
@@ -872,6 +874,7 @@ int main(int argc, char** argv)
         else if (k == "--stageB") stageB = argv[++i];
         else if (k == "--stageB-rows") stageBrows = argv[++i];
         else if (k == "--stageB-eval-test") { sbtestin = argv[++i]; sbtestout = argv[++i]; }
+        else if (k == "--jac-dump-mpi") jacmpi = true;
 #endif
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--dump-rowmeta") rowmeta = argv[++i];
@@ -3124,17 +3127,32 @@ int main(int argc, char** argv)
             } else {
                 for (int ro = 0; ro < sbshared->ev.NROW; ro++) sel.push_back(ro);
             }
+            // round 346: indices >= the throat-row count are the truncation-orthogonality rows (SBO), constant linear rows
+            int nsel_t = 0, nsel_o = 0;
             for (int ro : sel) {
-                const sbe::RowInfo& R = sbshared->ev.rows[ro];
                 char lb[64];
-                std::snprintf(lb, sizeof lb, "SBT %s g%d #%d y%d", sbshared->ev.eqs[R.e].name.c_str(), R.g, R.i, R.part);
+                if (ro < 0 || ro >= sbshared->ev.NROW) {
+                    std::cerr << "FATAL: --stageB-rows: row " << ro << " outside 0.." << sbshared->ev.NROW - 1 << "\n";
+                    MPI_Finalize();
+                    return 1;
+                }
+                if (ro < sbshared->ev.NTHR) {
+                    const sbe::RowInfo& R = sbshared->ev.rows[ro];
+                    std::snprintf(lb, sizeof lb, "SBT %s g%d #%d y%d", sbshared->ev.eqs[R.e].name.c_str(), R.g, R.i, R.part);
+                    nsel_t++;
+                } else {
+                    std::snprintf(lb, sizeof lb, "SBO #%d", ro - sbshared->ev.NTHR);
+                    nsel_o++;
+                }
                 EqIntAdd::add_sum(syst, 0, lb, {new Ope_sb(&syst, sbshared.get(), ro, false, 1.0)});
             }
+            emit("FJPJ_stageB_orth_rows", nsel_o);
             emit("FJPJ_stageB_match_rows", nmr);
             emit("FJPJ_stageB_throat_rows", static_cast<double>(sel.size()));
             if (rank == 0)
-                std::cout << "#  --stageB: " << nmr << " matching rows (Ope_mode - ansatz), " << sel.size()
-                          << " throat rows" << (stageBrows.empty() ? " (all)" : " (subset " + stageBrows + ")") << "\n";
+                std::cout << "#  --stageB: " << nmr << " matching rows (Ope_mode - ansatz), " << nsel_t
+                          << " throat rows + " << nsel_o << " orthogonality rows"
+                          << (stageBrows.empty() ? " (all)" : " (subset " + stageBrows + ")") << "\n";
         }
         // ⚠ ROUND 342: the stage-A MATCHING rows, C0 and C1 per field at the inner face of domain 0, none dropped:
         //     F - ZS<F> - sum_c TAc Z0<F>c = 0,     dr(F) - dr(ZS<F>) - sum_c TAc Z1<F>c = 0
@@ -3975,7 +3993,59 @@ int main(int argc, char** argv)
                           << fieldspost << "\n";
             }
         }
+#ifdef TRUMPET_BULK2
+        // ⚠ ROUND 346 (iii-c): the wall time of one residual evaluation (sec_member), every rank
+        const auto t_res0 = std::chrono::steady_clock::now();
+#endif
         Kadath::Array<double> bb(syst.sec_member());
+#ifdef TRUMPET_BULK2
+        {
+            const double tr = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_res0).count();
+            emit("FJPT_residual_s", tr);
+            if (rank == 0) std::cout << "#  timing: one residual evaluation (sec_member) " << tr << " s\n";
+        }
+        // ⚠ ROUND 346: --jac-dump-mpi -- the dump's columns assembled on every rank (column c on rank c mod nproc, as
+        // do_newton distributes them), sent to rank 0, and written below exactly as the serial loop writes them
+        std::vector<std::vector<double>> mpicols;
+        if (jacmpi && !jacdump.empty()) {
+            int nproc = 1;
+            MPI_Comm_size(MPI_COMM_WORLD, &nproc);
+            const int nr_ = syst.get_nbr_conditions(), nc_ = syst.get_nbr_unknowns();
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<double> mine;
+            for (int c = rank; c < nc_; c += nproc) {
+                Kadath::Array<double> col(syst.do_col_J(c));
+                for (int r = 0; r < nr_; r++) mine.push_back(col(r));
+            }
+            double tl = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), tmax = 0, tmin = 0;
+            MPI_Reduce(&tl, &tmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+            MPI_Reduce(&tl, &tmin, 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
+            if (rank == 0) {
+                mpicols.assign(nc_, std::vector<double>());
+                for (int p = 0; p < nproc; p++) {
+                    std::vector<double> buf;
+                    const int cnt = p < nc_ ? (nc_ - p + nproc - 1) / nproc : 0;
+                    if (p == 0) buf.swap(mine);
+                    else {
+                        buf.resize(static_cast<size_t>(cnt) * nr_);
+                        if (cnt) MPI_Recv(buf.data(), cnt * nr_, MPI_DOUBLE, p, 346, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                    }
+                    for (int a = 0; a < cnt; a++)
+                        mpicols[p + a * nproc].assign(buf.begin() + static_cast<size_t>(a) * nr_,
+                                                      buf.begin() + static_cast<size_t>(a + 1) * nr_);
+                }
+                const double tg = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                emit("FJPT_jac_mpi_ranks", nproc);
+                emit("FJPT_jac_mpi_assembly_max_s", tmax);
+                emit("FJPT_jac_mpi_assembly_min_s", tmin);
+                emit("FJPT_jac_mpi_total_s", tg);
+                std::cout << "#  --jac-dump-mpi: " << nc_ << " columns on " << nproc << " ranks, assembly " << tmin << " .. "
+                          << tmax << " s per rank, gathered at " << tg << " s\n";
+            } else if (!mine.empty()) {
+                MPI_Send(mine.data(), static_cast<int>(mine.size()), MPI_DOUBLE, 0, 346, MPI_COMM_WORLD);
+            }
+        }
+#endif
         const int nrow = syst.get_nbr_conditions();
         const int ncol = syst.get_nbr_unknowns();
         {   // ⚠ the RHS is what distinguishes "no tail" from "the backbone's
@@ -4069,8 +4139,17 @@ int main(int argc, char** argv)
             int mc_min = 1 << 30, mc_max = 0, mc_ok = 0, mc_outside = 0;
             double mc_vmin = 1e300, mc_vmax = 0.0;
             std::vector<int> mc_row;
+#ifdef TRUMPET_BULK2
+            const auto t_dump0 = std::chrono::steady_clock::now();
+#endif
             for (int c = 0; c < ncol; c++) {
+#ifdef TRUMPET_BULK2
+                Kadath::Array<double> col(nrow);
+                if (!mpicols.empty()) { for (int r = 0; r < nrow; r++) col.set(r) = mpicols[c][r]; }
+                else col = syst.do_col_J(c);
+#else
                 Kadath::Array<double> col(syst.do_col_J(c));
+#endif
                 double cmax = 0.0;
                 if (c < nmatch)
                     for (int r = 0; r < nrow; r++)
@@ -4113,6 +4192,14 @@ int main(int argc, char** argv)
             }
             emit("FJPJ_nnz", double(nnz));
             emit("FJPJ_density", double(nnz) / (double(nrow) * double(ncol)));
+#ifdef TRUMPET_BULK2
+            {
+                const double td = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_dump0).count();
+                emit("FJPT_dump_loop_s", td);
+                std::cout << "#  timing: the dump loop (" << (mpicols.empty() ? "serial assembly + write" : "write of the gathered columns")
+                          << ") " << td << " s\n";
+            }
+#endif
             std::cout << "# bulk Jacobian written to " << jacdump << "\n";
             if (!rowmeta.empty()) {
                 std::ofstream rm(rowmeta + ".rows"), cm(rowmeta + ".cols"),
@@ -4210,7 +4297,17 @@ int main(int argc, char** argv)
             bool threw = false;
             try {
                 for (it = 0; it < newtonmax && !ok; it++) {
+#ifdef TRUMPET_BULK2
+                    const auto t_nw0 = std::chrono::steady_clock::now();
+#endif
                     ok = syst.do_newton(newtonprec, err);
+#ifdef TRUMPET_BULK2
+                    {
+                        const double tn = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_nw0).count();
+                        emit("FJPT_newton_step_s_" + std::to_string(it), tn);
+                        if (rank == 0) std::cout << "#  timing: newton step " << it << " (do_newton, whole call) " << tn << " s\n";
+                    }
+#endif
                     emit("FJPN_err_" + std::to_string(it), err);
                     if (rank == 0)
                         std::cout << "#  newton step " << it

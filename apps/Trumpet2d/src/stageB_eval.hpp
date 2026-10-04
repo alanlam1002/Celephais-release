@@ -10,6 +10,10 @@
 //   coefficients (angular functions) and to the unknowns (the completion's linear map).
 //   The matching: the ansatz at r_m (value and r-derivative, + ln rho_m DJ and its r-derivative), least squares on
 //   each field's padded basis, + the off-lattice images; its Jacobian by a complex step.
+// Round 346 (research round 676, STAGE_B_SPEC section 8): grades 4-5 are unknowns -- the data's completion sections are
+//   empty (nlow = nhigh = 0) and the state map is the identity on the slots -- and an optional ORTH section adds the
+//   fixed truncation-orthogonality rows, O (u - u_anchor), appended after the throat rows (NROW = throat rows + NORTH);
+//   the anchor is the seed they were built at (the fitted W), carried in the section so a run seeded elsewhere keeps them.
 // Data: scripts/stageB_kadath.py export.  Lives in the Celephais clone (apps/Trumpet2d/src) next to the generated stageB_gen.hpp.
 #pragma once
 #include <array>
@@ -73,6 +77,8 @@ typedef void (*EqFn)(const cplx*, cplx, double, double, cplx&, cplx*, cplx*);
 class Eval {
   public:
     int NT = 0, NR = 0, NX = 0, NTH = 0, NK = 0, NE = 0, NU = 0, NROW = 0, NMK = 0, NOFF = 0, NTHM = 0;
+    int NTHR = 0, NORTH = 0;                              // throat rows, orthogonality rows (NROW = NTHR + NORTH)
+    std::vector<double> orth, orthu0;                     // NORTH x NU, row-major; the anchor (the seed they were built at)
     double RM = 0, RX = 0;
     std::vector<double> th, sw, thm;
     std::vector<KeyInfo> keys;
@@ -161,6 +167,17 @@ class Eval {
         mk.resize(NMK);
         for (auto& m : mk) { in >> m.F >> m.d >> m.k >> m.kept; m.off.resize(NOFF); for (double& v : m.off) in >> v; }
         if (!in) throw std::runtime_error("stageB data: truncated " + path);
+        NTHR = NROW;
+        if (in >> tag) {
+            if (tag != "ORTH") throw std::runtime_error("stageB data: expected ORTH or the end, got " + tag);
+            in >> NORTH;
+            orthu0.resize(NU);
+            for (double& v : orthu0) in >> v;
+            orth.resize(static_cast<size_t>(NORTH) * NU);
+            for (double& v : orth) in >> v;
+            if (!in) throw std::runtime_error("stageB data: truncated ORTH in " + path);
+            NROW = NTHR + NORTH;
+        }
     }
 
     // ---------------------------------------------------------------- states
@@ -190,6 +207,7 @@ class Eval {
 
     void complete(State& s, const Compl& C, bool scalar) const
     {
+        if (C.nhigh == 0) return;                         // round 346: no completion (grades 4-5 are unknowns)
         std::vector<cplx> low(C.nlow), llow;
         std::vector<int> ampidx;
         for (int j = 0; j < C.nlow; j++) {
@@ -300,8 +318,8 @@ class Eval {
         bool anyL = false;
         for (int k = 0; k < NK; k++) for (const cplx& v : s.lc[k]) if (v != 0.0) anyL = true;
         const cplx n = s.n;
-        out.assign(NROW, 0.0);
-        if (grad) G->assign(static_cast<size_t>(NROW) * NC, 0.0);
+        out.assign(NTHR, 0.0);
+        if (grad) G->assign(static_cast<size_t>(NTHR) * NC, 0.0);
         const int NV = grad ? NS + 1 : 1;         // slot 0 the value, 1.. the gradient
         std::vector<int> pmin(NE), pmax(NE);
         for (int e = 0; e < NE; e++) { pmin[e] = eqs[e].c1 - 2; pmax[e] = eqs[e].c1 + 3; }
@@ -453,7 +471,7 @@ class Eval {
                     }
             }
             // project this node onto the rows
-            for (int ro = 0; ro < NROW; ro++) {
+            for (int ro = 0; ro < NTHR; ro++) {
                 const RowInfo& R = rows[ro];
                 const EqInfo& Eq = eqs[R.e];
                 const int g = R.g + 2;                 // g from -2
@@ -548,6 +566,17 @@ class Eval {
         return out;
     }
 
+    // the orthogonality rows' values, O (u - u_seed), appended to the throat rows
+    void append_orth(const std::vector<double>& u, std::vector<double>& rv) const
+    {
+        rv.resize(NROW);
+        for (int o = 0; o < NORTH; o++) {
+            double acc = 0.0;
+            for (int q = 0; q < NU; q++) acc += orth[static_cast<size_t>(o) * NU + q] * (u[q] - orthu0[q]);
+            rv[NTHR + o] = acc;
+        }
+    }
+
     // ---------------------------------------------------------------- the public calls
     void values(const std::vector<double>& u, double Jv, std::vector<double>& rv, std::vector<double>& mv)
     {
@@ -555,6 +584,7 @@ class Eval {
         std::vector<cplx> uc(u.begin(), u.end());
         const State s = state(uc);
         throat(s, Jv, rv, nullptr);
+        append_orth(u, rv);
         auto t1 = std::chrono::steady_clock::now();
         const std::vector<cplx> m = matching(s);
         mv.resize(NMK);
@@ -576,7 +606,7 @@ class Eval {
         static int CUfor = -1;
         if (CUfor != NU) { CU = chain(); CUfor = NU; }
         Jr.assign(static_cast<size_t>(NROW) * NU, 0.0);
-        for (int ro = 0; ro < NROW; ro++)
+        for (int ro = 0; ro < NTHR; ro++)
             for (int c = 0; c < NC; c++) {
                 const double g = G[static_cast<size_t>(ro) * NC + c];
                 if (g == 0.0) continue;
@@ -584,6 +614,8 @@ class Eval {
                 double* jr = &Jr[static_cast<size_t>(ro) * NU];
                 for (int q = 0; q < NU; q++) jr[q] += g * cu[q];
             }
+        for (int o = 0; o < NORTH; o++)
+            for (int q = 0; q < NU; q++) Jr[static_cast<size_t>(NTHR + o) * NU + q] = orth[static_cast<size_t>(o) * NU + q];
         Jm.assign(static_cast<size_t>(NMK) * NU, 0.0);
         const double h = 1e-30;
         for (int q = 0; q < NU; q++) {

@@ -372,6 +372,9 @@ double dlange_(const char*, const int*, const int*, const double*, const int*, d
 }
 struct LsolveStats { double rcond_plain = 0, rcond_used = 0, lin0 = 0, lin1 = 0, sigma = 0, ub = 0, bnorm = 0, vx = 0, xnorm = 0,
                      vpred = 0, srow = 0, vdref = 0, dref = 0; int nref = 0; };
+// round 352: the steps applied and sigma_min at each step's state (for --probe-after's rewind)
+static std::vector<std::vector<double>> g_lsolve_X;
+static std::vector<double> g_lsolve_sigma;
 static bool app_newton(Kadath::System_of_eqs& syst, const std::string& mode, double prec, double& err, int it, int rank)
 {
     int nproc = 1;
@@ -547,10 +550,128 @@ static bool app_newton(Kadath::System_of_eqs& syst, const std::string& mode, dou
                   << st.vdref << "\n";
     }
     MPI_Bcast(X.set_data(), n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    {   // round 352: history for --probe-after
+        std::vector<double> xs(n);
+        for (int i = 0; i < n; i++) xs[i] = X(i);
+        g_lsolve_X.push_back(xs);
+        g_lsolve_sigma.push_back(rank == 0 ? st.sigma : 0.0);
+    }
     int conte = 0;
     syst.get_space().xx_to_vars_variable_domains(&syst, X, conte);
     syst.xx_to_vars_delta(X, conte);
     return false;
+}
+
+// ⚠ ROUND 352 (research round 691): --probe-after KMIN PREFIX (with --lsolve; diagnostic).  After the Newton loop: rewind to
+// the step state k* >= KMIN of smallest sigma_min (state_k* = state_N + sum_{i >= k*} X_i, applied as one delta), there
+// the residual, the dense Jacobian, the row-equilibrated B = R0 A and its smallest singular triplet (sigma, u, v) as in
+// app_newton; then READ (i): for s in S the state moved by + s v (one delta, -s v, then restored by + s v), the residual's
+// component u.(R0 F(s)), |R0 F(s)|, max |F(s)|.  Rank 0 writes PREFIX.probe.txt (the table), PREFIX.probe.vec (n rows: R0,
+// u, v, F(0)) and PREFIX.probe.J (the Jacobian, n x n doubles, column-major, binary).
+static void apply_delta(Kadath::System_of_eqs& syst, const std::vector<double>& d)       // var -= d
+{
+    const int n = static_cast<int>(d.size());
+    Kadath::Array<double> X(n);
+    for (int i = 0; i < n; i++) X.set(i) = d[i];
+    int conte = 0;
+    syst.get_space().xx_to_vars_variable_domains(&syst, X, conte);
+    syst.xx_to_vars_delta(X, conte);
+}
+static void app_probe(Kadath::System_of_eqs& syst, int kmin, const std::string& prefix, int rank)
+{
+    int nproc = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &nproc);
+    const int N = static_cast<int>(g_lsolve_X.size());
+    if (N == 0) throw std::runtime_error("--probe-after: no --lsolve steps recorded");
+    const int n = static_cast<int>(g_lsolve_X[0].size());
+    int ks = std::min(kmin, N - 1);
+    if (rank == 0)
+        for (int k = std::min(kmin, N - 1); k < N; k++) if (g_lsolve_sigma[k] < g_lsolve_sigma[ks]) ks = k;
+    MPI_Bcast(&ks, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if (rank == 0) std::cout << "#  probe: rewinding to state " << ks << std::endl;
+    std::vector<double> back(n, 0.0);
+    for (int k = ks; k < N; k++) for (int i = 0; i < n; i++) back[i] -= g_lsolve_X[k][i];
+    apply_delta(syst, back);                                           // var += sum X_i: state k*
+    const Kadath::Array<double> sec(syst.sec_member());
+    if (rank == 0) std::cout << "#  probe: residual at k* evaluated" << std::endl;
+    syst.reset_do_col_J_cache();
+    std::vector<double> mine;
+    for (int c = rank; c < n; c += nproc) {
+        Kadath::Array<double> col(syst.do_col_J(c));
+        for (int r = 0; r < n; r++) mine.push_back(col(r));
+    }
+    if (rank == 0) std::cout << "#  probe: columns assembled" << std::endl;
+    std::vector<double> A, R0(n, 0.0), u(n), v(n), b(n);
+    double sigma = 0;
+    if (rank != 0 && !mine.empty())
+        MPI_Send(mine.data(), static_cast<int>(mine.size()), MPI_DOUBLE, 0, 352, MPI_COMM_WORLD);
+    if (rank == 0) {
+        A.assign(static_cast<size_t>(n) * n, 0.0);
+        for (int p = 0; p < nproc; p++) {
+            std::vector<double> buf;
+            const int cnt = p < n ? (n - p + nproc - 1) / nproc : 0;
+            if (p == 0) buf.swap(mine);
+            else {
+                buf.resize(static_cast<size_t>(cnt) * n);
+                if (cnt) MPI_Recv(buf.data(), cnt * n, MPI_DOUBLE, p, 352, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+            for (int a = 0; a < cnt; a++)
+                std::memcpy(&A[static_cast<size_t>(p + a * nproc) * n], &buf[static_cast<size_t>(a) * n], sizeof(double) * n);
+        }
+        for (int c = 0; c < n; c++) for (int r = 0; r < n; r++) R0[r] = std::max(R0[r], std::fabs(A[static_cast<size_t>(c) * n + r]));
+        for (int r = 0; r < n; r++) R0[r] = R0[r] > 0 ? 1.0 / R0[r] : 1.0;
+        std::vector<double> B(static_cast<size_t>(n) * n);
+        for (int c = 0; c < n; c++) for (int r = 0; r < n; r++) B[static_cast<size_t>(c) * n + r] = R0[r] * A[static_cast<size_t>(c) * n + r];
+        std::vector<int> pB(n);
+        int info = 0;
+        const int one = 1;
+        dgetrf_(&n, &n, B.data(), &n, pB.data(), &info);
+        std::vector<double> w(n);
+        for (int i = 0; i < n; i++) v[i] = std::sin(1.0 + 0.37 * i);
+        auto nrm = [](std::vector<double>& x) { double s = 0; for (double a : x) s += a * a; return std::sqrt(s); };
+        double nv = nrm(v); for (double& x : v) x /= nv;
+        for (int k = 0; k < 40; k++) {
+            w = v;
+            dgetrs_("T", &n, &one, B.data(), &n, pB.data(), w.data(), &n, &info);
+            v = w;
+            dgetrs_("N", &n, &one, B.data(), &n, pB.data(), v.data(), &n, &info);
+            nv = nrm(v); for (double& x : v) x /= nv;
+        }
+        w = v;
+        dgetrs_("T", &n, &one, B.data(), &n, pB.data(), w.data(), &n, &info);
+        const double nw = nrm(w);
+        sigma = 1.0 / nw;
+        for (int i = 0; i < n; i++) { u[i] = w[i] / nw; b[i] = sec(i); }
+        std::ofstream fj(prefix + ".probe.J", std::ios::binary);
+        fj.write(reinterpret_cast<const char*>(A.data()), static_cast<std::streamsize>(A.size() * sizeof(double)));
+        std::ofstream fv(prefix + ".probe.vec");
+        fv << std::setprecision(17);
+        for (int i = 0; i < n; i++) fv << R0[i] << " " << u[i] << " " << v[i] << " " << b[i] << "\n";
+    }
+    MPI_Bcast(v.data(), n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    std::ofstream fo;
+    if (rank == 0) {
+        fo.open(prefix + ".probe.txt");
+        fo << std::setprecision(17);
+        fo << "# probe: " << N << " steps recorded; sigma_min per step:";
+        for (double x : g_lsolve_sigma) fo << " " << x;
+        fo << "\n# state k* = " << ks << " (sigma there at its step " << g_lsolve_sigma[ks] << "); recomputed sigma_min(R0 A) "
+           << sigma << "\n# s  u.(R0 F)  |R0 F|  max|F|\n";
+    }
+    const double S[] = {0.0, 0.01, -0.01, 0.03, -0.03, 0.1, -0.1, 0.3, -0.3, 0.0};
+    for (double s : S) {
+        std::vector<double> d(n);
+        for (int i = 0; i < n; i++) d[i] = -s * v[i];
+        if (s != 0.0) apply_delta(syst, d);                           // var += s v
+        const Kadath::Array<double> F(syst.sec_member());
+        if (rank == 0) {
+            double fu = 0, fn = 0, fm = 0;
+            for (int i = 0; i < n; i++) { const double x = R0[i] * F(i); fu += u[i] * x; fn += x * x; fm = std::max(fm, std::fabs(F(i))); }
+            fo << s << " " << fu << " " << std::sqrt(fn) << " " << fm << "\n";
+            std::cout << "#  probe s " << s << ": u.(R0 F) " << fu << ", |R0 F| " << std::sqrt(fn) << ", max|F| " << fm << "\n";
+        }
+        if (s != 0.0) { for (double& x : d) x = -x; apply_delta(syst, d); }
+    }
 }
 #endif
 
@@ -818,6 +939,7 @@ int main(int argc, char** argv)
     std::string stageA;             // --stageA FILE (round 342): the J = 0 throat closure (columns + C0 / C1), replacing the inherited throat
     std::string stageAdrop;         // --stageA-drop FILE (round 343): C1 matching rows dropped, "F k" per line (k the wavenumber)
     std::string stageB;             // --stageB FILE (round 345): the nonlinear throat closure (stageB_kadath.py export)
+    int probekmin = -1; std::string probeout;   // --probe-after KMIN PREFIX (round 352, with --lsolve)
     std::string lsolve;             // --lsolve MODE (round 351): app-side Newton linear solve (plain / equil / refine / equil+refine)
     std::string stageBxform;        // --stageB-xform FILE (round 349, needs --stageB): the throat unknowns in matching-visible coordinates
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
@@ -1221,6 +1343,7 @@ int main(int argc, char** argv)
         else if (k == "--stageB-rows") stageBrows = argv[++i];
         else if (k == "--stageB-xform") stageBxform = argv[++i];
         else if (k == "--lsolve") lsolve = argv[++i];
+        else if (k == "--probe-after") { probekmin = std::atoi(argv[++i]); probeout = argv[++i]; }
         else if (k == "--stageB-eval-test") { sbtestin = argv[++i]; sbtestout = argv[++i]; }
         else if (k == "--jac-dump-mpi") jacmpi = true;
         else if (k == "--defect-store") defstore = argv[++i];
@@ -5024,6 +5147,12 @@ int main(int argc, char** argv)
                 if (rank == 0)
                     std::cerr << "FATAL in do_newton: " << e.what() << "\n";
             }
+#ifdef TRUMPET_BULK2
+            if (probekmin >= 0 && !threw) {        // round 352: the double-root probe (the state left at k*)
+                if (lsolve.empty()) { std::cerr << "FATAL: --probe-after needs --lsolve\n"; return 1; }
+                app_probe(syst, probekmin, probeout, rank);
+            }
+#endif
             emit("FJPN_threw", threw ? 1.0 : 0.0);
             emit("FJPN_ok", ok ? 1.0 : 0.0);
             emit("FJPN_iters", it);

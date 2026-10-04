@@ -152,6 +152,7 @@ struct EqIntAdd : Kadath::System_of_eqs {
 // the unknowns change; the Jacobian (analytic for the throat rows, a complex step for the matching) only when a lane
 // carries a nonzero derivative of a stage-B unknown.
 #include "stageB_eval.hpp"
+#include "stageB_horizon.hpp"     // round 347: sub-step (iv), the live horizon rows and Komar's beta^phi
 struct SBShared {
     sbe::Eval ev;
     double Jv;
@@ -214,6 +215,57 @@ class Ope_sb : public Kadath::Ope_eq {
         res.set_derivative_lane_count(nl);
         for (int lane = 1; lane < nl; ++lane) res.set_der_d(lane, sign * d[lane]);
         return res;
+    }
+};
+// ⚠ ROUND 347 (research round 678, STAGE_B_SPEC section 9): the J = 0 DEFECT CORRECTION.  b0 = F(x_seed; 0), stored by a
+// J = 0 run (--defect-store FILE), subtracted by every later run (--defect FILE):
+//   bulk rows           (lhs) - DQ<EQ>x<dom> = 0, DQ a constant field holding the seed's own VALUES of lhs (read through a
+//                       def of the same text): Kadath subtracts in configuration space, so at the seed the row is EXACTLY 0;
+//   interfaces / outer  F - DCI<F>, dr(F) - DCID<F> (the seed's own values of F and dr F in every domain);
+//   every Eq_int row    one more part, the constant -b0 (summed last: fl(v - v) = 0), derivative 0.
+// Constants carry a zero derivative, so the Jacobian is unchanged entry by entry.
+class Ope_const : public Kadath::Ope_eq {
+    double v;
+  public:
+    Ope_const(const Kadath::System_of_eqs* s, int dom, double vv) : Kadath::Ope_eq(s, dom, 0), v(vv) {}
+    Kadath::Term_eq action() const override
+    {
+        Kadath::Term_eq res(dom, v);
+        res.set_der_d(0.0);
+        return res;
+    }
+};
+struct EqIntPeek : Kadath::Eq_int {
+    static std::vector<std::unique_ptr<Kadath::Ope_eq>>& parts_of(Kadath::Eq_int& e) { return e.*(&EqIntPeek::parts); }
+    static int& nope_of(Kadath::Eq_int& e) { return e.*(&EqIntPeek::n_ope); }
+};
+struct SysPeek : Kadath::System_of_eqs {
+    static Kadath::Eq_int& eqint(Kadath::System_of_eqs& s, int i) { return *((s.*(&SysPeek::eq_int))[i]); }
+    static int neqint(Kadath::System_of_eqs& s) { return s.*(&SysPeek::neq_int); }
+    static std::string eqint_label(Kadath::System_of_eqs& s, int i) { return std::get<0>((s.*(&SysPeek::eq_int_list))[i]); }
+};
+struct DefectData {
+    std::map<std::string, std::vector<double>> fld;      // "V EQ d", "I F d", "D F d" -> values in Index order
+    std::vector<std::pair<std::string, double>> eqint;  // per Eq_int row: (label, b0)
+    bool ok = false;
+    void read(const std::string& path)
+    {
+        std::ifstream in(path);
+        if (!in) throw std::runtime_error("--defect: cannot read " + path);
+        std::string t;
+        while (in >> t) {
+            if (t == "V" || t == "I" || t == "D") {
+                std::string nm; int d, n; in >> nm >> d >> n;
+                std::vector<double>& v = fld[t + " " + nm + " " + std::to_string(d)];
+                v.resize(n);
+                for (double& x : v) in >> x;
+            } else if (t == "E") {
+                int i; double b; std::string lab; in >> i >> b; std::getline(in, lab);
+                if (i != static_cast<int>(eqint.size())) throw std::runtime_error("--defect: Eq_int rows out of order");
+                eqint.emplace_back(lab.size() > 1 ? lab.substr(1) : std::string(), b);
+            } else throw std::runtime_error("--defect: unknown record " + t);
+        }
+        ok = true;
     }
 };
 #endif
@@ -484,6 +536,11 @@ int main(int argc, char** argv)
     std::string stageB;             // --stageB FILE (round 345): the nonlinear throat closure (stageB_kadath.py export)
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
     std::string sbtestin, sbtestout; // --stageB-eval-test IN OUT (round 345): run the evaluator on states, write rows / Jacobians, exit
+    std::string defstore, defapply;  // --defect-store FILE / --defect FILE (round 347): the J = 0 defect b0, stored / subtracted
+    bool horizonlive = false;       // --horizon-live (round 347, needs --stageB): horizon rows rebuilt on the current state
+    bool komarbphi = false;         // --komar-betaphi (round 347, needs --stageB --komar): Komar's K^r_phi beta^phi term
+    double hzp1 = 0.0, hzp2 = 0.0;  // --hz-perturb E1 E2 (round 347, gate iv-b): BR *= 1 + E1 cos 2th, BT += E2 sin 2th
+    std::string hzdump;             // --hz-dump FILE (round 347): the horizon rebuild's nodes, jets, A0 B0 C0, rows
     bool jacmpi = false;            // --jac-dump-mpi (round 346): the dumped Jacobian's columns assembled across MPI ranks
                                     // (do_newton's round-robin), gathered to rank 0, written in the serial format
 #endif
@@ -875,6 +932,12 @@ int main(int argc, char** argv)
         else if (k == "--stageB-rows") stageBrows = argv[++i];
         else if (k == "--stageB-eval-test") { sbtestin = argv[++i]; sbtestout = argv[++i]; }
         else if (k == "--jac-dump-mpi") jacmpi = true;
+        else if (k == "--defect-store") defstore = argv[++i];
+        else if (k == "--defect") defapply = argv[++i];
+        else if (k == "--horizon-live") horizonlive = true;
+        else if (k == "--komar-betaphi") komarbphi = true;
+        else if (k == "--hz-perturb") { hzp1 = std::stod(argv[++i]); hzp2 = std::stod(argv[++i]); }
+        else if (k == "--hz-dump") hzdump = argv[++i];
 #endif
         else if (k == "--dump-jacobian") jacdump = argv[++i];
         else if (k == "--dump-rowmeta") rowmeta = argv[++i];
@@ -1526,6 +1589,22 @@ int main(int argc, char** argv)
                       << ", sup-norm " << seedperturb << "\n";
     }
 
+#ifdef TRUMPET_BULK2
+    // ⚠ ROUND 347 gate (iv-b): a KNOWN theta-dependent degenerate surface -- BR *= 1 + E1 cos 2th, BT += E2 sin 2th in every
+    // domain (COS_EVEN / SIN_EVEN kept), so 1 - PS^4 e^{2q} (BR^2 + r^2 BT^2) / PH^2 = 0 moves off the sphere
+    if (hzp1 != 0.0 || hzp2 != 0.0) {
+        for (int d = 0; d <= dtop; d++) {
+            const Kadath::Domain* dm = space.get_domain(d);
+            Index ix(dm->get_nbr_points());
+            do {
+                const double th = dm->get_coloc(2)(ix(1));
+                BR.set_domain(d).set(ix) *= 1.0 + hzp1 * std::cos(2.0 * th);
+                BT.set_domain(d).set(ix) += hzp2 * std::sin(2.0 * th);
+            } while (ix.inc());
+        }
+        if (rank == 0) std::cout << "#  --hz-perturb: BR *= 1 + " << hzp1 << " cos 2th, BT += " << hzp2 << " sin 2th\n";
+    }
+#endif
     // ⚠ Read the bases back rather than trusting the std_base_* call: the
     // whole round turns on which basis each field actually carries, and
     // std_base_*_spher() throws on this space, so "the call exists" is not
@@ -2086,6 +2165,8 @@ int main(int argc, char** argv)
     // the backbone, which the throat carries with every amplitude 0.  STATIC: add_cst keeps a reference.
     static std::vector<std::unique_ptr<Scalar>> sacst;
     static std::unique_ptr<SBShared> sbshared;
+    static std::unique_ptr<sbh::HZShared> hzshared;     // round 347: --horizon-live
+    sbh::Ope_kbphi* kbphi = nullptr;                    // round 347: --komar-betaphi (owned by the Komar Eq_int)
     std::map<std::string, std::vector<int>> saprof;     // "<d><F>" -> the columns with a profile there
     int sancol = 0;
     if (!stageA.empty()) {
@@ -2760,6 +2841,79 @@ int main(int argc, char** argv)
                 std::cout << "#  --stageB: " << sbshared->ev.NU << " scalar unknowns SB000.. (J = " << sbshared->Jv
                           << "), data " << stageB << "\n";
         }
+        // ⚠ ROUND 347: the defect correction's data (store: written as the system is registered; apply: read here)
+        static DefectData dfd;
+        static std::ofstream dfs;
+        if (!defstore.empty() && !defapply.empty()) {
+            std::cerr << "FATAL: --defect-store and --defect are alternatives\n";
+            return 1;
+        }
+        if (!defstore.empty() && (havejj ? jjoverride : 0.0) != 0.0) {
+            std::cerr << "FATAL: --defect-store stores F(x_seed; 0): run it at --jj 0\n";
+            return 1;
+        }
+        if (!defstore.empty() && rank == 0) { dfs.open(defstore); dfs << std::setprecision(17); }
+        if (!defapply.empty()) dfd.read(defapply);
+        const bool dfon = !defstore.empty() || dfd.ok;
+        auto dvals = [&](const Kadath::Val_domain& v, int d) {
+            std::vector<double> out;
+            Index ix(space.get_domain(d)->get_nbr_points());
+            do out.push_back(v(ix)); while (ix.inc());
+            return out;
+        };
+        auto dwrite = [&](const char* tag, const std::string& nm, int d, const std::vector<double>& v) {
+            if (rank != 0) return;
+            dfs << tag << ' ' << nm << ' ' << d << ' ' << v.size();
+            for (double x : v) dfs << ' ' << x;
+            dfs << '\n';
+        };
+        auto dfind = [&](const std::string& key) -> const std::vector<double>& {
+            auto it = dfd.fld.find(key);
+            if (it == dfd.fld.end()) throw std::runtime_error("--defect: no stored values for " + key);
+            return it->second;
+        };
+        auto dfill = [&](Kadath::Val_domain& v, int d, const std::vector<double>& vals) {
+            v.allocate_conf();                        // the configuration array (a fetched def may hold coefficients only)
+            Index ix(space.get_domain(d)->get_nbr_points());
+            std::size_t a = 0;
+            do v.set(ix) = vals.at(a++); while (ix.inc());
+            if (a != vals.size()) throw std::runtime_error("--defect: stored point count differs");
+        };
+        // the seed's own values of every field and its dr, in every domain: DCI<F>, DCID<F> (interfaces and outer rows)
+        if (dfon) {
+            const char* fnd[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+            for (const char* F : fnd) {
+                Scalar SI(space), SD(space);
+                SI.annule_hard();
+                SD.annule_hard();
+                for (int d = 0; d <= dtop; d++) {
+                    const std::string vi = std::string("DCIV") + F, vd = std::string("DCIW") + F;
+                    syst.add_def(d, (vi + " = " + F).c_str());
+                    syst.add_def(d, (vd + " = dr(" + F + ")").c_str());
+                    const Kadath::Val_domain& a = syst.give_val_def_scalar_domain(vi.c_str(), d);
+                    const Kadath::Val_domain& b = syst.give_val_def_scalar_domain(vd.c_str(), d);
+                    if (!defstore.empty()) {
+                        dwrite("I", F, d, dvals(a, d));
+                        dwrite("D", F, d, dvals(b, d));
+                    } else {
+                        (void)dvals(a, d);                    // FETCHING IS NOT READING (round 108): force the value
+                        (void)dvals(b, d);
+                        Kadath::Val_domain va(a), vb(b);
+                        dfill(va, d, dfind(std::string("I ") + F + " " + std::to_string(d)));
+                        dfill(vb, d, dfind(std::string("D ") + F + " " + std::to_string(d)));
+                        SI.set_domain(d) = va;
+                        SD.set_domain(d) = vb;
+                    }
+                }
+                if (dfd.ok) {
+                    syst.add_cst((std::string("DCI") + F).c_str(), SI);
+                    syst.add_cst((std::string("DCID") + F).c_str(), SD);
+                }
+            }
+            if (rank == 0)
+                std::cout << "#  --defect" << (dfd.ok ? " (apply " + defapply : "-store (" + defstore)
+                          << "): the seed's F and dr(F) in every domain (DCI<F>, DCID<F>)\n";
+        }
 #endif
         auto wanted_eq = [&](const char* nm) {
             if (jaceqs == "all") return true;
@@ -2843,6 +2997,27 @@ int main(int argc, char** argv)
                         continue;
                     }
 #endif
+#ifdef TRUMPET_BULK2
+                    // ⚠ ROUND 347: the bulk row's defect, the seed's own values of the registered lhs (a def of the same text)
+                    if (dfon) {
+                        const std::string dn = std::string("DCV") + ename;
+                        syst.add_def(d, (dn + " = " + lhs).c_str());
+                        const Kadath::Val_domain& lv = syst.give_val_def_scalar_domain(dn.c_str(), d);
+                        if (!defstore.empty()) {
+                            dwrite("V", ename, d, dvals(lv, d));
+                        } else {
+                            (void)dvals(lv, d);               // force the value (and its basis) before the copy
+                            Scalar S(space);
+                            S.annule_hard();
+                            Kadath::Val_domain vv(lv);
+                            dfill(vv, d, dfind(std::string("V ") + ename + " " + std::to_string(d)));
+                            S.set_domain(d) = vv;
+                            const std::string cn = std::string("DQ") + ename + "x" + static_cast<char>('a' + d);
+                            syst.add_cst(cn.c_str(), S);
+                            lhs = "(" + lhs + ") - " + cn;
+                        }
+                    }
+#endif
                     syst.add_eq_inside(d, (lhs + " = 0").c_str());
                 }
         if (jacinterfaces) {
@@ -2860,6 +3035,14 @@ int main(int argc, char** argv)
                           || (',' + jacfields + ',').find(std::string(",") + fn[q] + ",")
                              != std::string::npos))
                         continue;
+#ifdef TRUMPET_BULK2
+                    if (dfd.ok) {      // ⚠ ROUND 347: the seed's own F, dr F subtracted (DCI, DCID)
+                        syst.add_eq_matching(d, OUTER_BC, (std::string(fn[q]) + " - DCI" + fn[q]).c_str());
+                        syst.add_eq_matching(d, OUTER_BC, (std::string("dr(") + fn[q] + ") - DCID" + fn[q]).c_str());
+                        nif += 2;
+                        continue;
+                    }
+#endif
                     syst.add_eq_matching(d, OUTER_BC, fn[q]);
                     syst.add_eq_matching(d, OUTER_BC,
                                          (std::string("dr(") + fn[q] + ")").c_str());
@@ -3020,6 +3203,32 @@ int main(int argc, char** argv)
             syst.add_eq_mode(1, OUTER_BC, "integ(KMG) * ones", pos_cf, 4.0 * M_PI * komar_m);
             if (rank == 0)
                 std::cout << "#  --komar: integ(KMG) = 4 pi x " << komar_m << " on the domain-1/2 interface (1 row)\n";
+            // ⚠ ROUND 347: Komar's K^r_phi beta^phi term, one more part of the same row (stageB_horizon.hpp, Ope_kbphi)
+            if (komarbphi) {
+                if (stageB.empty()) { std::cerr << "FATAL: --komar-betaphi needs --stageB\n"; return 1; }
+                const int ki = SysPeek::neqint(syst) - 1;
+                Kadath::Eq_int& e = SysPeek::eqint(syst, ki);
+                kbphi = new sbh::Ope_kbphi(&syst, &space, dtop, t.doms[2].r_int, havejj ? jjoverride : 0.0);
+                EqIntPeek::parts_of(e).emplace_back(kbphi);
+                EqIntPeek::nope_of(e)++;
+                const Kadath::Term_eq tv(kbphi->action());
+                if (rank == 0) {
+                    std::cout << "#  --komar-betaphi: + pi int sin^3 Om(R2) int u^2 PH Om / PS^4 du dth (Eq_int row " << ki
+                              << "), R2 = " << std::setprecision(12) << t.doms[2].r_int << ", J = " << (havejj ? jjoverride : 0.0)
+                              << ": the term at the seed " << std::setprecision(17) << tv.get_val_d() << "\n";
+                    const auto& b = kbphi->bphi;
+                    std::cout << "#  --komar-betaphi: beta^phi(R2, th) at th_0, th_mid, th_last: " << b.front() << " "
+                              << b[b.size() / 2] << " " << b.back() << "\n";
+                }
+                if (rank == 0) {
+                    std::cout << "#  --komar-betaphi: beta^phi(R2, th_i), " << kbphi->bphi.size() << " Gauss nodes:";
+                    for (double b : kbphi->bphi) std::cout << " " << std::setprecision(17) << b;
+                    std::cout << "\n";
+                }
+                emit("FJPK_betaphi_term", tv.get_val_d());
+                emit("FJPK_betaphi_R2_mid", kbphi->bphi[kbphi->bphi.size() / 2]);
+                emit("FJPK_betaphi_R2_first", kbphi->bphi.front());
+            }
             emit("FJPJ_komar_row", 1);
         }
         // ⚠ ROUND 336 (research round 665, step 3b): the HORIZON ROWS, l . (B0 F'(r_H) + C0 F(r_H)) = 0 (round 331's ruling;
@@ -3030,6 +3239,41 @@ int main(int argc, char** argv)
         //   `p EQ th w`   w * EQ(r_H, th): a theta quadrature of the equations themselves (diagnostic; round 336 measured
         //                 that Kadath's point value of a PRODUCT carries its truncation -- it is not the Python row)
         // No domain boundary at r_H; J = 0 only (r_H a fixed sphere).
+        // ⚠ ROUND 347: --horizon-live, the rows rebuilt on the current state (stageB_horizon.hpp), in place of the table
+        if (horizonlive) {
+            if (stageB.empty()) { std::cerr << "FATAL: --horizon-live needs --stageB\n"; return 1; }
+            for (const char* x : {"HZQ = multsint(multsint(QF))", "HZT = multsint(multsint(multsint(multsint(QB))))"}) {
+                syst.add_def(1, x);
+                const std::string nm(x, std::string(x).find(' '));
+                const Kadath::Val_domain& kv = syst.give_val_def_scalar_domain(nm.c_str(), 1);
+                Kadath::Index kix(space.get_domain(1)->get_nbr_points());
+                (void)kv(kix);
+            }
+            hzshared.reset(new sbh::HZShared);
+            hzshared->init(&syst, &space, ntheta, havejj ? jjoverride : 0.0, t.doms[1].r_int, t.doms[2].r_int);
+            hzshared->sync();
+            int ntw = 0, nsc = 0;
+            for (std::size_t q = 0; q < hzshared->w.size(); q++) {
+                const bool tw = hzshared->rowsec[q] == 0;
+                EqIntAdd::add_sum(syst, 1, std::string("HZ ") + (tw ? "twist " : "scalar ") + std::to_string(tw ? ntw : nsc),
+                                  {new sbh::Ope_hz(&syst, hzshared.get(), static_cast<int>(q))});
+                (tw ? ntw : nsc)++;
+            }
+            double rmin = 1e300, rmax = 0;
+            for (double r : hzshared->rH) { rmin = std::min(rmin, r); rmax = std::max(rmax, r); }
+            if (rank == 0)
+                std::cout << "#  --horizon-live: " << ntw + nsc << " horizon rows (twist " << ntw << ", scalar " << nsc
+                          << "), the surface on " << hzshared->NTH << " Gauss nodes: r_H " << std::setprecision(17) << rmin
+                          << " .. " << rmax << " (last |f| " << hzshared->fres << "); kernel singular values kept/dropped: twist "
+                          << hzshared->svmin[0] << " / " << hzshared->svmin[1] << ", scalar " << hzshared->svmin[2] << " / "
+                          << hzshared->svmin[3] << "; rebuild " << hzshared->tbuild << " s\n";
+            emit("FJPH_rows", ntw + nsc);
+            emit("FJPH_twist", ntw);
+            emit("FJPH_scalar", nsc);
+            emit("FJPH_rH_min", rmin);
+            emit("FJPH_rH_max", rmax);
+            emit("FJPH_rebuild_s", hzshared->tbuild);
+        } else
         if (!horizontable.empty()) {
             std::ifstream fin(horizontable);
             std::string tag;
@@ -3994,10 +4238,69 @@ int main(int argc, char** argv)
             }
         }
 #ifdef TRUMPET_BULK2
+        // ⚠ ROUND 347: every Eq_int row with a stored b0 != 0 gets one more part, the constant -b0, summed LAST
+        if (dfd.ok) {
+            const int ni = SysPeek::neqint(syst);
+            if (ni != static_cast<int>(dfd.eqint.size())) {
+                std::cerr << "FATAL: --defect: " << ni << " Eq_int rows, the store has " << dfd.eqint.size() << "\n";
+                return 1;
+            }
+            int nap = 0;
+            for (int i = 0; i < ni; i++) {
+                if (SysPeek::eqint_label(syst, i) != dfd.eqint[i].first) {
+                    std::cerr << "FATAL: --defect: Eq_int row " << i << " is '" << SysPeek::eqint_label(syst, i)
+                              << "', the store's '" << dfd.eqint[i].first << "'\n";
+                    return 1;
+                }
+                if (dfd.eqint[i].second == 0.0) continue;
+                Kadath::Eq_int& e = SysPeek::eqint(syst, i);
+                auto& P = EqIntPeek::parts_of(e);
+                P.emplace_back(new Ope_const(&syst, P.empty() ? 0 : P[0]->get_dom(), -dfd.eqint[i].second));
+                EqIntPeek::nope_of(e)++;
+                nap++;
+            }
+            if (rank == 0)
+                std::cout << "#  --defect: " << nap << " of " << ni << " Eq_int rows carry a constant -b0 (the rest store 0)\n";
+            emit("FJPD_eqint_corrected", nap);
+        }
         // ⚠ ROUND 346 (iii-c): the wall time of one residual evaluation (sec_member), every rank
         const auto t_res0 = std::chrono::steady_clock::now();
 #endif
         Kadath::Array<double> bb(syst.sec_member());
+#ifdef TRUMPET_BULK2
+        if (!defstore.empty() && rank == 0) {
+            const int ni = SysPeek::neqint(syst);
+            for (int i = 0; i < ni; i++)
+                dfs << "E " << i << ' ' << bb(i) << ' ' << SysPeek::eqint_label(syst, i) << '\n';
+            dfs.close();
+            std::cout << "#  --defect-store: " << ni << " Eq_int rows and the bulk / interface fields -> " << defstore << "\n";
+        }
+        // ⚠ ROUND 347: --hz-dump, the live horizon's state (for the independent check of gate iv-b)
+        if (hzshared && !hzdump.empty() && rank == 0) {
+            std::ofstream hf(hzdump);
+            hf << std::setprecision(17);
+            const auto& h = *hzshared;
+            hf << "HZ " << h.NT << " " << h.NTH << " " << h.Jv << " " << h.re.size() << " " << h.cF.size() << " " << h.w.size() << "\n";
+            for (int m = 0; m < h.NTH; m++) {
+                hf << "node " << h.th[m] << " " << h.W[m] << " " << h.rH[m];
+                for (double x : h.Jt[m]) hf << " " << x;
+                hf << "\n";
+            }
+            for (std::size_t i = 0; i < h.re.size(); i++) hf << "row " << h.re[i] << " " << h.rk[i] << "\n";
+            for (std::size_t c = 0; c < h.cF.size(); c++) hf << "col " << h.cF[c] << " " << h.cj[c] << "\n";
+            for (const auto* M : {&h.A0, &h.B0, &h.C0}) {
+                hf << "mat";
+                for (double x : *M) hf << " " << x;
+                hf << "\n";
+            }
+            for (std::size_t q = 0; q < h.w.size(); q++) {
+                hf << "w " << h.rowsec[q] << " " << h.sc[q] << " " << h.val[q];
+                for (double x : h.w[q]) hf << " " << x;
+                hf << "\n";
+            }
+            std::cout << "#  --hz-dump: " << hzdump << "\n";
+        }
+#endif
 #ifdef TRUMPET_BULK2
         {
             const double tr = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_res0).count();
@@ -4193,6 +4496,22 @@ int main(int argc, char** argv)
             emit("FJPJ_nnz", double(nnz));
             emit("FJPJ_density", double(nnz) / (double(nrow) * double(ncol)));
 #ifdef TRUMPET_BULK2
+            if (hzshared && rank == 0) {
+                std::cout << "#  --horizon-live cost: " << hzshared->nbuild << " rebuilds " << hzshared->tbuild << " s; "
+                          << hzshared->nder << " derivative evaluations " << hzshared->tder << " s; " << hzshared->ncall
+                          << " row calls; r_H spread " << hzshared->xHspread << "\n";
+                emit("FJPH_nbuild", hzshared->nbuild);
+                emit("FJPH_tbuild", hzshared->tbuild);
+                emit("FJPH_nder", hzshared->nder);
+                emit("FJPH_tder", hzshared->tder);
+            }
+            if (kbphi && rank == 0) {
+                std::cout << "#  --komar-betaphi cost: " << kbphi->ncall << " evaluations " << kbphi->tcost << " s\n";
+                emit("FJPK_tcost", kbphi->tcost);
+            }
+#endif
+
+#ifdef TRUMPET_BULK2
             {
                 const double td = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_dump0).count();
                 emit("FJPT_dump_loop_s", td);
@@ -4322,6 +4641,22 @@ int main(int argc, char** argv)
             emit("FJPN_threw", threw ? 1.0 : 0.0);
             emit("FJPN_ok", ok ? 1.0 : 0.0);
             emit("FJPN_iters", it);
+#ifdef TRUMPET_BULK2
+            if (hzshared && rank == 0) {
+                std::cout << "#  --horizon-live cost: " << hzshared->nbuild << " rebuilds " << hzshared->tbuild << " s; "
+                          << hzshared->nder << " derivative evaluations " << hzshared->tder << " s; " << hzshared->ncall
+                          << " row calls; r_H spread " << hzshared->xHspread << "\n";
+                emit("FJPH_nbuild", hzshared->nbuild);
+                emit("FJPH_tbuild", hzshared->tbuild);
+                emit("FJPH_nder", hzshared->nder);
+                emit("FJPH_tder", hzshared->tder);
+            }
+            if (kbphi && rank == 0) {
+                std::cout << "#  --komar-betaphi cost: " << kbphi->ncall << " evaluations " << kbphi->tcost << " s\n";
+                emit("FJPK_tcost", kbphi->tcost);
+            }
+#endif
+
             emit("FJPN_err", err);
             if (threw) { MPI_Finalize(); return 17; }
 

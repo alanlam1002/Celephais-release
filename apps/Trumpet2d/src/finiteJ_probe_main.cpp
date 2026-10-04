@@ -163,7 +163,42 @@ struct SBShared {
     bool hv = false, hj = false;
     long nval = 0, njac = 0;
     double tv = 0, tj = 0;
+    // ⚠ ROUND 349 (research round 680, STAGE_B_SPEC section 11): --stageB-xform FILE, the throat unknowns in matching-visible
+    // coordinates.  The Kadath scalars are then y, the amplitudes u = uref + M y (M fixed, built at the J = 0 fitted seed by
+    // scripts/stageB_xform.py); the evaluator still sees u, its Jacobians are chained, Jr M and Jm M.  Without the flag y = u.
+    bool xf = false;
+    std::vector<double> y, M, Minv, uref, JrM, JmM;
     SBShared(const std::string& p, double J) : ev(p), Jv(J) {}
+    void read_xform(const std::string& path)
+    {
+        std::ifstream in(path);
+        if (!in) throw std::runtime_error("--stageB-xform: cannot read " + path);
+        std::string tag; int n = 0;
+        in >> tag >> n;
+        if (tag != "XFORM" || n != ev.NU) throw std::runtime_error("--stageB-xform: expected XFORM " + std::to_string(ev.NU));
+        const size_t NN = static_cast<size_t>(n) * n;
+        uref.resize(n); M.resize(NN); Minv.resize(NN);
+        in >> tag; for (int q = 0; q < n; q++) in >> uref[q];
+        in >> tag; for (size_t k = 0; k < NN; k++) in >> M[k];
+        in >> tag; for (size_t k = 0; k < NN; k++) in >> Minv[k];
+        if (!in) throw std::runtime_error("--stageB-xform: truncated " + path);
+        xf = true;
+    }
+    // the Kadath seed: y0 = Minv (u0 - uref) with the transform, u0 otherwise
+    std::vector<double> kadath_seed() const
+    {
+        const int NU = ev.NU;
+        std::vector<double> s(NU);
+        for (int q = 0; q < NU; q++) s[q] = ev.unk[q].u0;
+        if (!xf) return s;
+        std::vector<double> y0(NU, 0.0);
+        for (int a = 0; a < NU; a++) {
+            double acc = 0.0;
+            for (int q = 0; q < NU; q++) acc += Minv[static_cast<size_t>(a) * NU + q] * (s[q] - uref[q]);
+            y0[a] = acc;
+        }
+        return y0;
+    }
     void bind(const Kadath::System_of_eqs* s, int b)
     {
         sys = s; base = b; terms.resize(ev.NU);
@@ -171,17 +206,60 @@ struct SBShared {
     }
     void sync()
     {
-        bool same = static_cast<int>(u.size()) == ev.NU;
+        const int NU = ev.NU;
+        bool same = static_cast<int>(y.size()) == NU;
         if (same)
-            for (int q = 0; q < ev.NU; q++) if (terms[q]->get_val_d() != u[q]) { same = false; break; }
+            for (int q = 0; q < NU; q++) if (terms[q]->get_val_d() != y[q]) { same = false; break; }
         if (!same) {
-            u.resize(ev.NU);
-            for (int q = 0; q < ev.NU; q++) u[q] = terms[q]->get_val_d();
+            y.resize(NU);
+            for (int q = 0; q < NU; q++) y[q] = terms[q]->get_val_d();
+            if (!xf) u = y;
+            else {
+                u.assign(NU, 0.0);
+                for (int q = 0; q < NU; q++) {
+                    double acc = uref[q];
+                    const double* mq = &M[static_cast<size_t>(q) * NU];
+                    for (int a = 0; a < NU; a++) acc += mq[a] * y[a];
+                    u[q] = acc;
+                }
+            }
             hv = hj = false;
         }
         if (!hv) { ev.values(u, Jv, rv, mv); hv = true; nval++; tv += ev.tval + ev.tmatch; }
     }
-    void needjac() { if (!hj) { ev.jacobian(u, Jv, Jr, Jm); hj = true; njac++; tj += ev.tjac; } }
+    static void chainM(const std::vector<double>& A, int nr, const std::vector<double>& Mm, int NU, std::vector<double>& out)
+    {
+        out.assign(static_cast<size_t>(nr) * NU, 0.0);
+        for (int r = 0; r < nr; r++) {
+            const double* ar = &A[static_cast<size_t>(r) * NU];
+            double* o = &out[static_cast<size_t>(r) * NU];
+            for (int q = 0; q < NU; q++) {
+                const double v = ar[q];
+                if (v == 0.0) continue;
+                const double* mq = &Mm[static_cast<size_t>(q) * NU];
+                for (int a = 0; a < NU; a++) o[a] += v * mq[a];
+            }
+        }
+    }
+    void needjac()
+    {
+        if (hj) return;
+        ev.jacobian(u, Jv, Jr, Jm); hj = true; njac++; tj += ev.tjac;
+        if (xf) {
+            chainM(Jr, ev.NROW, M, ev.NU, JrM); Jr.swap(JrM);
+            chainM(Jm, ev.NMK, M, ev.NU, JmM); Jm.swap(JmM);
+        }
+    }
+    // the stage-B unknowns: index, type, key, slot, u, the data's seed u0, the Kadath scalar (y; = u without the transform)
+    void write_sb(const std::string& path)
+    {
+        sync();
+        std::ofstream fs(path);
+        fs << std::setprecision(17);
+        for (int q = 0; q < ev.NU; q++)
+            fs << q << " " << ev.unk[q].t << " " << ev.unk[q].key << " " << ev.unk[q].ia << " " << u[q] << " " << ev.unk[q].u0
+               << " " << y[q] << "\n";
+    }
 };
 class Ope_sb : public Kadath::Ope_eq {
     SBShared* sh;
@@ -534,6 +612,7 @@ int main(int argc, char** argv)
     std::string stageA;             // --stageA FILE (round 342): the J = 0 throat closure (columns + C0 / C1), replacing the inherited throat
     std::string stageAdrop;         // --stageA-drop FILE (round 343): C1 matching rows dropped, "F k" per line (k the wavenumber)
     std::string stageB;             // --stageB FILE (round 345): the nonlinear throat closure (stageB_kadath.py export)
+    std::string stageBxform;        // --stageB-xform FILE (round 349, needs --stageB): the throat unknowns in matching-visible coordinates
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
     std::string sbtestin, sbtestout; // --stageB-eval-test IN OUT (round 345): run the evaluator on states, write rows / Jacobians, exit
     std::string defstore, defapply;  // --defect-store FILE / --defect FILE (round 347): the J = 0 defect b0, stored / subtracted
@@ -933,6 +1012,7 @@ int main(int argc, char** argv)
         else if (k == "--stageA-drop") stageAdrop = argv[++i];
         else if (k == "--stageB") stageB = argv[++i];
         else if (k == "--stageB-rows") stageBrows = argv[++i];
+        else if (k == "--stageB-xform") stageBxform = argv[++i];
         else if (k == "--stageB-eval-test") { sbtestin = argv[++i]; sbtestout = argv[++i]; }
         else if (k == "--jac-dump-mpi") jacmpi = true;
         else if (k == "--defect-store") defstore = argv[++i];
@@ -1080,6 +1160,11 @@ int main(int argc, char** argv)
         }
         MPI_Finalize();
         return 0;
+    }
+    if (!stageBxform.empty() && stageB.empty()) {     // round 349
+        if (rank == 0) std::cerr << "FATAL: --stageB-xform needs --stageB\n";
+        MPI_Finalize();
+        return 1;
     }
     if (!stageB.empty() && (!stageA.empty() || !thetapad || jacmatch || jacinner || jacrec || balancel2 || maximality
                             || g2u2 || physh || seedmatch)) {
@@ -2831,8 +2916,10 @@ int main(int argc, char** argv)
             static std::vector<double> sbu;
             sbu.resize(sbshared->ev.NU);
             char nm[16];
+            if (!stageBxform.empty()) sbshared->read_xform(stageBxform);
+            const std::vector<double> sbs = sbshared->kadath_seed();
             for (int q = 0; q < sbshared->ev.NU; q++) {
-                sbu[q] = sbshared->ev.unk[q].u0;
+                sbu[q] = sbs[q];
                 std::snprintf(nm, sizeof nm, "SB%03d", q);
                 syst.add_var(nm, sbu[q]);
             }
@@ -4703,6 +4790,7 @@ int main(int argc, char** argv)
                             fo << std::setprecision(17);
                             for (int r = 0; r < rr.get_size(0); r++) fo << rr(r) << "\n";
                         }
+                        if (sbshared && rank == 0) sbshared->write_sb(solveout + ".sb" + std::to_string(it));   // round 349
                         if (hzshared && rank == 0)
                             std::cout << "#  solve: after step " << it << " max|residual| " << std::setprecision(6)
                                       << max(fabs(rr)) << ", x_H change at the last rebuild " << hzshared->drH << "\n";
@@ -4743,13 +4831,7 @@ int main(int argc, char** argv)
                         ff << "\n";
                     } while (ix.inc());
                 }
-                if (sbshared) {
-                    std::ofstream fs(solveout + ".sb");
-                    fs << std::setprecision(17);
-                    for (int q = 0; q < sbshared->ev.NU; q++)
-                        fs << q << " " << sbshared->ev.unk[q].t << " " << sbshared->ev.unk[q].key << " " << sbshared->ev.unk[q].ia
-                           << " " << sbshared->terms[q]->get_val_d() << " " << sbshared->ev.unk[q].u0 << "\n";
-                }
+                if (sbshared) sbshared->write_sb(solveout + ".sb");   // round 349: u, u0, and the Kadath scalar (y)
                 if (hzshared) {
                     std::ofstream fh(solveout + ".hz");
                     fh << std::setprecision(17);

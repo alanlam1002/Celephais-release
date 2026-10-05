@@ -940,6 +940,7 @@ int main(int argc, char** argv)
     std::string stageAdrop;         // --stageA-drop FILE (round 343): C1 matching rows dropped, "F k" per line (k the wavenumber)
     std::string stageB;             // --stageB FILE (round 345): the nonlinear throat closure (stageB_kadath.py export)
     int probekmin = -1; std::string probeout;   // --probe-after KMIN PREFIX (round 352, with --lsolve)
+    std::string pv2coeffs, pv2dump;   // --pv2-coeffs FILE / --pv2-dump FILE (puncture v2, phase 2a, gate P0)
     std::string lsolve;             // --lsolve MODE (round 351): app-side Newton linear solve (plain / equil / refine / equil+refine)
     std::string stageBxform;        // --stageB-xform FILE (round 349, needs --stageB): the throat unknowns in matching-visible coordinates
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
@@ -1343,6 +1344,8 @@ int main(int argc, char** argv)
         else if (k == "--stageB-rows") stageBrows = argv[++i];
         else if (k == "--stageB-xform") stageBxform = argv[++i];
         else if (k == "--lsolve") lsolve = argv[++i];
+        else if (k == "--pv2-coeffs") pv2coeffs = argv[++i];
+        else if (k == "--pv2-dump") pv2dump = argv[++i];
         else if (k == "--probe-after") { probekmin = std::atoi(argv[++i]); probeout = argv[++i]; }
         else if (k == "--stageB-eval-test") { sbtestin = argv[++i]; sbtestout = argv[++i]; }
         else if (k == "--jac-dump-mpi") jacmpi = true;
@@ -2708,6 +2711,84 @@ int main(int argc, char** argv)
             if (rank == 0)
                 std::cout << "#  --amax-table: W" << nm << " registered, domain 0 range " << wmin << " .. " << wmax
                           << " (1 elsewhere)\n";
+        }
+    }
+    // ⚠ PUNCTURE V2 (research rounds 701-702, phase 2a, gate P0): --pv2-coeffs FILE, the backbone as precomputed
+    // coefficients (scripts/pv2_coeffs.py: one row per domain and radial collocation index, "dom i r c1 c2 ..."), each
+    // registered as a constant field PV<name> (add_cst; never differentiated), equal on every theta node.  The
+    // compactified domain's r = inf row is 'inf' in the file (R diverges there): stored as 0, a placeholder the
+    // emitted equations' domain-2 scaling must not read.  --pv2-dump FILE writes back every PV<name> at every
+    // collocation point AS THE PARSER EVALUATES IT (give_ope -> action -> value), for the gate.
+    static std::vector<std::unique_ptr<Scalar>> pv2c;
+    std::vector<std::string> pv2names;
+    if (!pv2coeffs.empty()) {
+        std::ifstream fin(pv2coeffs);
+        std::string line;
+        std::getline(fin, line);
+        std::string w;
+        {
+            std::istringstream h2(line);
+            std::vector<std::string> tok;
+            while (h2 >> w) tok.push_back(w);
+            auto it = std::find(tok.begin(), tok.end(), "r");
+            if (it == tok.end()) { std::cerr << "FATAL: --pv2-coeffs header lacks 'r'\n"; return 1; }
+            pv2names.assign(it + 1, tok.end());
+        }
+        std::map<std::pair<int, int>, std::vector<double>> rowv;
+        while (std::getline(fin, line)) {
+            std::istringstream ls(line);
+            int d = 0, i = 0;
+            std::string rs;
+            ls >> d >> i >> rs;
+            std::vector<double> v;
+            for (size_t k = 0; k < pv2names.size(); k++) {
+                std::string tkn;
+                ls >> tkn;
+                v.push_back(tkn == "inf" ? 0.0 : std::stod(tkn));
+            }
+            rowv[{d, i}] = v;
+        }
+        for (size_t k = 0; k < pv2names.size(); k++) {
+            pv2c.emplace_back(new Scalar(space));
+            Scalar& S = *pv2c.back();
+            for (int d = 0; d < ndom; d++) {
+                const Kadath::Domain* dm = space.get_domain(d);
+                Val_domain& vs = S.set_domain(d);
+                vs.allocate_conf();
+                Index idx(dm->get_nbr_points());
+                do {
+                    auto f = rowv.find({d, idx(0)});
+                    if (f == rowv.end()) {
+                        std::cerr << "FATAL: --pv2-coeffs: no row for domain " << d << " radial index " << idx(0) << "\n";
+                        return 1;
+                    }
+                    vs.set(idx) = f->second[k];
+                } while (idx.inc());
+            }
+            S.std_base();
+            syst.add_cst(("PV" + pv2names[k]).c_str(), S);
+        }
+        if (rank == 0)
+            std::cout << "#  --pv2-coeffs: " << pv2names.size() << " backbone coefficients PV<name> registered from " << pv2coeffs
+                      << " (" << rowv.size() << " radial rows)\n";
+        if (!pv2dump.empty() && rank == 0) {
+            std::ofstream fo(pv2dump);
+            fo << std::setprecision(17) << "# dom i j r name value (as the parser evaluates PV<name>)\n";
+            for (size_t k = 0; k < pv2names.size(); k++) {
+                for (int d = 0; d < ndom; d++) {
+                    char nrm[Kadath::LMAX];
+                    Kadath::trim_spaces(nrm, ("PV" + pv2names[k]).c_str());
+                    const Kadath::Term_eq T = syst.give_ope(d, nrm)->action();
+                    const Kadath::Val_domain& v = sbh::vd(T.get_val_t(), d);
+                    const Kadath::Domain* dm = space.get_domain(d);
+                    Index idx(dm->get_nbr_points());
+                    do {
+                        fo << d << " " << idx(0) << " " << idx(1) << " " << dm->get_radius()(idx) << " " << pv2names[k] << " "
+                           << v(idx) << "\n";
+                    } while (idx.inc());
+                }
+            }
+            std::cout << "#  --pv2-dump: -> " << pv2dump << "\n";
         }
     }
 #endif

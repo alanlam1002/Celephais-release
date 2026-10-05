@@ -5249,6 +5249,27 @@ int main(int argc, char** argv)
                 }
                 std::cout << "#  --dump-fields-post: written to "
                           << fieldspost << "\n";
+#ifdef TRUMPET_BULK2
+                // ⚠ ROUND 362 (research round 722): under --pv2 the unknowns are the remainders PU PF PB (PS PH BR hold the
+                // seed), so the post-delta state is also written as FILE.rem (PU PF QF PB BT QB, as --solve-out's .rem) and
+                // the stage-B scalars as FILE.sb -- a Jacobian null vector applied as --newton-delta, read back on the nodes.
+                if (pv2on) {
+                    std::ofstream fr(fieldspost + ".rem");
+                    fr << "# remainders AFTER --newton-delta (--pv2)\nfields PU PF QF PB BT QB\n" << std::setprecision(17);
+                    const Scalar* rp[6] = {pv2rem[0], pv2rem[1], &QF, pv2rem[2], &BT, &QB};
+                    for (int d = 0; d <= dtop; d++) {
+                        Index ix(space.get_domain(d)->get_nbr_points());
+                        do {
+                            fr << "val " << d << " " << ix(0) << " " << ix(1) << " " << t.pts[d][ix(0)].r << " "
+                               << space.get_domain(d)->get_coloc(2)(ix(1));
+                            for (int q = 0; q < 6; q++) fr << " " << (*rp[q])(d)(ix);
+                            fr << "\n";
+                        } while (ix.inc());
+                    }
+                    if (sbshared) sbshared->write_sb(fieldspost + ".sb");
+                    std::cout << "#  --dump-fields-post (--pv2): also " << fieldspost << ".{rem,sb}\n";
+                }
+#endif
             }
         }
 #ifdef TRUMPET_BULK2

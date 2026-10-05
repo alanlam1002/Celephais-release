@@ -996,6 +996,9 @@ int main(int argc, char** argv)
     std::string pv2dm;              // --pv2-dm FILE (round 357, needs --pv2 --stageB): the delta-M throat row (scripts/stageB_dm.py)
     std::string pv2p0b;             // --pv2-p0b FILE (round 357, gate P0b): the reconstructions against the seed's own fields
     std::string eqintout;           // --eqint-out FILE (round 357, gate P0b): every Eq_int row's value at the registered state
+    std::string pv2eqs;             // --pv2-eqs FILE (round 358): the emitted remainder equations (scripts/pv2_emit.py)
+    std::string pv2state;           // --pv2-state FILE (round 358, gate E0): the six unknowns set to polynomial states
+    std::string pv2e0;              // --pv2-e0 FILE (round 358, gate E0): every emitted atom and equation at every node
     std::string lsolve;             // --lsolve MODE (round 351): app-side Newton linear solve (plain / equil / refine / equil+refine)
     std::string stageBxform;        // --stageB-xform FILE (round 349, needs --stageB): the throat unknowns in matching-visible coordinates
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
@@ -1406,6 +1409,9 @@ int main(int argc, char** argv)
         else if (k == "--pv2-dm") pv2dm = argv[++i];
         else if (k == "--pv2-p0b") pv2p0b = argv[++i];
         else if (k == "--eqint-out") eqintout = argv[++i];
+        else if (k == "--pv2-eqs") pv2eqs = argv[++i];
+        else if (k == "--pv2-state") pv2state = argv[++i];
+        else if (k == "--pv2-e0") pv2e0 = argv[++i];
         else if (k == "--probe-after") { probekmin = std::atoi(argv[++i]); probeout = argv[++i]; }
         else if (k == "--stageB-eval-test") { sbtestin = argv[++i]; sbtestout = argv[++i]; }
         else if (k == "--jac-dump-mpi") jacmpi = true;
@@ -2685,6 +2691,48 @@ int main(int argc, char** argv)
             }
             if (bad) { std::cerr << "FATAL: --pv2: " << bad << " non-finite remainder seed values\n"; return 1; }
             PU.std_base(); PF.std_base(); PB.std_base();
+            // ⚠ ROUND 358 (gate E0): --pv2-state FILE, the six unknowns set to POLYNOMIAL states, exactly representable:
+            // lines "F d i j a" -> F = sum a T_i(xi) Th_j(theta) in domain d (xi the domain's numerical radial coordinate;
+            // Th_j = cos 2j th for PU PF PB QF, sin 2(j+1) th for BT, cos (2j+1) th for QB); a line "F d decay m" multiplies
+            // domain d's F by (1 - xi)^m (vanishing at r = inf in the compactified domain)
+            if (!pv2state.empty()) {
+                std::map<std::string, Scalar*> tgt = {{"PU", &PU}, {"PF", &PF}, {"PB", &PB}, {"QF", &QF}, {"BT", &BT}, {"QB", &QB}};
+                std::map<std::string, std::map<int, std::vector<std::array<double, 3>>>> cf;
+                std::map<std::string, std::map<int, int>> dec;
+                std::ifstream fs(pv2state);
+                std::string F, w2;
+                int d = 0;
+                while (fs >> F >> d >> w2) {
+                    if (w2 == "decay") { int m; fs >> m; dec[F][d] = m; continue; }
+                    int j; double a; fs >> j >> a;
+                    cf[F][d].push_back({static_cast<double>(std::stoi(w2)), static_cast<double>(j), a});
+                }
+                for (auto& T : tgt) {
+                    Scalar& S = *T.second;
+                    for (int dd = 0; dd < ndom; dd++) {
+                        const Kadath::Domain* dm = space.get_domain(dd);
+                        S.set_domain(dd).allocate_conf();
+                        Index ix(dm->get_nbr_points());
+                        do {
+                            const double xi = dm->get_coloc(1)(ix(0)), tt = dm->get_coloc(2)(ix(1));
+                            double v = 0;
+                            for (const auto& c : cf[T.first][dd]) {
+                                const int i = static_cast<int>(c[0]), j = static_cast<int>(c[1]);
+                                const double Ti = std::cos(i * std::acos(std::max(-1.0, std::min(1.0, xi))));
+                                const double Th = T.first == "BT" ? std::sin(2.0 * (j + 1) * tt)
+                                                : T.first == "QB" ? std::cos((2.0 * j + 1) * tt) : std::cos(2.0 * j * tt);
+                                v += c[2] * Ti * Th;
+                            }
+                            if (dec[T.first].count(dd)) v *= std::pow(1.0 - xi, dec[T.first][dd]);
+                            S.set_domain(dd).set(ix) = v;
+                        } while (ix.inc());
+                    }
+                }
+                PU.std_base(); PF.std_base(); PB.std_base(); QF.std_base();
+                BT.std_anti_base(1);
+                QB.std_anti_base();
+                if (rank == 0) std::cout << "#  --pv2-state: the six unknowns set from " << pv2state << "\n";
+            }
             fn[0] = "PU"; fn[1] = "PF"; fn[3] = "PB";
             pv2rem[0] = &PU; pv2rem[1] = &PF; pv2rem[2] = &PB;
             fp[0] = &PU; fp[1] = &PF; fp[3] = &PB;
@@ -3632,6 +3680,126 @@ int main(int argc, char** argv)
                           << "): the seed's F and dr(F) in every domain (DCI<F>, DCID<F>)\n";
         }
 #endif
+#ifdef TRUMPET_BULK2
+        // ⚠ ROUND 358 (research rounds 704, 708): --pv2-eqs FILE, the remainder equations (scripts/pv2_emit.py, option (b)).
+        // Pointwise constants PXS = sin th (SIN_ODD), PXC = cos th (COS_ODD), PXR = r, PXU = 1/r (both 0 at r = inf; PXR is
+        // never read in domain 2), then per group the emitted defs (each READ after registration: round 108's contract), then
+        // the six rows under the production's names and registration wrappers (EQFN sin^2-weighted, ESHT multsint under
+        // --esht-nt2, domain 0 x W<eq> under --amax-table).
+        static std::vector<std::unique_ptr<Scalar>> pv2px;
+        std::vector<std::pair<std::vector<int>, std::vector<std::pair<std::string, std::string>>>> pv2grp;   // domains, eqs
+        std::vector<std::vector<std::pair<std::string, std::string>>> pv2gdefs;
+        if (!pv2eqs.empty()) {
+            if (!pv2on) { std::cerr << "FATAL: --pv2-eqs needs --pv2\n"; return 1; }
+            const char* pxn[4] = {"PXS", "PXC", "PXR", "PXU"};
+            for (int k = 0; k < 4; k++) {
+                pv2px.emplace_back(new Scalar(space));
+                Scalar& X = *pv2px.back();
+                for (int d = 0; d < ndom; d++) {
+                    const Kadath::Domain* dm = space.get_domain(d);
+                    X.set_domain(d).allocate_conf();
+                    Index ix(dm->get_nbr_points());
+                    do {
+                        const double rr = dm->get_radius()(ix), tt = dm->get_coloc(2)(ix(1));
+                        X.set_domain(d).set(ix) = k == 0 ? std::sin(tt) : k == 1 ? std::cos(tt)
+                                                : k == 2 ? (std::isfinite(rr) ? rr : 0.0) : (std::isfinite(rr) ? 1.0 / rr : 0.0);
+                    } while (ix.inc());
+                }
+                if (k == 0) X.std_base(1); else if (k == 1) X.std_anti_base(); else X.std_base();
+                syst.add_cst(pxn[k], X);
+            }
+            std::ifstream fe(pv2eqs);
+            std::string ln;
+            while (std::getline(fe, ln)) {
+                std::istringstream is(ln);
+                std::string tag; is >> tag;
+                if (tag == "G") {
+                    std::string g; is >> g;
+                    std::vector<int> dl; int d; while (is >> d) dl.push_back(d);
+                    pv2grp.push_back({dl, {}});
+                    pv2gdefs.emplace_back();
+                } else if (tag == "D") {
+                    std::string nm; is >> nm;
+                    std::string tx; std::getline(is, tx);
+                    pv2gdefs.back().emplace_back(nm, tx.substr(tx.find_first_not_of(' ')));
+                } else if (tag == "E") {
+                    std::string pn, nm; is >> pn >> nm;
+                    pv2grp.back().second.emplace_back(pn, nm);
+                }
+            }
+            int ndf = 0;
+            const auto t_d0 = std::chrono::steady_clock::now();
+            for (std::size_t g = 0; g < pv2grp.size(); g++)
+                for (int d : pv2grp[g].first) {
+                    if (d > dtop) continue;
+                    for (const auto& df : pv2gdefs[g]) {
+                        syst.add_def(d, (df.first + " = " + df.second).c_str());
+                        const Kadath::Val_domain& kv = syst.give_val_def_scalar_domain(df.first.c_str(), d);
+                        Kadath::Index kix(space.get_domain(d)->get_nbr_points());
+                        (void)kv(kix);
+                        ndf++;
+                    }
+                }
+            const double tdf = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_d0).count();
+            int neq = 0;
+            for (std::size_t g = 0; g < pv2grp.size(); g++)
+                for (int d : pv2grp[g].first) {
+                    if (d > dtop) continue;
+                    for (const auto& e : pv2grp[g].second) {
+                        std::string lhs = e.second;
+                        if (e.first == "ESHT" && eshtnt2) lhs = "multsint(" + lhs + ")";
+                        if (e.first == "EQFN" && eqfnsin2) lhs = "multsint(multsint(" + lhs + "))";
+                        if (e.first == "EQFN" && eqfndrop) lhs = "multsint(" + lhs + ")";
+                        if (d == 0 && amaxhas.count(e.first)) lhs = "W" + e.first + " * " + lhs;
+                        syst.add_eq_inside(d, (lhs + " = 0").c_str());
+                        neq++;
+                        if (rank == 0 && (d == 0 || d == 2))
+                            std::cout << "#  --pv2-eqs: domain " << d << " " << e.first << " registered as " << lhs << "\n";
+                    }
+                }
+            emit("FJPV_eqs_defs", ndf);
+            emit("FJPV_eqs_rows", neq);
+            if (rank == 0)
+                std::cout << "#  --pv2-eqs: " << ndf << " defs registered and read in " << tdf << " s; " << neq
+                          << " equation registrations (add_eq_inside) from " << pv2eqs << "\n";
+            // ⚠ GATE E0: every emitted def that is an ATOM or an equation, and the unknowns, at every node of each group
+            if (!pv2e0.empty() && rank == 0) {
+                std::ofstream fo(pv2e0);
+                fo << std::setprecision(17);
+                for (std::size_t g = 0; g < pv2grp.size(); g++) {
+                    std::vector<std::string> nm = {"PU", "PF", "PB", "BT", "QF", "QB"};
+                    for (const auto& df : pv2gdefs[g])
+                        if (df.second.rfind("dr(", 0) == 0 || df.second.rfind("dt(", 0) == 0 || df.second.rfind("divsint(", 0) == 0
+                            || df.second.rfind("multr(", 0) == 0)
+                            nm.push_back(df.first);
+                    for (const auto& e : pv2grp[g].second) nm.push_back(e.second);
+                    for (int d : pv2grp[g].first) {
+                        if (d > dtop) continue;
+                        fo << "H " << d;
+                        for (const auto& n : nm) fo << " " << n;
+                        fo << "\n";
+                        std::vector<const Kadath::Val_domain*> vv;
+                        std::vector<std::unique_ptr<Kadath::Term_eq>> keep;
+                        for (const auto& n : nm) {
+                            char nrm[Kadath::LMAX];
+                            Kadath::trim_spaces(nrm, n.c_str());
+                            keep.emplace_back(new Kadath::Term_eq(syst.give_ope(d, nrm)->action()));
+                            vv.push_back(&sbh::vd(keep.back()->get_val_t(), d));
+                        }
+                        const Kadath::Domain* dm = space.get_domain(d);
+                        Index ix(dm->get_nbr_points());
+                        do {
+                            fo << "N " << d << " " << ix(0) << " " << ix(1) << " " << dm->get_coloc(1)(ix(0)) << " "
+                               << dm->get_radius()(ix) << " " << dm->get_coloc(2)(ix(1));
+                            for (const auto* v : vv) fo << " " << (*v)(ix);
+                            fo << "\n";
+                        } while (ix.inc());
+                    }
+                }
+                std::cout << "#  --pv2-e0: -> " << pv2e0 << "\n";
+            }
+        }
+#endif
         auto wanted_eq = [&](const char* nm) {
 #ifdef TRUMPET_BULK2
             if (pv2on) return false;        // round 357: no full-field bulk row under --pv2
@@ -3793,6 +3961,24 @@ int main(int argc, char** argv)
                         nout++;
                         if (rank == 0) std::cout << "#  --pv2: outer row " << x[1] << " at r = inf\n";
                     }
+                // ⚠ ROUND 358 (research round 708 ruling 3): pfm MIRRORS phm mode by mode on the remainder -- mode 0 the VALUE
+                // phi(inf) = 0 (PH(inf) = 1 with PhbP(inf) = 1), modes 1..jmax-1 the 1/r coefficient multr(PF) = 0 (PH's modes >= 1
+                // are PhbP (e^phi - 1)'s, whose 1/r coefficient is phi's since PhbP = 1 + O(r^-2); PHP has no mode >= 1).
+                // psv / brv mirror as puv / pbv (PS(inf) = 1 <-> u(inf) = 0, BR(inf) = 0 <-> B^r(inf) = 0, all modes, add_eq_bc).
+                if (want.find(",pfm,") != std::string::npos) {
+                    if (want.find(",pfv,") != std::string::npos) { std::cerr << "FATAL: pfm and pfv are alternatives\n"; return 1; }
+                    const int jmax = thetapad ? ntheta - 1 : ntheta;
+                    for (int j = 0; j < jmax; j++) {
+                        Index pos_cf(space.get_domain(dtop)->get_nbr_coefs());
+                        pos_cf.set(1) = j;
+                        if (j == 0) syst.add_eq_mode(dtop, OUTER_BC, "PF", pos_cf, 0.0);
+                        else        syst.add_eq_mode(dtop, OUTER_BC, "multr(PF)", pos_cf, 0.0);
+                    }
+                    nout++;
+                    if (rank == 0)
+                        std::cout << "#  --pv2: outer pfm: PF mode 0 = 0 (value), modes 1.." << jmax - 1 << " multr(PF) = 0, " << jmax
+                                  << " rows by add_eq_mode (mirrors phm)\n";
+                }
             }
 #endif
             // ⚠ NAMED t_Q = 0, BUT IT IS NOT THAT.  Research round 379: q_P = 0

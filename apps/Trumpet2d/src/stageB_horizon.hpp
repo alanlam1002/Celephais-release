@@ -87,7 +87,7 @@ inline double test(int e, int k, double th)
 // bt 18, psi2 24, qf 30; within a block 00 01 02 10 11 20) and the angular basis of a column (value, d/dth, d2/dth2) of
 // the SYMPY field (q = sin^2 th QF, Q = sin^4 th QB)
 static const int JBLK[6] = {24, 0, 30, 12, 18, 6};
-static const char* FNAME[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+static const char* FNAME[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};   // round 357: set to the reconstructions by --pv2
 inline int ncols(int F, int NT) { return F == 4 ? NT - 2 : (F == 5 ? NT - 1 : NT); }
 inline void angular(int F, int j, double t, double* o)
 {
@@ -201,7 +201,8 @@ struct HZShared {
             return std::unique_ptr<Kadath::Ope_eq>(sys->give_ope(dom, nrm));
         };
         for (const char* F : FNAME) base.push_back(ope(F));
-        const char* bx[6] = {"PH", "HZT", "BR", "BT", "PS", "HZQ"};          // Phb Qb br bt psi2 qf
+        // round 357: the full fields by FNAME (the puncture formulation's reconstructions under --pv2; unchanged otherwise)
+        const char* bx[6] = {FNAME[1], "HZT", FNAME[3], FNAME[4], FNAME[0], "HZQ"};          // Phb Qb br bt psi2 qf
         for (const char* X : bx) {
             const std::string x(X);
             for (const std::string& e : {x, "dt(" + x + ")", "dt(dt(" + x + "))", "dr(" + x + ")", "dr(dt(" + x + "))",
@@ -477,7 +478,7 @@ class Ope_kbphi : public Kadath::Ope_eq {
             Kadath::trim_spaces(nrm, ex);
             return std::unique_ptr<Kadath::Ope_eq>(s->give_ope(d2, nrm));
         };
-        oph = ope("PH"); ops = ope("PS"); oqb = ope("QB"); oqt = ope("dt(QB)");
+        oph = ope(FNAME[1]); ops = ope(FNAME[0]); oqb = ope("QB"); oqt = ope("dt(QB)");     // round 357: FNAME
         gauss(nth, 0.0, M_PI, tq, wt);
         gauss(nu, 0.0, 1.0 / R2, uq, wu);
         auto pt = [&](double r, double t) {

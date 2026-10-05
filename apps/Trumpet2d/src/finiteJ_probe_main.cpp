@@ -153,6 +153,7 @@ struct EqIntAdd : Kadath::System_of_eqs {
 // carries a nonzero derivative of a stage-B unknown.
 #include "stageB_eval.hpp"
 #include "stageB_horizon.hpp"     // round 347: sub-step (iv), the live horizon rows and Komar's beta^phi
+#include "pv2_ops.hpp"            // round 357: puncture v2 phase 2a -- the expm1 user operator (`expmone`) and its gate
 struct SBShared {
     sbe::Eval ev;
     double Jv;
@@ -292,6 +293,34 @@ class Ope_sb : public Kadath::Ope_eq {
         res.set_der_d(sign * d[0]);
         res.set_derivative_lane_count(nl);
         for (int lane = 1; lane < nl; ++lane) res.set_der_d(lane, sign * d[lane]);
+        return res;
+    }
+};
+// ⚠ ROUND 357 (research round 703): the puncture formulation's delta-M THROAT ROW, c . y over the stage-B Kadath scalars
+// (c: scripts/stageB_dm.py, stage A's analytic dM direction in the section-11 coordinates, unit length) -- linear, so its
+// value and every derivative lane are the same contraction.
+class Ope_dm : public Kadath::Ope_eq {
+    SBShared* sh;
+    std::vector<double> c;
+  public:
+    Ope_dm(const Kadath::System_of_eqs* s, SBShared* h, std::vector<double> cc) : Kadath::Ope_eq(s, 0, 0), sh(h), c(std::move(cc)) {}
+    Kadath::Term_eq action() const override
+    {
+        const int NU = sh->ev.NU;
+        double v = 0.0;
+        for (int q = 0; q < NU; q++) v += c[q] * sh->terms[q]->get_val_d();
+        Kadath::Term_eq res(dom, v);
+        const Kadath::Term_eq* t0 = sh->terms[0];
+        if (!t0->has_der_d(0)) return res;
+        const int nl = std::max(1, t0->get_derivative_lane_count());
+        double d[Kadath::Term_eq::max_derivative_lanes] = {0.0};
+        for (int q = 0; q < NU; q++)
+            for (int lane = 0; lane < nl; lane++)
+                if (sh->terms[q]->has_der_d(lane))
+                    d[lane] += c[q] * (lane == 0 ? sh->terms[q]->get_der_d() : sh->terms[q]->get_der_d(lane));
+        res.set_der_d(d[0]);
+        res.set_derivative_lane_count(nl);
+        for (int lane = 1; lane < nl; ++lane) res.set_der_d(lane, d[lane]);
         return res;
     }
 };
@@ -675,6 +704,27 @@ static void app_probe(Kadath::System_of_eqs& syst, int kmin, const std::string& 
 }
 #endif
 
+#ifdef TRUMPET_BULK2
+// ⚠ ROUND 357: whole-word replacement of the six field names (PS PH QF BR BT QB) by names[q] in a Kadath expression
+static std::string pv2_subst(const std::string& ex, const char* const names[6])
+{
+    static const char* orig[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+    auto word = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+    std::string out;
+    for (std::size_t i = 0; i < ex.size();) {
+        bool hit = false;
+        if (!(i > 0 && word(ex[i - 1])))
+            for (int q = 0; q < 6 && !hit; q++)
+                if (ex.compare(i, 2, orig[q]) == 0 && !(i + 2 < ex.size() && word(ex[i + 2]))) {
+                    out += names[q];
+                    i += 2;
+                    hit = true;
+                }
+        if (!hit) out += ex[i++];
+    }
+    return out;
+}
+#endif
 static void emit(const std::string& k, double v)
 {
     std::cout << "RESULT " << k << " " << std::setprecision(17) << v << "\n";
@@ -941,6 +991,11 @@ int main(int argc, char** argv)
     std::string stageB;             // --stageB FILE (round 345): the nonlinear throat closure (stageB_kadath.py export)
     int probekmin = -1; std::string probeout;   // --probe-after KMIN PREFIX (round 352, with --lsolve)
     std::string pv2coeffs, pv2dump;   // --pv2-coeffs FILE / --pv2-dump FILE (puncture v2, phase 2a, gate P0)
+    std::string pv2expm1;           // --pv2-expm1-test FILE (round 357): the expm1 operator's gate, then exit
+    bool pv2on = false;             // --pv2 (round 357): the puncture formulation's unknowns (remainders PU PF PB) and reconstructions
+    std::string pv2dm;              // --pv2-dm FILE (round 357, needs --pv2 --stageB): the delta-M throat row (scripts/stageB_dm.py)
+    std::string pv2p0b;             // --pv2-p0b FILE (round 357, gate P0b): the reconstructions against the seed's own fields
+    std::string eqintout;           // --eqint-out FILE (round 357, gate P0b): every Eq_int row's value at the registered state
     std::string lsolve;             // --lsolve MODE (round 351): app-side Newton linear solve (plain / equil / refine / equil+refine)
     std::string stageBxform;        // --stageB-xform FILE (round 349, needs --stageB): the throat unknowns in matching-visible coordinates
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
@@ -1346,6 +1401,11 @@ int main(int argc, char** argv)
         else if (k == "--lsolve") lsolve = argv[++i];
         else if (k == "--pv2-coeffs") pv2coeffs = argv[++i];
         else if (k == "--pv2-dump") pv2dump = argv[++i];
+        else if (k == "--pv2-expm1-test") pv2expm1 = argv[++i];
+        else if (k == "--pv2") pv2on = true;
+        else if (k == "--pv2-dm") pv2dm = argv[++i];
+        else if (k == "--pv2-p0b") pv2p0b = argv[++i];
+        else if (k == "--eqint-out") eqintout = argv[++i];
         else if (k == "--probe-after") { probekmin = std::atoi(argv[++i]); probeout = argv[++i]; }
         else if (k == "--stageB-eval-test") { sbtestin = argv[++i]; sbtestout = argv[++i]; }
         else if (k == "--jac-dump-mpi") jacmpi = true;
@@ -1603,6 +1663,20 @@ int main(int argc, char** argv)
         if (rank == 0)
             std::cout << "#  --theta-pad: COS_EVEN 1, SIN_EVEN 1, SIN_ODD 1, COS_ODD 2 on all " << space.get_nbr_domains()
                       << " polar domains\n";
+    }
+#endif
+#ifdef TRUMPET_BULK2
+    // ⚠ ROUND 357 (research round 703): the expm1 operator's gate (pv2_ops.hpp), on this run's own space, then exit
+    if (!pv2expm1.empty()) {
+        std::ostringstream os;
+        const double w = pv2::expm1_selftest(space, space.get_nbr_domains() - 1, os);
+        if (rank == 0) {
+            std::ofstream fo(pv2expm1);
+            fo << os.str() << "  worst " << std::setprecision(3) << w << "\n";
+            std::cout << os.str() << "#  --pv2-expm1-test: worst " << w << " -> " << pv2expm1 << "\n";
+        }
+        MPI_Finalize();
+        return 0;
     }
 #endif
 
@@ -2498,6 +2572,14 @@ int main(int argc, char** argv)
     // --dump-jacobian (fields as variables); nothing else about the run may
     // differ, or the system solved would not be the system measured.
     const bool jacon = !jacdump.empty() || donewton;
+#ifdef TRUMPET_BULK2
+    Scalar* pv2rem[3] = {nullptr, nullptr, nullptr};      // round 357: the remainder variables PU PF PB (--pv2)
+    if (pv2on && (!jacon || !defstore.empty() || !defapply.empty() || !stageA.empty() || jacinner || jacouterfull)) {
+        std::cerr << "FATAL: --pv2 runs as a Jacobian / Newton registration only, without --defect(-store), --stageA, "
+                     "--jac-inner, --jac-outer-full\n";
+        return 1;
+    }
+#endif
     if (!jacon) {
     // ⚠ DUMPED WHERE THE SYSTEM SEES THEM, not where they are first built.
     // The first version of this sat before PHP -- and so before the throat
@@ -2552,6 +2634,65 @@ int main(int argc, char** argv)
         };
         const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
         Scalar* fp[6] = {&PS, &PH, &QF, &BR, &BT, &QB};
+#ifdef TRUMPET_BULK2
+        // ⚠ ROUND 357 (research round 703): --pv2, the PUNCTURE formulation's unknowns.  psi^2 = psi2_P e^{2u}, Phibar = Phibar_P
+        // e^{phi}, beta^r = beta^r_P + B^r (beta^theta, q, Qbar are their own remainders): the variables PU, PF, PB replace PS, PH,
+        // BR (same positions, same bases), SEEDED from the full-field seed at every node -- u = (1/2) ln(PS / psi2_P), phi =
+        // ln(PH / Phibar_P), B^r = BR - b0 -- with the backbone from the --pv2-coeffs table (the same values PV<name> carries).
+        // PS PH BR stay C++ Scalars holding the seed (gate P0b compares the reconstructions with them); the system never sees them.
+        static Scalar PU(space), PF(space), PB(space);
+        if (pv2on) {
+            if (pv2coeffs.empty()) { std::cerr << "FATAL: --pv2 needs --pv2-coeffs\n"; return 1; }
+            std::ifstream fin(pv2coeffs);
+            std::string line, w;
+            std::getline(fin, line);
+            std::istringstream h2(line);
+            std::vector<std::string> tok;
+            while (h2 >> w) tok.push_back(w);
+            auto it = std::find(tok.begin(), tok.end(), "r");
+            std::vector<std::string> nms(it + 1, tok.end());
+            auto col = [&](const char* nm) {
+                auto f = std::find(nms.begin(), nms.end(), nm);
+                if (f == nms.end()) throw std::runtime_error(std::string("--pv2: the coefficient table lacks ") + nm);
+                return static_cast<int>(f - nms.begin());
+            };
+            const int cP = col("psi2P"), cH = col("PhbP"), cB = col("b0");
+            std::map<std::pair<int, int>, std::array<double, 3>> bk;
+            while (std::getline(fin, line)) {
+                std::istringstream ls(line);
+                int d = 0, i = 0; std::string rs;
+                ls >> d >> i >> rs;
+                std::vector<double> v;
+                std::string tkn;
+                while (ls >> tkn) v.push_back(tkn == "inf" ? std::nan("") : std::stod(tkn));
+                bk[{d, i}] = {v.at(cP), v.at(cH), v.at(cB)};
+            }
+            double bad = 0;
+            for (int d = 0; d < ndom; d++) {
+                const Kadath::Domain* dm = space.get_domain(d);
+                for (Scalar* sp : {&PU, &PF, &PB}) sp->set_domain(d).allocate_conf();
+                Index ix(dm->get_nbr_points());
+                do {
+                    auto f = bk.find({d, ix(0)});
+                    if (f == bk.end()) { std::cerr << "FATAL: --pv2: no coefficient row for " << d << " " << ix(0) << "\n"; return 1; }
+                    const double u = 0.5 * std::log(PS(d)(ix) / f->second[0]), ph = std::log(PH(d)(ix) / f->second[1]),
+                                 b = BR(d)(ix) - f->second[2];
+                    if (!std::isfinite(u) || !std::isfinite(ph) || !std::isfinite(b)) bad++;
+                    PU.set_domain(d).set(ix) = u;
+                    PF.set_domain(d).set(ix) = ph;
+                    PB.set_domain(d).set(ix) = b;
+                } while (ix.inc());
+            }
+            if (bad) { std::cerr << "FATAL: --pv2: " << bad << " non-finite remainder seed values\n"; return 1; }
+            PU.std_base(); PF.std_base(); PB.std_base();
+            fn[0] = "PU"; fn[1] = "PF"; fn[3] = "PB";
+            pv2rem[0] = &PU; pv2rem[1] = &PF; pv2rem[2] = &PB;
+            fp[0] = &PU; fp[1] = &PF; fp[3] = &PB;
+            if (rank == 0)
+                std::cout << "#  --pv2: unknowns PU PF QF PB BT QB (remainders u, phi, q~, B^r, B^theta, Qbar), seeded from the "
+                             "full-field seed minus the backbone at every node\n";
+        }
+#endif
         for (int q = 0; q < 6; q++) {
             if (wanted(jacfields, fn[q])) syst.add_var(fn[q], *fp[q]);
             else                          syst.add_cst(fn[q], *fp[q]);
@@ -2791,6 +2932,70 @@ int main(int argc, char** argv)
             std::cout << "#  --pv2-dump: -> " << pv2dump << "\n";
         }
     }
+    // ⚠ ROUND 357 (research round 703): the puncture formulation's FULL-FIELD RECONSTRUCTIONS, Kadath definitions in every
+    // domain the system covers, read ONLY by the consumers (the stage-B matching rows at r_m, the horizon rows and the Komar
+    // row in domain 1, Komar's beta^phi term in domain 2) -- never by a bulk equation (those are in the remainders):
+    //     RPS = PVpsi2P exp(2 PU),   RPH = PVPhbP exp(PF),   RBR = PVb0 + PB;   beta^theta, q~, Qbar are BT, QF, QB.
+    // The consumers' six-name lists become {RPS, RPH, QF, RBR, BT, QB} (pv2fn); the inter-domain matching and the outer rows
+    // act on the remainders themselves.  The expm1 operator is registered as `expmone` for the emitted remainder equations.
+    static Kadath::Param pv2par;
+    const char* pv2fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+    if (pv2on) {
+        syst.add_ope("expmone", &pv2::expm1_action, &pv2par);
+        const char* rd[3] = {"RPS = PVpsi2P * exp(2 * PU)", "RPH = PVPhbP * exp(PF)", "RBR = PVb0 + PB"};
+        for (int d = 0; d <= dtop; d++)
+            for (const char* x : rd) {
+                syst.add_def(d, x);
+                const std::string nm(x, std::string(x).find(' '));
+                const Kadath::Val_domain& kv = syst.give_val_def_scalar_domain(nm.c_str(), d);
+                Kadath::Index kix(space.get_domain(d)->get_nbr_points());
+                (void)kv(kix);                           // the read-state contract (round 108)
+            }
+        pv2fn[0] = "RPS"; pv2fn[1] = "RPH"; pv2fn[3] = "RBR";
+        for (int q = 0; q < 6; q++) sbh::FNAME[q] = pv2fn[q];          // the live horizon rows and Komar's beta^phi term
+        if (rank == 0)
+            std::cout << "#  --pv2: reconstructions RPS RPH RBR defined in domains 0.." << dtop
+                      << "; consumers read RPS RPH QF RBR BT QB; expmone registered\n";
+        // ⚠ GATE P0b, part 1: the reconstructions at the seed against the seed's own fields (value, dr, dt), every node
+        if (!pv2p0b.empty()) {
+            const Scalar* sf[3] = {&PS, &PH, &BR};
+            const char* rn[3] = {"RPS", "RPH", "RBR"};
+            std::ostringstream os;
+            os << std::setprecision(3);
+            double worst = 0;
+            for (int q = 0; q < 3; q++)
+                for (int k = 0; k < 3; k++) {
+                    double e = 0, sc = 0;
+                    for (int d = 0; d <= dtop; d++) {
+                        const std::string ex = k == 0 ? std::string(rn[q]) : (k == 1 ? "dr(" : "dt(") + std::string(rn[q]) + ")";
+                        char nrm[Kadath::LMAX];
+                        Kadath::trim_spaces(nrm, ex.c_str());
+                        const Kadath::Term_eq T = syst.give_ope(d, nrm)->action();
+                        const Kadath::Val_domain& v = sbh::vd(T.get_val_t(), d);
+                        const Scalar ref = k == 0 ? Scalar(*sf[q]) : (k == 1 ? Scalar(sf[q]->der_r()) : Scalar(sf[q]->der_var(2)));
+                        Index ix(space.get_domain(d)->get_nbr_points());
+                        double ed = 0, sd = 0;
+                        do {
+                            const double rv = space.get_domain(d)->get_radius()(ix);
+                            if (k == 1 && !std::isfinite(rv)) continue;          // dr at r = inf: not a point value
+                            ed = std::max(ed, std::fabs(v(ix) - ref(d)(ix)));
+                            sd = std::max(sd, std::fabs(ref(d)(ix)));
+                        } while (ix.inc());
+                        os << "  " << rn[q] << " " << (k == 0 ? "value" : k == 1 ? "dr   " : "dt   ") << " domain " << d
+                           << ": max |recon - seed| " << ed << "  (max |seed| " << sd << ", relative " << (sd > 0 ? ed / sd : ed) << ")\n";
+                        e = std::max(e, sd > 0 ? ed / sd : ed);
+                        sc = std::max(sc, sd);
+                    }
+                    worst = std::max(worst, e);
+                }
+            if (rank == 0) {
+                std::ofstream fo(pv2p0b);
+                fo << os.str() << "  worst relative " << worst << "\n";
+                std::cout << os.str() << "#  --pv2-p0b: reconstructions vs seed, worst relative " << worst << " -> " << pv2p0b << "\n";
+            }
+            emit("FJPV_p0b_recon_worst", worst);
+        }
+    }
 #endif
     syst.add_cst("PHP", PHP);
     syst.add_cst("ALP", ALP);
@@ -3011,6 +3216,13 @@ int main(int argc, char** argv)
             std::cout << "#   axis violation carried by the emission: " << v
                       << "\n";
     try {
+#ifdef TRUMPET_BULK2
+        // ⚠ ROUND 357: --pv2 registers NO full-field bulk (its def chain reads PS PH BR, which are not system names there);
+        // the puncture formulation's remainder equations take its place (the emitter, research round 704)
+        if (pv2on) {
+            if (rank == 0) std::cout << "#  --pv2: the full-field bulk def chain is NOT registered\n";
+        } else
+#endif
         if (maxdefs < 0) {
             Trumpet::finiteJ_register(syst, space, 0, dtop, !breakcontract);
         } else {
@@ -3421,6 +3633,9 @@ int main(int argc, char** argv)
         }
 #endif
         auto wanted_eq = [&](const char* nm) {
+#ifdef TRUMPET_BULK2
+            if (pv2on) return false;        // round 357: no full-field bulk row under --pv2
+#endif
             if (jaceqs == "all") return true;
             return (',' + jaceqs + ',').find(std::string(",") + nm + ",")
                    != std::string::npos;
@@ -3533,6 +3748,9 @@ int main(int argc, char** argv)
             // field returned the same 162/306 and the "isolation" isolated
             // nothing.  A test that cannot vary its input reads as agreement.
             const char* fn[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+#ifdef TRUMPET_BULK2
+            if (pv2on) { fn[0] = "PU"; fn[1] = "PF"; fn[3] = "PB"; }    // round 357: the remainders match across interfaces
+#endif
             int nif = 0;
             for (int d = 0; d < dtop; d++)
                 for (int q = 0; q < 6; q++) {
@@ -3558,6 +3776,25 @@ int main(int argc, char** argv)
         if (jacouter) {
             const std::string want = ',' + jacouterrows + ',';
             int nout = 0;
+#ifdef TRUMPET_BULK2
+            // ⚠ ROUND 357 (research round 703): the puncture formulation's outer conditions on the remainders, at the r = inf
+            // node (add_eq_bc: the field's own tau basis, as psv):  puv  u -> 0,  pfv  phi -> 0,  pbv  B^r -> 0.  The
+            // full-field rows naming PS PH BR do not exist under --pv2 and are refused.
+            if (pv2on) {
+                for (const char* k : {",ps,", ",psv,", ",phb,", ",phm,", ",phv,", ",brv,", ",br,"})
+                    if (want.find(k) != std::string::npos) {
+                        std::cerr << "FATAL: --pv2: outer row " << k << " names a full field; use puv / pfv / pbv\n";
+                        return 1;
+                    }
+                const char* pk[3][2] = {{",puv,", "PU = 0"}, {",pfv,", "PF = 0"}, {",pbv,", "PB = 0"}};
+                for (auto& x : pk)
+                    if (want.find(x[0]) != std::string::npos) {
+                        syst.add_eq_bc(dtop, OUTER_BC, x[1]);
+                        nout++;
+                        if (rank == 0) std::cout << "#  --pv2: outer row " << x[1] << " at r = inf\n";
+                    }
+            }
+#endif
             // ⚠ NAMED t_Q = 0, BUT IT IS NOT THAT.  Research round 379: q_P = 0
             // is a theorem of the conformal gauge, so t_Q needs no imposing;
             // and the asymptotic condition for a 2-D Laplacian must fix the
@@ -3697,7 +3934,10 @@ int main(int argc, char** argv)
                 "KMKRT = (dt(BR) + multr(multr(dr(BT)))) / (2 * KMAL)",
                 "KMG = PS * KMALR - PS * PS * PS * exp(2 * KMQ) * (KMKRR * BR + KMKRT * BT)"};
             // ⚠ the read-state contract (round 108): each def is READ right after it is registered, as finiteJ_register does
-            for (const char* x : kd) {
+            for (const char* x0 : kd) {
+                // ⚠ ROUND 357: under --pv2 the reconstructions stand for PS PH BR (whole-word substitution, pv2fn)
+                const std::string xs = pv2on ? pv2_subst(x0, pv2fn) : std::string(x0);
+                const char* x = xs.c_str();
                 syst.add_def(1, x);
                 const std::string nm(x, std::string(x).find(' '));
                 const Kadath::Val_domain& kv = syst.give_val_def_scalar_domain(nm.c_str(), 1);
@@ -3851,7 +4091,7 @@ int main(int argc, char** argv)
         // Kadath's own mode coefficient of F or dr(F) at the inner face (Ope_mode, as add_eq_mode) MINUS the ansatz
         // part (Ope_sb).  THROAT: one Eq_int per registered row (Ope_sb), all rows or the --stageB-rows subset.
         if (sbshared) {
-            const char* fnm[6] = {"PS", "PH", "QF", "BR", "BT", "QB"};
+            const char* fnm[6] = {pv2fn[0], pv2fn[1], pv2fn[2], pv2fn[3], pv2fn[4], pv2fn[5]};   // round 357: reconstructions under --pv2
             int nmr = 0;
             for (int q = 0; q < sbshared->ev.NMK; q++) {
                 const sbe::MKey& K = sbshared->ev.mk[q];
@@ -3895,6 +4135,21 @@ int main(int argc, char** argv)
                     nsel_o++;
                 }
                 EqIntAdd::add_sum(syst, 0, lb, {new Ope_sb(&syst, sbshared.get(), ro, false, 1.0)});
+            }
+            // ⚠ ROUND 357: --pv2-dm FILE, the delta-M throat row (in place of the Komar row, which --pv2 runs leave out except
+            // as a gate)
+            if (!pv2dm.empty()) {
+                if (!pv2on) { std::cerr << "FATAL: --pv2-dm needs --pv2\n"; return 1; }
+                std::ifstream fd(pv2dm);
+                std::string tag; int n = 0;
+                fd >> tag >> n;
+                if (tag != "DMROW" || n != sbshared->ev.NU) { std::cerr << "FATAL: --pv2-dm: expected DMROW " << sbshared->ev.NU << "\n"; return 1; }
+                std::vector<double> c(n);
+                for (double& x : c) fd >> x;
+                if (!fd) { std::cerr << "FATAL: --pv2-dm: truncated\n"; return 1; }
+                EqIntAdd::add_sum(syst, 0, "PV2 dM", {new Ope_dm(&syst, sbshared.get(), c)});
+                emit("FJPV_dM_row", 1);
+                if (rank == 0) std::cout << "#  --pv2-dm: the delta-M throat row c . y = 0 (" << n << " coefficients, " << pv2dm << ")\n";
             }
             emit("FJPJ_stageB_orth_rows", nsel_o);
             emit("FJPJ_stageB_match_rows", nmr);
@@ -4774,6 +5029,14 @@ int main(int argc, char** argv)
 #endif
         Kadath::Array<double> bb(syst.sec_member());
 #ifdef TRUMPET_BULK2
+        if (!eqintout.empty() && rank == 0) {      // ⚠ ROUND 357 (gate P0b): every Eq_int row's value at this state, labelled
+            std::ofstream fo(eqintout);
+            fo << std::setprecision(17);
+            for (int i = 0; i < SysPeek::neqint(syst); i++) fo << i << " " << bb(i) << " " << SysPeek::eqint_label(syst, i) << "\n";
+            std::cout << "#  --eqint-out: " << SysPeek::neqint(syst) << " Eq_int rows -> " << eqintout << "\n";
+        }
+#endif
+#ifdef TRUMPET_BULK2
         if (!defstore.empty() && rank == 0) {
             const int ni = SysPeek::neqint(syst);
             for (int i = 0; i < ni; i++)
@@ -5244,6 +5507,36 @@ int main(int argc, char** argv)
                 ff << "fields PS PH QF BR BT QB\n";
                 ff << std::setprecision(17);
                 const Scalar* fp[6] = {&PS, &PH, &QF, &BR, &BT, &QB};
+                // ⚠ ROUND 357: under --pv2 the full fields are the reconstructions (the PS PH BR Scalars still hold the seed);
+                // the remainders PU PF PB are written to PREFIX.rem
+                std::vector<std::unique_ptr<Scalar>> rec;
+                if (pv2on) {
+                    const char* rn[3] = {"RPS", "RPH", "RBR"};
+                    const int at[3] = {0, 1, 3};
+                    for (int k = 0; k < 3; k++) {
+                        rec.emplace_back(new Scalar(space));
+                        rec.back()->annule_hard();
+                        for (int d = 0; d <= dtop; d++) {
+                            const Kadath::Val_domain& v = syst.give_val_def_scalar_domain(rn[k], d);
+                            Index ix(space.get_domain(d)->get_nbr_points());
+                            (void)v(ix);
+                            rec.back()->set_domain(d) = v;
+                        }
+                        fp[at[k]] = rec.back().get();
+                    }
+                    std::ofstream fr(solveout + ".rem");
+                    fr << "# remainders after the Newton solve (--pv2)\nfields PU PF QF PB BT QB\n" << std::setprecision(17);
+                    const Scalar* rp[6] = {pv2rem[0], pv2rem[1], &QF, pv2rem[2], &BT, &QB};
+                    for (int d = 0; d <= dtop; d++) {
+                        Index ix(space.get_domain(d)->get_nbr_points());
+                        do {
+                            fr << "val " << d << " " << ix(0) << " " << ix(1) << " " << t.pts[d][ix(0)].r << " "
+                               << space.get_domain(d)->get_coloc(2)(ix(1));
+                            for (int q = 0; q < 6; q++) fr << " " << (*rp[q])(d)(ix);
+                            fr << "\n";
+                        } while (ix.inc());
+                    }
+                }
                 for (int d = 0; d <= dtop; d++) {
                     Index ix(space.get_domain(d)->get_nbr_points());
                     do {
@@ -5360,6 +5653,13 @@ int main(int argc, char** argv)
         }
     }
 
+#ifdef TRUMPET_BULK2
+    if (pv2on) {        // ⚠ ROUND 357: the battery below reads the full-field bulk defs, which --pv2 does not register
+        if (rank == 0) std::cout << "#  --pv2: the full-field diagnostic battery is skipped\n";
+        MPI_Finalize();
+        return 0;
+    }
+#endif
     // ---- --tail-readout: read the 1/r coefficients at the r = infinity node
     if (tailout) {
         const char* tn[4] = {"TAILPS", "TAILPH", "TAILPHP", "TAILQF"};

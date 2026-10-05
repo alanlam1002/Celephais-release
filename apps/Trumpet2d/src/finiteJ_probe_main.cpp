@@ -999,6 +999,8 @@ int main(int argc, char** argv)
     std::string pv2eqs;             // --pv2-eqs FILE (round 358): the emitted remainder equations (scripts/pv2_emit.py)
     std::string pv2state;           // --pv2-state FILE (round 358, gate E0): the six unknowns set to polynomial states
     std::string pv2e0;              // --pv2-e0 FILE (round 358, gate E0): every emitted atom and equation at every node
+    std::string pv2resid;           // --pv2-resid FILE (round 359, gates P1-P2): every row's residual with Kadath's row metadata
+    std::string pv2sbdelta;         // --pv2-sbdelta FILE (round 359, gate P2): NU values added to the stage-B Kadath scalars' seeds
     std::string lsolve;             // --lsolve MODE (round 351): app-side Newton linear solve (plain / equil / refine / equil+refine)
     std::string stageBxform;        // --stageB-xform FILE (round 349, needs --stageB): the throat unknowns in matching-visible coordinates
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
@@ -1412,6 +1414,8 @@ int main(int argc, char** argv)
         else if (k == "--pv2-eqs") pv2eqs = argv[++i];
         else if (k == "--pv2-state") pv2state = argv[++i];
         else if (k == "--pv2-e0") pv2e0 = argv[++i];
+        else if (k == "--pv2-resid") pv2resid = argv[++i];
+        else if (k == "--pv2-sbdelta") pv2sbdelta = argv[++i];
         else if (k == "--probe-after") { probekmin = std::atoi(argv[++i]); probeout = argv[++i]; }
         else if (k == "--stageB-eval-test") { sbtestin = argv[++i]; sbtestout = argv[++i]; }
         else if (k == "--jac-dump-mpi") jacmpi = true;
@@ -2699,10 +2703,18 @@ int main(int argc, char** argv)
                 std::map<std::string, Scalar*> tgt = {{"PU", &PU}, {"PF", &PF}, {"PB", &PB}, {"QF", &QF}, {"BT", &BT}, {"QB", &QB}};
                 std::map<std::string, std::map<int, std::vector<std::array<double, 3>>>> cf;
                 std::map<std::string, std::map<int, int>> dec;
+                std::map<std::tuple<std::string, int, int, int>, double> nodal;   // round 359: "N F d i j v" node values (added)
                 std::ifstream fs(pv2state);
                 std::string F, w2;
                 int d = 0;
-                while (fs >> F >> d >> w2) {
+                while (fs >> F) {
+                    if (F == "N") {
+                        std::string G; int dd, i, j; double v;
+                        fs >> G >> dd >> i >> j >> v;
+                        nodal[std::make_tuple(G, dd, i, j)] = v;
+                        continue;
+                    }
+                    if (!(fs >> d >> w2)) break;
                     if (w2 == "decay") { int m; fs >> m; dec[F][d] = m; continue; }
                     int j; double a; fs >> j >> a;
                     cf[F][d].push_back({static_cast<double>(std::stoi(w2)), static_cast<double>(j), a});
@@ -2724,6 +2736,8 @@ int main(int argc, char** argv)
                                 v += c[2] * Ti * Th;
                             }
                             if (dec[T.first].count(dd)) v *= std::pow(1.0 - xi, dec[T.first][dd]);
+                            auto nf = nodal.find(std::make_tuple(T.first, dd, static_cast<int>(ix(0)), static_cast<int>(ix(1))));
+                            if (nf != nodal.end()) v += nf->second;
                             S.set_domain(dd).set(ix) = v;
                         } while (ix.inc());
                     }
@@ -3590,14 +3604,20 @@ int main(int argc, char** argv)
             char nm[16];
             if (!stageBxform.empty()) sbshared->read_xform(stageBxform);
             const std::vector<double> sbs = sbshared->kadath_seed();
+            std::vector<double> sbd(sbshared->ev.NU, 0.0);
+            if (!pv2sbdelta.empty()) {          // ⚠ ROUND 359 (gate P2): an offset on the scalars (y), e.g. eps M^-1 du along a direction
+                std::ifstream fd(pv2sbdelta);
+                for (double& v : sbd) if (!(fd >> v)) { std::cerr << "FATAL: --pv2-sbdelta: needs " << sbshared->ev.NU << " values\n"; return 1; }
+                if (rank == 0) std::cout << "#  --pv2-sbdelta: stage-B scalar seeds offset from " << pv2sbdelta << "\n";
+            }
             for (int q = 0; q < sbshared->ev.NU; q++) {
-                sbu[q] = sbs[q];
+                sbu[q] = sbs[q] + sbd[q];
                 std::snprintf(nm, sizeof nm, "SB%03d", q);
                 syst.add_var(nm, sbu[q]);
             }
             sbshared->bind(&syst, 0);
             for (int q = 0; q < sbshared->ev.NU; q++)
-                if (sbshared->terms[q]->get_val_d() != sbu[q]) {
+                if (sbshared->terms[q]->get_val_d() != sbu[q] && pv2sbdelta.empty()) {
                     std::cerr << "FATAL: --stageB: scalar unknown " << q << " is not where it was registered\n";
                     return 1;
                 }
@@ -5215,6 +5235,20 @@ int main(int argc, char** argv)
 #endif
         Kadath::Array<double> bb(syst.sec_member());
 #ifdef TRUMPET_BULK2
+        if (!pv2resid.empty() && rank == 0) {      // ⚠ ROUND 359 (gates P1-P2): every row, Kadath's classification of it
+            std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
+            syst.classify_equation_row_metadata(rmeta);
+            std::ofstream fo(pv2resid);
+            fo << std::setprecision(17);
+            const auto& EL = EqListPeek::eqs(syst);
+            const auto& EI = EqListPeek::eqints(syst);
+            for (std::size_t q = 0; q < EL.size(); q++) fo << "EQ " << q << " " << std::get<1>(EL[q]) << " " << std::get<0>(EL[q]) << "\n";
+            for (std::size_t q = 0; q < EI.size(); q++) fo << "EI " << q << " " << std::get<1>(EI[q]) << " " << std::get<0>(EI[q]) << "\n";
+            for (const auto& m : rmeta)
+                fo << "R " << m.row << " " << (m.row >= 0 && m.row < bb.get_size(0) ? bb(m.row) : std::nan("")) << " " << m.dom << " "
+                   << m.eq_index << " " << m.eq_local_row << " " << m.equation_type << "\n";
+            std::cout << "#  --pv2-resid: " << rmeta.size() << " rows (" << bb.get_size(0) << " residual entries) -> " << pv2resid << "\n";
+        }
         if (!eqintout.empty() && rank == 0) {      // ⚠ ROUND 357 (gate P0b): every Eq_int row's value at this state, labelled
             std::ofstream fo(eqintout);
             fo << std::setprecision(17);

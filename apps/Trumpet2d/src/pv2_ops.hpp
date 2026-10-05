@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <array>
+#include <tuple>
 #include <cctype>
 #include <fstream>
 #include <sstream>

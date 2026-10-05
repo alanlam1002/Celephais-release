@@ -1001,6 +1001,8 @@ int main(int argc, char** argv)
     std::string pv2e0;              // --pv2-e0 FILE (round 358, gate E0): every emitted atom and equation at every node
     std::string pv2resid;           // --pv2-resid FILE (round 359, gates P1-P2): every row's residual with Kadath's row metadata
     std::string pv2sbdelta;         // --pv2-sbdelta FILE (round 359, gate P2): NU values added to the stage-B Kadath scalars' seeds
+    std::string ffstate, ffe0;      // --ff-state FILE / --ff-e0 FILE (round 360, P2 read 1): the FULL-FIELD control -- node perturbations
+                                    // of the six fields ("M F d i j f": F *= 1 + f; "N F d i j v": F += v; "S F d i j v": F = v, applied in file order) and the six rows
     std::string lsolve;             // --lsolve MODE (round 351): app-side Newton linear solve (plain / equil / refine / equil+refine)
     std::string stageBxform;        // --stageB-xform FILE (round 349, needs --stageB): the throat unknowns in matching-visible coordinates
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
@@ -1416,6 +1418,8 @@ int main(int argc, char** argv)
         else if (k == "--pv2-e0") pv2e0 = argv[++i];
         else if (k == "--pv2-resid") pv2resid = argv[++i];
         else if (k == "--pv2-sbdelta") pv2sbdelta = argv[++i];
+        else if (k == "--ff-state") ffstate = argv[++i];
+        else if (k == "--ff-e0") ffe0 = argv[++i];
         else if (k == "--probe-after") { probekmin = std::atoi(argv[++i]); probeout = argv[++i]; }
         else if (k == "--stageB-eval-test") { sbtestin = argv[++i]; sbtestout = argv[++i]; }
         else if (k == "--jac-dump-mpi") jacmpi = true;
@@ -2754,6 +2758,23 @@ int main(int argc, char** argv)
                 std::cout << "#  --pv2: unknowns PU PF QF PB BT QB (remainders u, phi, q~, B^r, B^theta, Qbar), seeded from the "
                              "full-field seed minus the backbone at every node\n";
         }
+        // ⚠ ROUND 360 (research round 718, P2 read 1): --ff-state FILE, the full-field system's fields perturbed at nodes (no --pv2)
+        if (!ffstate.empty()) {
+            if (pv2on) { std::cerr << "FATAL: --ff-state is the full-field control (no --pv2)\n"; return 1; }
+            std::map<std::string, Scalar*> tgt = {{"PS", &PS}, {"PH", &PH}, {"QF", &QF}, {"BR", &BR}, {"BT", &BT}, {"QB", &QB}};
+            std::ifstream fs(ffstate);
+            std::string kind, F;
+            int d, i, j, nl = 0;
+            double v;
+            while (fs >> kind >> F >> d >> i >> j >> v) {
+                Index ix(space.get_domain(d)->get_nbr_points());
+                ix.set(0) = i; ix.set(1) = j;
+                const double old = (*tgt.at(F))(d)(ix);
+                tgt.at(F)->set_domain(d).set(ix) = kind == "M" ? old * (1.0 + v) : (kind == "S" ? v : old + v);   // S: set
+                nl++;
+            }
+            if (rank == 0) std::cout << "#  --ff-state: " << nl << " node perturbations of the full fields from " << ffstate << "\n";
+        }
 #endif
         for (int q = 0; q < 6; q++) {
             if (wanted(jacfields, fn[q])) syst.add_var(fn[q], *fp[q]);
@@ -3818,6 +3839,32 @@ int main(int argc, char** argv)
                 }
                 std::cout << "#  --pv2-e0: -> " << pv2e0 << "\n";
             }
+        }
+#endif
+#ifdef TRUMPET_BULK2
+        if (!ffe0.empty() && rank == 0) {          // ⚠ ROUND 360: the full-field rows (their defs, by the production names) at every node
+            std::ofstream fo(ffe0);
+            fo << std::setprecision(17);
+            for (int d = 0; d <= dtop; d++) {
+                fo << "H " << d << " PS PH QF BR BT QB ESIG EQFN EPHI ESHR ESHT EQTW\n";
+                std::vector<std::unique_ptr<Kadath::Term_eq>> keep;
+                std::vector<const Kadath::Val_domain*> vv;
+                for (const char* n : {"PS", "PH", "QF", "BR", "BT", "QB", "ESIG", "EQFN", "EPHI", "ESHR", "ESHT", "EQTW"}) {
+                    char nrm[Kadath::LMAX];
+                    Kadath::trim_spaces(nrm, n);
+                    keep.emplace_back(new Kadath::Term_eq(syst.give_ope(d, nrm)->action()));
+                    vv.push_back(&sbh::vd(keep.back()->get_val_t(), d));
+                }
+                const Kadath::Domain* dm = space.get_domain(d);
+                Index ix(dm->get_nbr_points());
+                do {
+                    fo << "N " << d << " " << ix(0) << " " << ix(1) << " " << dm->get_coloc(1)(ix(0)) << " " << dm->get_radius()(ix)
+                       << " " << dm->get_coloc(2)(ix(1));
+                    for (const auto* v : vv) fo << " " << (*v)(ix);
+                    fo << "\n";
+                } while (ix.inc());
+            }
+            std::cout << "#  --ff-e0: -> " << ffe0 << "\n";
         }
 #endif
         auto wanted_eq = [&](const char* nm) {

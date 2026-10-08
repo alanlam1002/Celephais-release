@@ -149,3 +149,12 @@ set_target_properties(trumpet2d_finiteJ_probe_bulk2_c3 PROPERTIES
 target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_c3 PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_C3)
 target_include_directories(trumpet2d_finiteJ_probe_bulk2_c3 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
+# Code round 385 (research round 793 task 1, A PROBE): bulk2 with S = rho beta.grad chi expanded by the product rule
+# (finiteJ_eqs_qreg_drvt_r2k_sx.hpp).  Separate binary; production bulk2 untouched; stageB_run.sh's BULK2_SX=1 selects it.
+kadath_add_exec(trumpet2d_finiteJ_probe_bulk2_sx src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_bulk2_sx PROPERTIES
+    OUTPUT_NAME finiteJ_probe_bulk2_sx)
+target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_sx PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP)
+target_include_directories(trumpet2d_finiteJ_probe_bulk2_sx PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)

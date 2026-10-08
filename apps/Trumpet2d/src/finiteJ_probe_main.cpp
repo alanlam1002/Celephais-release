@@ -47,6 +47,11 @@
 #endif
 #ifdef TRUMPET_CHI_UNKNOWN
 #include "src/finiteJ_eqs_chi.hpp"
+#elif defined(TRUMPET_BULK2) && defined(TRUMPET_SEXP)
+// ⚠ Round 385 (research round 793 task 1, A PROBE): bulk2's emission with S = rho beta.grad chi by the product rule (no derivative of
+// a formed chi; scripts/finiteJ_emit.py --q-regular --s-expand --r-into-square D0081, TH2_DRVT_FIX=1).  Own binary only
+// (finiteJ_probe_bulk2_sx); current (non-C3) twist terms; throat rows the production module.
+#include "src/finiteJ_eqs_qreg_drvt_r2k_sx.hpp"
 #elif defined(TRUMPET_BULK2) && defined(TRUMPET_C3)
 // ⚠ Round 384 (research round 791, ruling H2 PREPARED -- NOT ADOPTED): bulk2's emission with the C3 twist terms
 // (scripts/finiteJ_emit.py --q-regular --c3 --r-into-square D0080, TH2_DRVT_FIX=1; D0080 is round 333's D0081 renumbered).
@@ -737,6 +742,10 @@ static void emit(const std::string& k, double v)
 
 int main(int argc, char** argv)
 {
+#ifdef TRUMPET_SEXP
+    std::cout << "#  TRUMPET_SEXP: S = rho beta.grad chi by the product rule in E_sigma / E_q / E_Phi (round 385 probe)\n";
+    std::cout << "RESULT FJP_sexp 1\n";
+#endif
 #ifdef TRUMPET_C3
     std::cout << "#  TRUMPET_C3: the bulk rows carry the C3 twist terms (round 384, H2 prepared, not adopted)\n";
     std::cout << "RESULT FJP_c3 1\n";

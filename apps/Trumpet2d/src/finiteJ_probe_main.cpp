@@ -47,6 +47,11 @@
 #endif
 #ifdef TRUMPET_CHI_UNKNOWN
 #include "src/finiteJ_eqs_chi.hpp"
+#elif defined(TRUMPET_BULK2) && defined(TRUMPET_C3)
+// ⚠ Round 384 (research round 791, ruling H2 PREPARED -- NOT ADOPTED): bulk2's emission with the C3 twist terms
+// (scripts/finiteJ_emit.py --q-regular --c3 --r-into-square D0080, TH2_DRVT_FIX=1; D0080 is round 333's D0081 renumbered).
+// Its own binary only (finiteJ_probe_bulk2_c3); the throat rows are NOT re-emitted (they are the production throat module).
+#include "src/finiteJ_eqs_qreg_drvt_r2k_c3.hpp"
 #elif defined(TRUMPET_BULK2)
 // ⚠ Round 335 (research round 664, step 2): the q-regular D_r V^th emission with D0081 re-emitted as (r^2 K)^2
 // (scripts/finiteJ_emit.py --q-regular --r-into-square D0081, TH2_DRVT_FIX=1).  Its own binary only.
@@ -732,6 +737,10 @@ static void emit(const std::string& k, double v)
 
 int main(int argc, char** argv)
 {
+#ifdef TRUMPET_C3
+    std::cout << "#  TRUMPET_C3: the bulk rows carry the C3 twist terms (round 384, H2 prepared, not adopted)\n";
+    std::cout << "RESULT FJP_c3 1\n";
+#endif
 #ifdef TRUMPET_Q_REGULAR
     // ⚠ Round 236's rule: a build that changes the assembled system says so.
     std::cout << "#  TRUMPET_Q_REGULAR: q = sin^2(theta) q~; the unknown QF is q~"

@@ -980,6 +980,8 @@ int main(int argc, char** argv)
 #ifdef TRUMPET_BULK2
     // ⚠ ROUND 335 (research round 664, step 2): the bulk changes, each OFF by default and announced when registered.
     bool eqfnsin2 = false;          // --eqfn-sin2: EQFN imposed as multsint(multsint(EQFN)) (sin^2-weighted tests)
+    std::string recomb;             // --recombine 786|787 (round 380 / research rounds 786-787): full-field rows E_q -> E_q + 4 E_sigma
+                                    // (786) or E_q + 3 E_sigma + E_Phi/(2 Phibar) (787), and E_Phi -> E_Phi - 2 Phibar E_sigma (both)
     bool eqfndrop = false;          // --eqfn-sin2-droptop (round 337): the same tests with k = nt-1 dropped per radial index
     std::string amaxtable;          // --amax-table FILE: domain-0 rows x W<eq>(r) (no underscore: Kadath reads _ as an index) = 1 / (largest d_rr coefficient)
     bool komar = false;             // --komar: integ(KG) = 4 pi M (M = 1) on the domain-1/2 interface, mode 0
@@ -1394,6 +1396,7 @@ int main(int argc, char** argv)
         else if (k == "--qlog") qlog = std::stod(argv[++i]);
 #ifdef TRUMPET_BULK2
         else if (k == "--eqfn-sin2") eqfnsin2 = true;
+        else if (k == "--recombine") recomb = argv[++i];
         else if (k == "--eqfn-sin2-droptop") eqfndrop = true;
         else if (k == "--amax-table") amaxtable = argv[++i];
         else if (k == "--komar") komar = true;
@@ -3884,6 +3887,32 @@ int main(int argc, char** argv)
                         ? "multsint(" + std::string(ename) + ")"
                         : std::string(ename);
 #ifdef TRUMPET_BULK2
+                    // ⚠ ROUND 380 (research rounds 786-787): --recombine.  The shift-transport term S enters E_q as -2 w42 S, E_Phi/Phibar
+                    // as +w42 S and E_sigma as +(1/2) w42 S (EPHI = Phibar x E_Phi/Phibar; EQFN, ESIG the assembly's E_q, E_sigma -- checked
+                    // to 1e-12 against analysis_puncture's full() without twist), so these combinations carry no S: an exact, invertible
+                    // recombination with constant coefficients.  Applied to the EXPRESSION, inside every existing wrapper (sin^2, W<eq>).
+                    if (!recomb.empty() && (std::string(ename) == "EQFN" || std::string(ename) == "EPHI")) {
+                        if (recomb != "786" && recomb != "787") {
+                            std::cerr << "FATAL: --recombine takes 786 or 787\n";
+                            return 1;
+                        }
+                        // the parser takes a sum only as a DEF's right-hand side (as the emission's defs), not as a row operator:
+                        // register it as a def in this domain (read after registration -- round 108's contract), row = the def
+                        const bool isq = std::string(ename) == "EQFN";
+                        const std::string nm = isq ? "RCQ" : "RCP";
+                        const std::string rhs = isq ? (recomb == "786" ? "(EQFN) + (4 * (ESIG))"
+                                                                       : "((EQFN) + (3 * (ESIG))) + ((1 / 2) * ((EPHI) / (PH)))")
+                                                    : "(EPHI) - ((2 * (PH)) * (ESIG))";
+                        syst.add_def(d, (nm + " = " + rhs).c_str());
+                        {
+                            const Kadath::Val_domain& kv = syst.give_val_def_scalar_domain(nm.c_str(), d);
+                            Kadath::Index kix(space.get_domain(d)->get_nbr_points());
+                            (void)kv(kix);
+                        }
+                        lhs = nm;
+                        if (d == 0 && rank == 0)
+                            std::cout << "#  --recombine " << recomb << ": " << ename << " row = " << lhs << " = " << rhs << " (before its wrappers)\n";
+                    }
                     if (eqfnsin2 && eqfndrop) {
                         std::cerr << "FATAL: --eqfn-sin2 and --eqfn-sin2-droptop are alternatives\n";
                         return 1;

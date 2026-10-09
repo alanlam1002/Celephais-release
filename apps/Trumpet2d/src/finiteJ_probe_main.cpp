@@ -1042,6 +1042,7 @@ int main(int argc, char** argv)
     std::string lsolve;             // --lsolve MODE (round 351): app-side Newton linear solve (plain / equil / refine / equil+refine)
     std::string stageBxform;        // --stageB-xform FILE (round 349, needs --stageB): the throat unknowns in matching-visible coordinates
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
+    std::string stageBmcomb;        // --stageB-mcomb FILE (round 399): the kept matching rows registered as COMBINATIONS (R3)
     std::string sbtestin, sbtestout; // --stageB-eval-test IN OUT (round 345): run the evaluator on states, write rows / Jacobians, exit
     std::string defstore, defapply;  // --defect-store FILE / --defect FILE (round 347): the J = 0 defect b0, stored / subtracted
     bool horizonlive = false;       // --horizon-live (round 347, needs --stageB): horizon rows rebuilt on the current state
@@ -1442,6 +1443,7 @@ int main(int argc, char** argv)
         else if (k == "--stageA-drop") stageAdrop = argv[++i];
         else if (k == "--stageB") stageB = argv[++i];
         else if (k == "--stageB-rows") stageBrows = argv[++i];
+        else if (k == "--stageB-mcomb") stageBmcomb = argv[++i];
         else if (k == "--stageB-xform") stageBxform = argv[++i];
         else if (k == "--lsolve") lsolve = argv[++i];
         else if (k == "--pv2-coeffs") pv2coeffs = argv[++i];
@@ -4424,7 +4426,45 @@ int main(int argc, char** argv)
         if (sbshared) {
             const char* fnm[6] = {pv2fn[0], pv2fn[1], pv2fn[2], pv2fn[3], pv2fn[4], pv2fn[5]};   // round 357: reconstructions under --pv2
             int nmr = 0;
-            for (int q = 0; q < sbshared->ev.NMK; q++) {
+            // ⚠ ROUND 399 (research rounds 828-834, R3): --stageB-mcomb FILE replaces the one-row-per-kept-key registration by
+            // COMBINATION rows: "MCOMB nrow ncol", then ncol matching-key indices q (kept keys), then nrow lines of ncol coefficients;
+            // row r = sum_q c_rq (Kadath's mode q - the ansatz's), labelled "SBMC #r".  Without the flag: unchanged.
+            if (!stageBmcomb.empty()) {
+                std::ifstream fm(stageBmcomb);
+                std::string tg; int nr_ = 0, nc_ = 0;
+                if (!(fm >> tg >> nr_ >> nc_) || tg != "MCOMB") { std::cerr << "FATAL: --stageB-mcomb: bad header in " << stageBmcomb << "\n"; MPI_Finalize(); return 1; }
+                std::vector<int> qs(nc_);
+                for (int c = 0; c < nc_; c++) {
+                    fm >> qs[c];
+                    if (qs[c] < 0 || qs[c] >= sbshared->ev.NMK || !sbshared->ev.mk[qs[c]].kept) {
+                        std::cerr << "FATAL: --stageB-mcomb: key " << qs[c] << " not a kept matching key\n"; MPI_Finalize(); return 1;
+                    }
+                }
+                for (int r = 0; r < nr_; r++) {
+                    std::vector<Kadath::Ope_eq*> ops;
+                    for (int c = 0; c < nc_; c++) {
+                        double cf = 0;
+                        fm >> cf;
+                        if (cf == 0.0) continue;
+                        const sbe::MKey& K = sbshared->ev.mk[qs[c]];
+                        const std::string ex = K.d ? std::string("dr(") + fnm[K.F] + ")" : std::string(fnm[K.F]);
+                        Index pos_cf(space.get_domain(0)->get_nbr_coefs());
+                        pos_cf.set(1) = K.k;
+                        char auxi[512];
+                        Kadath::trim_spaces(auxi, ex.c_str());
+                        ops.push_back(new Ope_wscale(&syst, cf, new Kadath::Ope_mode(&syst, INNER_BC, pos_cf, 0.0, syst.give_ope(0, auxi, INNER_BC))));
+                        ops.push_back(new Ope_sb(&syst, sbshared.get(), qs[c], true, -cf));
+                    }
+                    if (!fm) { std::cerr << "FATAL: --stageB-mcomb: short coefficient table\n"; MPI_Finalize(); return 1; }
+                    char lb[64];
+                    std::snprintf(lb, sizeof lb, "SBMC #%d", r);
+                    EqIntAdd::add_sum(syst, 0, lb, ops);
+                    nmr++;
+                }
+                if (rank == 0) std::cout << "#  --stageB-mcomb: " << nr_ << " combination matching rows over " << nc_ << " kept keys (" << stageBmcomb << ")\n";
+                emit("FJPJ_stageB_mcomb_rows", nr_);
+            }
+            for (int q = 0; q < sbshared->ev.NMK && stageBmcomb.empty(); q++) {
                 const sbe::MKey& K = sbshared->ev.mk[q];
                 if (!K.kept) continue;
                 const std::string ex = K.d ? std::string("dr(") + fnm[K.F] + ")" : std::string(fnm[K.F]);

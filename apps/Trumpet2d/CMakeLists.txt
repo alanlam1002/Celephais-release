@@ -167,3 +167,13 @@ set_target_properties(trumpet2d_finiteJ_probe_bulk2_sxc3 PROPERTIES
 target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_sxc3 PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_C3)
 target_include_directories(trumpet2d_finiteJ_probe_bulk2_sxc3 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
+# Code round 393 (research rounds 810-811, A PROBE): the product-rule baseline with E_q's twist group in the REGULAR form
+# (finiteJ_eqs_qreg_drvt_r2k_sxqr.hpp), so the q row can be registered unweighted in theta (--eqfn-plain).  Separate binary;
+# stageB_run.sh's BULK2_SXQR=1 selects it (and --eqfn-plain in place of --eqfn-sin2).
+kadath_add_exec(trumpet2d_finiteJ_probe_bulk2_sxqr src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_bulk2_sxqr PROPERTIES
+    OUTPUT_NAME finiteJ_probe_bulk2_sxqr)
+target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_sxqr PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_EQREG)
+target_include_directories(trumpet2d_finiteJ_probe_bulk2_sxqr PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)

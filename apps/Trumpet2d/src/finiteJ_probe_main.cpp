@@ -47,6 +47,11 @@
 #endif
 #ifdef TRUMPET_CHI_UNKNOWN
 #include "src/finiteJ_eqs_chi.hpp"
+#elif defined(TRUMPET_BULK2) && defined(TRUMPET_SEXP) && defined(TRUMPET_EQREG)
+// ⚠ Round 393 (research rounds 810-811, A PROBE): the product-rule baseline with E_q's twist group in the REGULAR form (no explicit
+// 1/sin^4: QB and divsint(BT) directly; scripts/finiteJ_emit.py --q-regular --s-expand --eq-regular --r-into-square D0081), so the q row
+// can be registered UNWEIGHTED in theta (--eqfn-plain).  Own binary only (finiteJ_probe_bulk2_sxqr).
+#include "src/finiteJ_eqs_qreg_drvt_r2k_sxqr.hpp"
 #elif defined(TRUMPET_BULK2) && defined(TRUMPET_SEXP) && defined(TRUMPET_C3)
 // ⚠ Round 390 (research round 804 task 4, A PROBE): bulk2's emission with BOTH the product-rule S and the C3 twist terms
 // (scripts/finiteJ_emit.py --q-regular --c3 --s-expand --r-into-square D0080, TH2_DRVT_FIX=1).  Own binary only
@@ -751,6 +756,10 @@ int main(int argc, char** argv)
     std::cout << "#  TRUMPET_SEXP: S = rho beta.grad chi by the product rule in E_sigma / E_q / E_Phi (round 385 probe)\n";
     std::cout << "RESULT FJP_sexp 1\n";
 #endif
+#ifdef TRUMPET_EQREG
+    std::cout << "#  TRUMPET_EQREG: E_q's twist group in the regular form (round 393 probe)\n";
+    emit("FJP_eqreg", 1);
+#endif
 #ifdef TRUMPET_C3
     std::cout << "#  TRUMPET_C3: the bulk rows carry the C3 twist terms (round 384, H2 prepared, not adopted)\n";
     std::cout << "RESULT FJP_c3 1\n";
@@ -1003,6 +1012,8 @@ int main(int argc, char** argv)
 #ifdef TRUMPET_BULK2
     // ⚠ ROUND 335 (research round 664, step 2): the bulk changes, each OFF by default and announced when registered.
     bool eqfnsin2 = false;          // --eqfn-sin2: EQFN imposed as multsint(multsint(EQFN)) (sin^2-weighted tests)
+    bool eqfnplain = false;         // --eqfn-plain (round 393, research rounds 810-811): EQFN registered UNWEIGHTED in theta (the regular
+                                    // emission only, TRUMPET_EQREG): COS_EVEN rows e_0..e_{nt-2} of E_q itself, theta pad as --eqfn-sin2's
     std::string recomb;             // --recombine 786|787 (round 380 / research rounds 786-787): full-field rows E_q -> E_q + 4 E_sigma
                                     // (786) or E_q + 3 E_sigma + E_Phi/(2 Phibar) (787), and E_Phi -> E_Phi - 2 Phibar E_sigma (both)
     bool eqfndrop = false;          // --eqfn-sin2-droptop (round 337): the same tests with k = nt-1 dropped per radial index
@@ -1419,6 +1430,7 @@ int main(int argc, char** argv)
         else if (k == "--qlog") qlog = std::stod(argv[++i]);
 #ifdef TRUMPET_BULK2
         else if (k == "--eqfn-sin2") eqfnsin2 = true;
+        else if (k == "--eqfn-plain") eqfnplain = true;
         else if (k == "--recombine") recomb = argv[++i];
         else if (k == "--eqfn-sin2-droptop") eqfndrop = true;
         else if (k == "--amax-table") amaxtable = argv[++i];
@@ -1681,9 +1693,21 @@ int main(int argc, char** argv)
     // counts are taken then.  Depth = the power of sin th in the field's representation (round 340): 1 for the scalar
     // bases (q = sin^2 th q~), 2 for COS_ODD (Q = sin^4 th QB).  The domains are the space's own heap objects; the
     // const_cast only reaches the per-instance setter.
+    // ⚠ ROUND 393: --eqfn-plain registers EQFN unweighted in theta -- only meaningful on the regular emission (TRUMPET_EQREG), where
+    // E_q carries no explicit 1/sin^4; on any other emission the unweighted row is singular on the axis, so it is refused.
+    if (eqfnplain) {
+#ifndef TRUMPET_EQREG
+        std::cerr << "FATAL: --eqfn-plain needs the regular E_q emission (finiteJ_probe_bulk2_sxqr, TRUMPET_EQREG)\n";
+        return 1;
+#endif
+        if (eqfnsin2 || eqfndrop) {
+            std::cerr << "FATAL: --eqfn-plain, --eqfn-sin2 and --eqfn-sin2-droptop are alternatives\n";
+            return 1;
+        }
+    }
     if (thetapad) {
-        if (!eqfnsin2) {
-            std::cerr << "FATAL: --theta-pad needs --eqfn-sin2 (EQFN = multsint(multsint(EQFN)), COS_EVEN, padded once)\n";
+        if (!eqfnsin2 && !eqfnplain) {
+            std::cerr << "FATAL: --theta-pad needs --eqfn-sin2 (EQFN = multsint(multsint(EQFN)), COS_EVEN, padded once) or --eqfn-plain\n";
             return 1;
         }
         const int pads[4][2] = {{COS_EVEN, 1}, {SIN_EVEN, 1}, {SIN_ODD, 1}, {COS_ODD, 2}};
@@ -3945,6 +3969,8 @@ int main(int argc, char** argv)
                         if (d == 0 && rank == 0)
                             std::cout << "#  --eqfn-sin2: EQFN registered as " << lhs << " in every domain\n";
                     }
+                    if (eqfnplain && std::string(ename) == "EQFN" && d == 0 && rank == 0)
+                        std::cout << "#  --eqfn-plain: EQFN registered UNWEIGHTED in theta (" << lhs << ") in every domain (round 393)\n";
                     // ⚠ ROUND 337 (research round 666): multsint(multsint(EQFN))'s coefficient tau satisfies sum_k c_k = 0 (its
                     // value on the axis) at every radial index -- one exact dependency each (round 336).  Ruled: drop
                     // k = nt-1.  Kadath has no per-mode volume registration; multsint(EQFN) is SIN_ODD, whose tau keeps

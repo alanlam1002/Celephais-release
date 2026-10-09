@@ -47,6 +47,11 @@
 #endif
 #ifdef TRUMPET_CHI_UNKNOWN
 #include "src/finiteJ_eqs_chi.hpp"
+#elif defined(TRUMPET_BULK2) && defined(TRUMPET_SEXP) && defined(TRUMPET_C3)
+// ⚠ Round 390 (research round 804 task 4, A PROBE): bulk2's emission with BOTH the product-rule S and the C3 twist terms
+// (scripts/finiteJ_emit.py --q-regular --c3 --s-expand --r-into-square D0080, TH2_DRVT_FIX=1).  Own binary only
+// (finiteJ_probe_bulk2_sxc3); BULK rows only -- the throat rows are the production module (no C3: its re-emission is stage D's).
+#include "src/finiteJ_eqs_qreg_drvt_r2k_sxc3.hpp"
 #elif defined(TRUMPET_BULK2) && defined(TRUMPET_SEXP)
 // ⚠ Round 385 (research round 793 task 1, A PROBE): bulk2's emission with S = rho beta.grad chi by the product rule (no derivative of
 // a formed chi; scripts/finiteJ_emit.py --q-regular --s-expand --r-into-square D0081, TH2_DRVT_FIX=1).  Own binary only

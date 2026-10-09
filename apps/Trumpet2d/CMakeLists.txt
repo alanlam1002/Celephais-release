@@ -158,3 +158,12 @@ set_target_properties(trumpet2d_finiteJ_probe_bulk2_sx PROPERTIES
 target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_sx PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP)
 target_include_directories(trumpet2d_finiteJ_probe_bulk2_sx PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
+# Code round 390 (research round 804 task 4, A PROBE): bulk2 with the product-rule S AND the C3 twist terms in the bulk rows
+# (finiteJ_eqs_qreg_drvt_r2k_sxc3.hpp); the throat module is not re-emitted.  Separate binary; stageB_run.sh's BULK2_SXC3=1 selects it.
+kadath_add_exec(trumpet2d_finiteJ_probe_bulk2_sxc3 src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_bulk2_sxc3 PROPERTIES
+    OUTPUT_NAME finiteJ_probe_bulk2_sxc3)
+target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_sxc3 PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_C3)
+target_include_directories(trumpet2d_finiteJ_probe_bulk2_sxc3 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)

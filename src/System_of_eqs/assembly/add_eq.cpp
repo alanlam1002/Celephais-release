@@ -118,6 +118,15 @@ namespace Kadath
         nbr_conditions = -1;
     }
 
+    void System_of_eqs::add_eq_inside_window(int dom, const char* nom, int jmin, int jmax)
+    {
+        eq_list.push_back(std::make_tuple(nom, dom, -1));
+        record_equation_column_attachment(ColumnClass::FieldInteriorVol, dom, -1, nullptr, nom);
+        ensure_eq_slot(); eq[neq].reset(new Eq_inside_window(espace.get_domain(dom), dom, parse_eq(dom, nom), jmin, jmax));
+        neq++;
+        nbr_conditions = -1;
+    }
+
     void System_of_eqs::add_eq_inside(int dom, const char* nom, const List_comp& list)
     {
         add_eq_inside(dom, nom, list.get_ncomp(), list.get_pcomp());

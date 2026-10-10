@@ -861,6 +861,8 @@ namespace Kadath
          * @param list : list of the components to be considered
          */
         void add_eq_inside(int dom, const char* eq, const List_comp& list);
+        /// Celephais (research round 850): as add_eq_inside, the COS_EVEN tau conditions restricted to theta modes jmin..jmax.
+        void add_eq_inside_window(int dom, const char* eq, int jmin, int jmax);
 
         /**
          * Addition of an equation to be solved inside a domain (of arbitrary order).
@@ -2262,6 +2264,24 @@ namespace Kadath
                                     std::vector<ResidualRowDescriptor>&) const override;
         Array<int> do_nbr_conditions(const Tensor& tt) const override;
         bool take_into_account(int) const override;
+    };
+
+    /**
+     * Celephais (research round 850, the hybrid q row): an Eq_inside whose COS_EVEN tau conditions keep only the theta
+     * modes jmin..jmax (g_eq_theta_window, polar domains), set around each of its own calls; otherwise Eq_inside.
+     */
+    class Eq_inside_window : public Eq_inside
+    {
+        int jmin_, jmax_;
+        struct Guard;
+
+      public:
+        Eq_inside_window(const Domain* dom, int nd, Ope_eq* op, int jmin, int jmax, int n_cmp = -1, Array<int>** p_cmp = nullptr);
+        void export_val(int&, Term_eq**, Array<double>&, int&) const override;
+        void export_der(int&, Term_eq**, Array<double>&, int&) const override;
+        void export_der_lanes(int& conte, Term_eq** residuals, int lane_count, Array<double>* const* secs, int* pos_res_arr) const override;
+        bool describe_residual_rows(int&, Term_eq**, int, std::vector<ResidualRowDescriptor>&) const override;
+        Array<int> do_nbr_conditions(const Tensor& tt) const override;
     };
 
     /**

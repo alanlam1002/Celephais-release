@@ -45,7 +45,7 @@ namespace Kadath
             int baset = (*so.get_base().bases_1d[1])(0);
             switch (baset) {
                 case COS_EVEN:
-                    if (((pos(1) == 0) && (mquant != 0)) || (pos(1) >= nbr_coefs(1) - theta_pad(COS_EVEN)))
+                    if (((pos(1) == 0) && (mquant != 0)) || (pos(1) >= nbr_coefs(1) - theta_pad(COS_EVEN)) || eq_theta_window_excludes(pos(1)))
                         indic = false;
                     break;
                 case COS_ODD:

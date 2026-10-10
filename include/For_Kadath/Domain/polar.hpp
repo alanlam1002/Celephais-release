@@ -107,6 +107,16 @@ namespace Kadath
         ostream& print(ostream& o) const override;
     };
 
+    /// Per-EQUATION theta-mode window (Celephais, research round 850, the hybrid q row): while \c on, the COS_EVEN tau
+    /// conditions of a volume equation keep only theta modes jmin..jmax (in addition to the theta pad).  Set ONLY by
+    /// Eq_inside_window around its own calls; off (Kadath's behaviour) otherwise.
+    struct EqThetaWindow { bool on = false; int jmin = 0; int jmax = -1; };
+    inline thread_local EqThetaWindow g_eq_theta_window;
+    inline bool eq_theta_window_excludes(int j)
+    {
+        return g_eq_theta_window.on && (j < g_eq_theta_window.jmin || j > g_eq_theta_window.jmax);
+    }
+
     class Domain_polar_shell : public Domain
     {
 

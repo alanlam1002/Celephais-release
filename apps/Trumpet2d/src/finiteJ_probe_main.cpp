@@ -1198,6 +1198,8 @@ int main(int argc, char** argv)
 #ifdef TRUMPET_BULK2
     // ⚠ ROUND 335 (research round 664, step 2): the bulk changes, each OFF by default and announced when registered.
     bool eqfnsin2 = false;          // --eqfn-sin2: EQFN imposed as multsint(multsint(EQFN)) (sin^2-weighted tests)
+    bool eqfnhybrid = false;        // --eqfn-hybrid (round 406, research round 850, HYBRID_QROW_SPEC): implies --eqfn-plain; EQFN's tested
+                                    // modes 0..nt-3 PLAIN (regular emission) and mode nt-2 sin^2-WEIGHTED (Eq_inside_window x 2)
     bool eqfnplain = false;         // --eqfn-plain (round 393, research rounds 810-811): EQFN registered UNWEIGHTED in theta (the regular
                                     // emission only, TRUMPET_EQREG): COS_EVEN rows e_0..e_{nt-2} of E_q itself, theta pad as --eqfn-sin2's
     std::string recomb;             // --recombine 786|787 (round 380 / research rounds 786-787): full-field rows E_q -> E_q + 4 E_sigma
@@ -1620,6 +1622,7 @@ int main(int argc, char** argv)
 #ifdef TRUMPET_BULK2
         else if (k == "--eqfn-sin2") eqfnsin2 = true;
         else if (k == "--eqfn-plain") eqfnplain = true;
+        else if (k == "--eqfn-hybrid") { eqfnplain = true; eqfnhybrid = true; }
         else if (k == "--recombine") recomb = argv[++i];
         else if (k == "--eqfn-sin2-droptop") eqfndrop = true;
         else if (k == "--amax-table") amaxtable = argv[++i];
@@ -4243,6 +4246,20 @@ int main(int argc, char** argv)
                             syst.add_cst(cn.c_str(), S);
                             lhs = "(" + lhs + ") - " + cn;
                         }
+                    }
+#endif
+#ifdef TRUMPET_BULK2
+                    // ⚠ ROUND 406 (research round 850, HYBRID_QROW_SPEC.md): the hybrid q row -- EQFN (regular emission, every wrapper
+                    // and the defect as registered) at theta modes 0..nt-3, and multsint(multsint(that)) -- the sin^2-weighted row, W
+                    // being radial commutes -- at mode nt-2 only: two Eq_inside_window registrations with complementary COS_EVEN masks.
+                    // The row count is production's (nt-1 tested modes per radial index).
+                    if (eqfnhybrid && std::string(ename) == "EQFN") {
+                        syst.add_eq_inside_window(d, (lhs + " = 0").c_str(), 0, ntheta - 3);
+                        syst.add_eq_inside_window(d, ("multsint(multsint(" + lhs + ")) = 0").c_str(), ntheta - 2, ntheta - 2);
+                        if (d == 0 && rank == 0)
+                            std::cout << "#  --eqfn-hybrid: EQFN plain at modes 0.." << ntheta - 3 << ", sin^2-weighted at mode " << ntheta - 2
+                                      << " (" << lhs << ")\n";
+                        continue;
                     }
 #endif
                     syst.add_eq_inside(d, (lhs + " = 0").c_str());

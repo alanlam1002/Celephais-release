@@ -54,7 +54,7 @@ namespace Kadath
                     pos_cf.set(0) = i;
                     switch (baset) {
                         case COS_EVEN:
-                            if (j >= nbr_coefs(1) - theta_pad(COS_EVEN))
+                            if (j >= nbr_coefs(1) - theta_pad(COS_EVEN) || eq_theta_window_excludes(j))
                                 break;
                             if (mquant == 0) {
                                 sec.set(pos_sec) = (*so.cf)(pos_cf);

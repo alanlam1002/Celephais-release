@@ -25,6 +25,7 @@
  */
 
 #include "For_Kadath/System_of_eqs/system_of_eqs.hpp"
+#include "For_Kadath/Domain/polar.hpp"
 #include "For_Kadath/Ope_eq/ope_eq.hpp"
 #include "For_Kadath/Term_eq/term_eq.hpp"
 #include "For_Kadath/Scalar/scalar.hpp"
@@ -89,5 +90,21 @@ namespace Kadath
         else
             return false;
     }
+
+    // Celephais (research round 850): Eq_inside_window
+    struct Eq_inside_window::Guard {
+        EqThetaWindow saved;
+        Guard(int a, int b) : saved(g_eq_theta_window) { g_eq_theta_window = EqThetaWindow{true, a, b}; }
+        ~Guard() { g_eq_theta_window = saved; }
+    };
+    Eq_inside_window::Eq_inside_window(const Domain* zedom, int dd, Ope_eq* so, int jmin, int jmax, int nused, Array<int>** pused)
+        : Eq_inside(zedom, dd, so, nused, pused), jmin_(jmin), jmax_(jmax) {}
+    void Eq_inside_window::export_val(int& c, Term_eq** r, Array<double>& s, int& p) const { Guard g(jmin_, jmax_); Eq_inside::export_val(c, r, s, p); }
+    void Eq_inside_window::export_der(int& c, Term_eq** r, Array<double>& s, int& p) const { Guard g(jmin_, jmax_); Eq_inside::export_der(c, r, s, p); }
+    void Eq_inside_window::export_der_lanes(int& c, Term_eq** r, int n, Array<double>* const* s, int* p) const
+    { Guard g(jmin_, jmax_); Eq_inside::export_der_lanes(c, r, n, s, p); }
+    bool Eq_inside_window::describe_residual_rows(int& c, Term_eq** r, int e, std::vector<ResidualRowDescriptor>& d) const
+    { Guard g(jmin_, jmax_); return Eq_inside::describe_residual_rows(c, r, e, d); }
+    Array<int> Eq_inside_window::do_nbr_conditions(const Tensor& tt) const { Guard g(jmin_, jmax_); return Eq_inside::do_nbr_conditions(tt); }
 
 } // namespace Kadath

@@ -611,6 +611,171 @@ static bool app_newton(Kadath::System_of_eqs& syst, const std::string& mode, dou
     return false;
 }
 
+// ⚠ ROUND 402 (research round 841, LSQ_MATCHING_DESIGN.md): --stageB-lsq, LEAST-SQUARES MATCHING.  Every matching key is
+// registered (no drop; with --stageB-mcomb every table row), so the system is m x n with m - n = the old drop count, and the
+// Newton step is a Gauss-Newton step: X = argmin || W (A X - F) ||_2 over the MATCHING rows (Eq_int labelled "SBM..."), subject to
+// every other row (bulk, interface, outer, throat, orthogonality) imposed EXACTLY -- the bulk eliminated first, the least-squares
+// problem confined to the matching interface.  LAPACK dgglse (Householder generalised RQ factorisation).  W = the row
+// equilibration (1 / row max |A|, as --lsolve's R0); the columns scaled by powers of two (exact; the solution is invariant).
+// The full dense Jacobian is assembled as --lsolve does.  Line search on ||W F||_2 over ALL rows (W fixed at the step's
+// Jacobian): alpha = 1, 1/2, 1/4, 1/8, the first that lowers it, else NO step (alpha = 0: at the floor).  The step is applied as
+// do_newton's (var -= alpha X).  Without --stageB-lsq nothing here runs.
+extern "C" {
+void dgglse_(const int*, const int*, const int*, double*, const int*, double*, const int*, double*, double*, double*, double*,
+             const int*, int*);
+}
+static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int it, int rank)
+{
+    int nproc = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &nproc);
+    const Kadath::Array<double> sec(syst.sec_member());
+    const int n = syst.get_nbr_unknowns(), m = sec.get_size(0);
+    err = 0.0;
+    for (int r = 0; r < m; r++) err = std::max(err, std::fabs(sec(r)));
+    if (rank == 0) std::cout << "#  lsq step " << it << ": max|resid| before " << std::setprecision(10) << err << "  (" << m << " rows x "
+                             << n << " unknowns)\n";
+    if (err < prec) return true;
+    const auto t0 = std::chrono::steady_clock::now();
+    syst.reset_do_col_J_cache();
+    std::vector<double> mine;
+    for (int c = rank; c < n; c += nproc) {
+        Kadath::Array<double> col(syst.do_col_J(c));
+        for (int r = 0; r < m; r++) mine.push_back(col(r));
+    }
+    std::vector<double> A;                                           // column-major m x n, rank 0
+    if (rank == 0) {
+        A.assign(static_cast<size_t>(n) * m, 0.0);
+        for (int p = 0; p < nproc; p++) {
+            std::vector<double> buf;
+            const int cnt = p < n ? (n - p + nproc - 1) / nproc : 0;
+            if (p == 0) buf.swap(mine);
+            else {
+                buf.resize(static_cast<size_t>(cnt) * m);
+                if (cnt) MPI_Recv(buf.data(), cnt * m, MPI_DOUBLE, p, 402, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+            for (int a = 0; a < cnt; a++)
+                std::memcpy(&A[static_cast<size_t>(p + a * nproc) * m], &buf[static_cast<size_t>(a) * m], sizeof(double) * m);
+        }
+    } else if (!mine.empty()) {
+        MPI_Send(mine.data(), static_cast<int>(mine.size()), MPI_DOUBLE, 0, 402, MPI_COMM_WORLD);
+    }
+    const double tasm = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    Kadath::Array<double> X(n);
+    std::vector<double> R0(m, 1.0);
+    double phi0 = 0;
+    int fail = 0;
+    if (rank == 0) {
+        const auto t1 = std::chrono::steady_clock::now();
+        auto Aat = [&](int r, int c) -> double { return A[static_cast<size_t>(c) * m + r]; };
+        auto pow2 = [](double s) { int e; std::frexp(s, &e); return std::ldexp(1.0, e - 1); };
+        // the matching rows
+        std::vector<char> ism(m, 0);
+        {
+            std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
+            syst.classify_equation_row_metadata(rmeta);
+            const auto& EI = EqListPeek::eqints(syst);
+            for (const auto& rw : rmeta)
+                if (rw.equation_type == "Eq_int" && rw.eq_index >= 0 && rw.eq_index < static_cast<int>(EI.size()) && rw.row >= 0 &&
+                    rw.row < m && std::get<0>(EI[rw.eq_index]).rfind("SBM", 0) == 0)
+                    ism[rw.row] = 1;
+        }
+        std::vector<int> im, ic;
+        for (int r = 0; r < m; r++) (ism[r] ? im : ic).push_back(r);
+        const int mm = static_cast<int>(im.size()), p = static_cast<int>(ic.size());
+        std::fill(R0.begin(), R0.end(), 0.0);
+        for (int c = 0; c < n; c++) for (int r = 0; r < m; r++) R0[r] = std::max(R0[r], std::fabs(Aat(r, c)));
+        for (int r = 0; r < m; r++) R0[r] = R0[r] > 0 ? 1.0 / R0[r] : 1.0;
+        std::vector<double> Cs(n, 0.0);
+        for (int c = 0; c < n; c++) {
+            for (int r = 0; r < m; r++) Cs[c] = std::max(Cs[c], std::fabs(R0[r] * Aat(r, c)));
+            Cs[c] = Cs[c] > 0 ? 1.0 / pow2(Cs[c]) : 1.0;
+        }
+        double fm = 0, fc = 0, wm2 = 0;
+        for (int r = 0; r < m; r++) { const double w = R0[r] * sec(r); phi0 += w * w; }
+        for (int r : im) { fm = std::max(fm, std::fabs(sec(r))); wm2 += R0[r] * sec(r) * R0[r] * sec(r); }
+        for (int r : ic) fc = std::max(fc, std::fabs(sec(r)));
+        phi0 = std::sqrt(phi0);
+        std::cout << "#  lsq step " << it << ": ||W F|| " << std::setprecision(6) << phi0 << ";  matching rows " << mm << " (max|F| "
+                  << fm << ", ||W F||_m " << std::sqrt(wm2) << "), imposed rows " << p << " (max|F| " << fc << ")\n";
+        if (!(p <= n && n <= mm + p)) {
+            std::cout << "#  lsq: dimensions p " << p << " <= n " << n << " <= mm + p " << mm + p << " violated\n";
+            fail = 1;
+        } else {
+            std::vector<double> Aq(static_cast<size_t>(mm) * n), Bq(static_cast<size_t>(std::max(p, 1)) * n), cv(mm), dv(std::max(p, 1)), z(n);
+            for (int c = 0; c < n; c++) {
+                for (int a = 0; a < mm; a++) Aq[static_cast<size_t>(c) * mm + a] = R0[im[a]] * Aat(im[a], c) * Cs[c];
+                for (int a = 0; a < p; a++) Bq[static_cast<size_t>(c) * p + a] = R0[ic[a]] * Aat(ic[a], c) * Cs[c];
+            }
+            for (int a = 0; a < mm; a++) cv[a] = R0[im[a]] * sec(im[a]);
+            for (int a = 0; a < p; a++) dv[a] = R0[ic[a]] * sec(ic[a]);
+            const std::vector<double> Aq0(Aq), Bq0(Bq), cv0(cv), dv0(dv);
+            int info = 0, lw = -1;
+            double wq = 0;
+            const int ldb = std::max(p, 1);
+            dgglse_(&mm, &n, &p, Aq.data(), &mm, Bq.data(), &ldb, cv.data(), dv.data(), z.data(), &wq, &lw, &info);
+            lw = static_cast<int>(wq) + 1;
+            std::vector<double> work(lw);
+            dgglse_(&mm, &n, &p, Aq.data(), &mm, Bq.data(), &ldb, cv.data(), dv.data(), z.data(), work.data(), &lw, &info);
+            if (info != 0) { std::cout << "#  lsq: dgglse info " << info << "\n"; fail = 1; }
+            // the linear residuals, long double: imposed rows max |W (A X - F)|, matching ||W (A X - F)||_m
+            double lc = 0, lm2 = 0, xn = 0;
+            for (int a = 0; a < p; a++) {
+                long double s = -static_cast<long double>(dv0[a]);
+                for (int c = 0; c < n; c++) s += static_cast<long double>(Bq0[static_cast<size_t>(c) * p + a]) * z[c];
+                lc = std::max(lc, std::fabs(static_cast<double>(s)));
+            }
+            for (int a = 0; a < mm; a++) {
+                long double s = -static_cast<long double>(cv0[a]);
+                for (int c = 0; c < n; c++) s += static_cast<long double>(Aq0[static_cast<size_t>(c) * mm + a]) * z[c];
+                lm2 += static_cast<double>(s * s);
+            }
+            for (int c = 0; c < n; c++) { X.set(c) = Cs[c] * z[c]; xn += X(c) * X(c); }
+            const double tsol = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+            std::cout << "#  lsq step " << it << ": assembly " << tasm << " s, rank-0 dgglse " << tsol << " s;  linear: imposed rows max "
+                      << "|W (A X - F)| " << std::setprecision(4) << lc << ", matching ||W (A X - F)||_m " << std::sqrt(lm2) << " (of "
+                      << std::sqrt(wm2) << ");  |X| " << std::sqrt(xn) << "\n";
+        }
+    }
+    MPI_Bcast(&fail, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if (fail) throw std::runtime_error("--stageB-lsq: the least-squares step failed");
+    MPI_Bcast(X.set_data(), n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(R0.data(), m, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    // line search on ||W F||
+    auto apply = [&](double a) {
+        if (a == 0.0) return;
+        Kadath::Array<double> Y(n);
+        for (int c = 0; c < n; c++) Y.set(c) = a * X(c);
+        int conte = 0;
+        syst.get_space().xx_to_vars_variable_domains(&syst, Y, conte);
+        syst.xx_to_vars_delta(Y, conte);
+    };
+    auto phi = [&]() {
+        const Kadath::Array<double> F(syst.sec_member());
+        double s = 0;
+        for (int r = 0; r < m; r++) s += (R0[r] * F(r)) * (R0[r] * F(r));
+        s = std::sqrt(s);
+        MPI_Bcast(&s, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        return s;
+    };
+    const double al[4] = {1.0, 0.5, 0.25, 0.125};
+    double cur = 0.0, ph[4] = {0, 0, 0, 0};
+    int acc = -1;
+    for (int k = 0; k < 4; k++) {
+        apply(al[k] - cur); cur = al[k];
+        ph[k] = phi();
+        double ok = (ph[k] < phi0) ? 1.0 : 0.0;
+        MPI_Bcast(&ok, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        if (ok > 0.5) { acc = k; break; }
+    }
+    if (acc < 0) { apply(-cur); cur = 0.0; }                       // no decrease: the step is rejected (the floor)
+    if (rank == 0) {
+        std::cout << "#  lsq step " << it << ": line search ||W F||: " << std::setprecision(6) << phi0 << " ->";
+        for (int k = 0; k < 4 && (acc < 0 || k <= acc); k++) std::cout << " (a " << al[k] << ") " << ph[k];
+        std::cout << ";  " << (acc >= 0 ? "accepted a " : "NO DECREASE, step rejected: a ") << cur << "\n";
+    }
+    return false;
+}
+
 // ⚠ ROUND 352 (research round 691): --probe-after KMIN PREFIX (with --lsolve; diagnostic).  After the Newton loop: rewind to
 // the step state k* >= KMIN of smallest sigma_min (state_k* = state_N + sum_{i >= k*} X_i, applied as one delta), there
 // the residual, the dense Jacobian, the row-equilibrated B = R0 A and its smallest singular triplet (sigma, u, v) as in
@@ -1043,6 +1208,7 @@ int main(int argc, char** argv)
     std::string stageBxform;        // --stageB-xform FILE (round 349, needs --stageB): the throat unknowns in matching-visible coordinates
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
     std::string stageBmcomb;        // --stageB-mcomb FILE (round 399): the kept matching rows registered as COMBINATIONS (R3)
+    bool stageBlsq = false;         // --stageB-lsq (round 402): EVERY matching key registered; Gauss-Newton (app_lsq) steps
     std::string sbtestin, sbtestout; // --stageB-eval-test IN OUT (round 345): run the evaluator on states, write rows / Jacobians, exit
     std::string defstore, defapply;  // --defect-store FILE / --defect FILE (round 347): the J = 0 defect b0, stored / subtracted
     bool horizonlive = false;       // --horizon-live (round 347, needs --stageB): horizon rows rebuilt on the current state
@@ -1444,6 +1610,7 @@ int main(int argc, char** argv)
         else if (k == "--stageB") stageB = argv[++i];
         else if (k == "--stageB-rows") stageBrows = argv[++i];
         else if (k == "--stageB-mcomb") stageBmcomb = argv[++i];
+        else if (k == "--stageB-lsq") stageBlsq = true;
         else if (k == "--stageB-xform") stageBxform = argv[++i];
         else if (k == "--lsolve") lsolve = argv[++i];
         else if (k == "--pv2-coeffs") pv2coeffs = argv[++i];
@@ -4436,7 +4603,7 @@ int main(int argc, char** argv)
                 std::vector<int> qs(nc_);
                 for (int c = 0; c < nc_; c++) {
                     fm >> qs[c];
-                    if (qs[c] < 0 || qs[c] >= sbshared->ev.NMK || !sbshared->ev.mk[qs[c]].kept) {
+                    if (qs[c] < 0 || qs[c] >= sbshared->ev.NMK || (!sbshared->ev.mk[qs[c]].kept && !stageBlsq)) {
                         std::cerr << "FATAL: --stageB-mcomb: key " << qs[c] << " not a kept matching key\n"; MPI_Finalize(); return 1;
                     }
                 }
@@ -4466,7 +4633,7 @@ int main(int argc, char** argv)
             }
             for (int q = 0; q < sbshared->ev.NMK && stageBmcomb.empty(); q++) {
                 const sbe::MKey& K = sbshared->ev.mk[q];
-                if (!K.kept) continue;
+                if (!K.kept && !stageBlsq) continue;          // round 402: --stageB-lsq registers every key
                 const std::string ex = K.d ? std::string("dr(") + fnm[K.F] + ")" : std::string(fnm[K.F]);
                 Index pos_cf(space.get_domain(0)->get_nbr_coefs());
                 pos_cf.set(1) = K.k;
@@ -5863,7 +6030,8 @@ int main(int argc, char** argv)
                     const auto t_nw0 = std::chrono::steady_clock::now();
 #endif
 #ifdef TRUMPET_BULK2
-                    ok = lsolve.empty() ? syst.do_newton(newtonprec, err) : app_newton(syst, lsolve, newtonprec, err, it, rank);
+                    ok = stageBlsq ? app_lsq(syst, newtonprec, err, it, rank)
+                                   : lsolve.empty() ? syst.do_newton(newtonprec, err) : app_newton(syst, lsolve, newtonprec, err, it, rank);
 #else
                     ok = syst.do_newton(newtonprec, err);
 #endif
@@ -5899,7 +6067,7 @@ int main(int argc, char** argv)
             }
 #ifdef TRUMPET_BULK2
             if (probekmin >= 0 && !threw) {        // round 352: the double-root probe (the state left at k*)
-                if (lsolve.empty()) { std::cerr << "FATAL: --probe-after needs --lsolve\n"; return 1; }
+                if (lsolve.empty() || stageBlsq) { std::cerr << "FATAL: --probe-after needs --lsolve (and not --stageB-lsq)\n"; return 1; }
                 app_probe(syst, probekmin, probeout, rank);
             }
 #endif

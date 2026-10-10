@@ -1230,6 +1230,7 @@ int main(int argc, char** argv)
     std::string stageBrows;         // --stageB-rows FILE (round 345): the throat rows to register (indices into the exported rows)
     std::string stageBmcomb;        // --stageB-mcomb FILE (round 399): the kept matching rows registered as COMBINATIONS (R3)
     bool stageBlsq = false;         // --stageB-lsq (round 402): EVERY matching key registered; Gauss-Newton (app_lsq) steps
+    std::string applystep; double applyeps = 0.0;   // --apply-step FILE EPS (round 405, diagnostic): var -= EPS X before the Newton block
     std::string sbtestin, sbtestout; // --stageB-eval-test IN OUT (round 345): run the evaluator on states, write rows / Jacobians, exit
     std::string defstore, defapply;  // --defect-store FILE / --defect FILE (round 347): the J = 0 defect b0, stored / subtracted
     bool horizonlive = false;       // --horizon-live (round 347, needs --stageB): horizon rows rebuilt on the current state
@@ -1632,6 +1633,7 @@ int main(int argc, char** argv)
         else if (k == "--stageB-rows") stageBrows = argv[++i];
         else if (k == "--stageB-mcomb") stageBmcomb = argv[++i];
         else if (k == "--stageB-lsq") stageBlsq = true;
+        else if (k == "--apply-step") { applystep = argv[++i]; applyeps = std::stod(argv[++i]); }
         else if (k == "--stageB-lsq-w") { const std::string w_ = argv[++i]; if (w_ == "scalefree") g_lsq_wmode = 1; else if (w_ != "rowmax") { std::cerr << "FATAL: --stageB-lsq-w rowmax|scalefree\n"; return 1; } }
         else if (k == "--stageB-xform") stageBxform = argv[++i];
         else if (k == "--lsolve") lsolve = argv[++i];
@@ -5991,6 +5993,25 @@ int main(int argc, char** argv)
         // backward-stable solve drives the residual down whatever the step is,
         // and only the size and smoothness of the step separates a real
         // correction from amplified roundoff.
+#ifdef TRUMPET_BULK2
+        // ⚠ ROUND 405 (research round 848, task 2; DIAGNOSTIC): --apply-step FILE EPS -- a vector X in Kadath's column space (one value
+        // per unknown, in do_col_J's order = a --dump's .cols order) applied to the state exactly as a Newton step is applied
+        // (Space::xx_to_vars_variable_domains, System_of_eqs::xx_to_vars_delta: var -= EPS X), before the Newton block; with no
+        // Newton the --dump-eqvals / --pv2-resid outputs then read the state - EPS X.  Without the flag nothing changes.
+        if (!applystep.empty()) {
+            const int nu = syst.get_nbr_unknowns();
+            std::ifstream fx(applystep);
+            Kadath::Array<double> X(nu);
+            int got = 0;
+            double xv;
+            while (got < nu && (fx >> xv)) X.set(got++) = applyeps * xv;
+            if (got != nu) { std::cerr << "FATAL: --apply-step: " << got << " values for " << nu << " unknowns\n"; MPI_Finalize(); return 1; }
+            int conte = 0;
+            syst.get_space().xx_to_vars_variable_domains(&syst, X, conte);
+            syst.xx_to_vars_delta(X, conte);
+            if (rank == 0) std::cout << "#  --apply-step: var -= " << applyeps << " x (" << applystep << ", " << nu << " values)\n";
+        }
+#endif
         if (donewton) {
             const char* fnm[6]  = {"PS", "PH", "QF", "BR", "BT", "QB"};
             const int   fcnt[6] = {NCE, NCE, NCE, NCE, NSE, NCO};

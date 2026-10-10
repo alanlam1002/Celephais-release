@@ -624,6 +624,12 @@ extern "C" {
 void dgglse_(const int*, const int*, const int*, double*, const int*, double*, const int*, double*, double*, double*, double*,
              const int*, int*);
 }
+// ROUND 403 (research round 843, task 2): --stageB-lsq-w scalefree -- the MATCHING rows' W in stage A's scale-free metric [C0; r_m C1]
+// (1 on a C0 row "SBM F d0 kK", r_m on a C1 row "SBM F d1 kK"), times ONE common factor (the median over the matching rows of
+// row-max W / scale-free W: it balances the line-search norm against the imposed rows' and does not change the least-squares
+// solution).  The imposed rows' W is unchanged (they are imposed exactly; W enters only the line search there).  Default: row max.
+static int g_lsq_wmode = 0;                // 0 row max (round 402), 1 scale-free
+static double g_lsq_rm = 0.0;              // r_m (the stage-B export's RM)
 static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int it, int rank)
 {
     int nproc = 1;
@@ -670,14 +676,21 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         auto pow2 = [](double s) { int e; std::frexp(s, &e); return std::ldexp(1.0, e - 1); };
         // the matching rows
         std::vector<char> ism(m, 0);
+        std::vector<double> sfw(m, 0.0);           // round 403: the scale-free weight of a matching row
         {
             std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
             syst.classify_equation_row_metadata(rmeta);
             const auto& EI = EqListPeek::eqints(syst);
             for (const auto& rw : rmeta)
                 if (rw.equation_type == "Eq_int" && rw.eq_index >= 0 && rw.eq_index < static_cast<int>(EI.size()) && rw.row >= 0 &&
-                    rw.row < m && std::get<0>(EI[rw.eq_index]).rfind("SBM", 0) == 0)
+                    rw.row < m && std::get<0>(EI[rw.eq_index]).rfind("SBM", 0) == 0) {
                     ism[rw.row] = 1;
+                    const std::string& lb = std::get<0>(EI[rw.eq_index]);
+                    if (g_lsq_wmode == 1) {
+                        if (lb.rfind("SBM ", 0) != 0) throw std::runtime_error("--stageB-lsq-w scalefree: combination rows (" + lb + ") not supported");
+                        sfw[rw.row] = lb.find(" d1 ") != std::string::npos ? g_lsq_rm : 1.0;
+                    }
+                }
         }
         std::vector<int> im, ic;
         for (int r = 0; r < m; r++) (ism[r] ? im : ic).push_back(r);
@@ -685,6 +698,14 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         std::fill(R0.begin(), R0.end(), 0.0);
         for (int c = 0; c < n; c++) for (int r = 0; r < m; r++) R0[r] = std::max(R0[r], std::fabs(Aat(r, c)));
         for (int r = 0; r < m; r++) R0[r] = R0[r] > 0 ? 1.0 / R0[r] : 1.0;
+        if (g_lsq_wmode == 1) {                                         // round 403: the scale-free W on the matching rows
+            std::vector<double> rat;
+            for (int r = 0; r < m; r++) if (ism[r]) rat.push_back(R0[r] / sfw[r]);
+            std::nth_element(rat.begin(), rat.begin() + rat.size() / 2, rat.end());
+            const double cf = rat[rat.size() / 2];
+            for (int r = 0; r < m; r++) if (ism[r]) R0[r] = cf * sfw[r];
+            if (it == 0) std::cout << "#  lsq: matching-row W scale-free [C0; r_m C1], r_m " << std::setprecision(12) << g_lsq_rm << ", common factor " << cf << "\n";
+        }
         std::vector<double> Cs(n, 0.0);
         for (int c = 0; c < n; c++) {
             for (int r = 0; r < m; r++) Cs[c] = std::max(Cs[c], std::fabs(R0[r] * Aat(r, c)));
@@ -1611,6 +1632,7 @@ int main(int argc, char** argv)
         else if (k == "--stageB-rows") stageBrows = argv[++i];
         else if (k == "--stageB-mcomb") stageBmcomb = argv[++i];
         else if (k == "--stageB-lsq") stageBlsq = true;
+        else if (k == "--stageB-lsq-w") { const std::string w_ = argv[++i]; if (w_ == "scalefree") g_lsq_wmode = 1; else if (w_ != "rowmax") { std::cerr << "FATAL: --stageB-lsq-w rowmax|scalefree\n"; return 1; } }
         else if (k == "--stageB-xform") stageBxform = argv[++i];
         else if (k == "--lsolve") lsolve = argv[++i];
         else if (k == "--pv2-coeffs") pv2coeffs = argv[++i];
@@ -3839,6 +3861,7 @@ int main(int argc, char** argv)
         // ⚠ ROUND 345: the stage-B unknowns, one scalar each (STATIC: add_var stores a pointer), seeded from the data
         if (!stageB.empty()) {
             sbshared.reset(new SBShared(stageB, havejj ? jjoverride : 0.0));
+            g_lsq_rm = sbshared->ev.RM;                     // round 403: r_m for --stageB-lsq-w scalefree
             static std::vector<double> sbu;
             sbu.resize(sbshared->ev.NU);
             char nm[16];

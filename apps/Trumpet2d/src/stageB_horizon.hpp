@@ -37,7 +37,11 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#ifdef TRUMPET_STAGEB_C3
+#include "stageB_gen_c3.hpp"     // round 410 (V2): the same generated module as stageB_eval.hpp
+#else
 #include "stageB_gen.hpp"
+#endif
 
 extern "C" void dgesvd_(const char* jobu, const char* jobvt, const int* m, const int* n, double* a, const int* lda, double* s,
                         double* u, const int* ldu, double* vt, const int* ldvt, double* work, const int* lwork, int* info);

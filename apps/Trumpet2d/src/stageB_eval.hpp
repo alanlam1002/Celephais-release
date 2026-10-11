@@ -25,7 +25,12 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#ifdef TRUMPET_STAGEB_C3
+// Round 410 (research round 858, V2): the throat equations with the C3 twist terms (stageB_codegen.py under THROAT_C3=1); V2 binary only
+#include "stageB_gen_c3.hpp"
+#else
 #include "stageB_gen.hpp"
+#endif
 
 namespace sbe {
 typedef std::complex<double> cplx;

@@ -177,3 +177,12 @@ set_target_properties(trumpet2d_finiteJ_probe_bulk2_sxqr PROPERTIES
 target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_sxqr PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_EQREG)
 target_include_directories(trumpet2d_finiteJ_probe_bulk2_sxqr PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
+# Code round 410 (research round 858, V2): the hybrid's regular-E_q emission with the C3 twist terms (E_q's regular group at eta = +1;
+# finiteJ_eqs_qreg_drvt_r2k_sxqrc3.hpp).  Separate binary; stageB_run.sh's BULK2_V2=1 selects it (with BULK2_HYB's --eqfn-hybrid).
+kadath_add_exec(trumpet2d_finiteJ_probe_bulk2_v2 src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_bulk2_v2 PROPERTIES
+    OUTPUT_NAME finiteJ_probe_bulk2_v2)
+target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_v2 PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_EQREG TRUMPET_C3 TRUMPET_STAGEB_C3)
+target_include_directories(trumpet2d_finiteJ_probe_bulk2_v2 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)

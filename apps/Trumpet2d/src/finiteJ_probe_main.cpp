@@ -47,6 +47,11 @@
 #endif
 #ifdef TRUMPET_CHI_UNKNOWN
 #include "src/finiteJ_eqs_chi.hpp"
+#elif defined(TRUMPET_BULK2) && defined(TRUMPET_SEXP) && defined(TRUMPET_EQREG) && defined(TRUMPET_C3)
+// ⚠ Round 410 (research round 858, V2): the hybrid's regular-E_q emission WITH the C3 twist terms -- E_q's regular twist group at eta = +1
+// (bOmw = Omw psibar; finiteJ_system.eqreg_source selects it on the C3 source) -- scripts/finiteJ_emit.py --q-regular --c3 --s-expand
+// --eq-regular --r-into-square D0080 (TH2_DRVT_FIX=1; D0080 = sxqr's D0081 renumbered).  Own binary only (finiteJ_probe_bulk2_v2).
+#include "src/finiteJ_eqs_qreg_drvt_r2k_sxqrc3.hpp"
 #elif defined(TRUMPET_BULK2) && defined(TRUMPET_SEXP) && defined(TRUMPET_EQREG)
 // ⚠ Round 393 (research rounds 810-811, A PROBE): the product-rule baseline with E_q's twist group in the REGULAR form (no explicit
 // 1/sin^4: QB and divsint(BT) directly; scripts/finiteJ_emit.py --q-regular --s-expand --eq-regular --r-into-square D0081), so the q row

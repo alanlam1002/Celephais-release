@@ -634,6 +634,9 @@ void dgglse_(const int*, const int*, const int*, double*, const int*, double*, c
 // row-max W / scale-free W: it balances the line-search norm against the imposed rows' and does not change the least-squares
 // solution).  The imposed rows' W is unchanged (they are imposed exactly; W enters only the line search there).  Default: row max.
 static int g_lsq_wmode = 0;                // 0 row max (round 402), 1 scale-free
+// ROUND 413 (research round 869, option (a)): --stageB-lsq-impose-qb -- the twist's matching rows ("SBM QB ...") are IMPOSED exactly
+// (dgglse's constraint set) instead of least squares; every other matching row stays least squares.  Default off: unchanged.
+static bool g_lsq_impose_qb = false;
 static double g_lsq_rm = 0.0;              // r_m (the stage-B export's RM)
 static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int it, int rank)
 {
@@ -688,7 +691,8 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
             const auto& EI = EqListPeek::eqints(syst);
             for (const auto& rw : rmeta)
                 if (rw.equation_type == "Eq_int" && rw.eq_index >= 0 && rw.eq_index < static_cast<int>(EI.size()) && rw.row >= 0 &&
-                    rw.row < m && std::get<0>(EI[rw.eq_index]).rfind("SBM", 0) == 0) {
+                    rw.row < m && std::get<0>(EI[rw.eq_index]).rfind("SBM", 0) == 0 &&
+                    !(g_lsq_impose_qb && std::get<0>(EI[rw.eq_index]).rfind("SBM QB ", 0) == 0)) {
                     ism[rw.row] = 1;
                     const std::string& lb = std::get<0>(EI[rw.eq_index]);
                     if (g_lsq_wmode == 1) {
@@ -700,6 +704,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         std::vector<int> im, ic;
         for (int r = 0; r < m; r++) (ism[r] ? im : ic).push_back(r);
         const int mm = static_cast<int>(im.size()), p = static_cast<int>(ic.size());
+        if (g_lsq_impose_qb && it == 0) std::cout << "#  lsq: --stageB-lsq-impose-qb: the SBM QB rows imposed; " << mm << " least-squares rows, " << p << " imposed\n";
         std::fill(R0.begin(), R0.end(), 0.0);
         for (int c = 0; c < n; c++) for (int r = 0; r < m; r++) R0[r] = std::max(R0[r], std::fabs(Aat(r, c)));
         for (int r = 0; r < m; r++) R0[r] = R0[r] > 0 ? 1.0 / R0[r] : 1.0;
@@ -1641,6 +1646,7 @@ int main(int argc, char** argv)
         else if (k == "--stageB-rows") stageBrows = argv[++i];
         else if (k == "--stageB-mcomb") stageBmcomb = argv[++i];
         else if (k == "--stageB-lsq") stageBlsq = true;
+        else if (k == "--stageB-lsq-impose-qb") g_lsq_impose_qb = true;
         else if (k == "--apply-step") { applystep = argv[++i]; applyeps = std::stod(argv[++i]); }
         else if (k == "--stageB-lsq-w") { const std::string w_ = argv[++i]; if (w_ == "scalefree") g_lsq_wmode = 1; else if (w_ != "rowmax") { std::cerr << "FATAL: --stageB-lsq-w rowmax|scalefree\n"; return 1; } }
         else if (k == "--stageB-xform") stageBxform = argv[++i];

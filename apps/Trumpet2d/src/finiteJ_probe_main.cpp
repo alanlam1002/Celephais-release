@@ -4563,7 +4563,7 @@ int main(int argc, char** argv)
             if (rank == 0)
                 std::cout << "#  --horizon-live: " << ntw + nsc << " horizon rows (twist " << ntw << ", scalar " << nsc
                           << "), the surface on " << hzshared->NTH << " Gauss nodes: r_H " << std::setprecision(17) << rmin
-                          << " .. " << rmax << " (last |f| " << hzshared->fres << "); kernel singular values kept/dropped: twist "
+                          << " .. " << rmax << " (last |f| " << hzshared->fres << ", bracketed nodes " << hzshared->nfallback << "); kernel singular values kept/dropped: twist "
                           << hzshared->svmin[0] << " / " << hzshared->svmin[1] << ", scalar " << hzshared->svmin[2] << " / "
                           << hzshared->svmin[3] << "; rebuild " << hzshared->tbuild << " s\n";
             emit("FJPH_rows", ntw + nsc);

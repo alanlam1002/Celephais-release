@@ -197,6 +197,7 @@ struct HZShared {
         sys = s; space = sp; NT = nt; Jv = J; lo = l; hi = h;
         NTH = 4 * NT + 24;
         gauss(NTH, 0.0, M_PI, th, W);
+        if (const char* r0e = std::getenv("HZ_R0")) r0 = std::atof(r0e);   // round 414: continuation from a supplied r_H
         rH.assign(NTH, r0);
         num.assign(NTH, Kadath::Point(2));
         auto ope = [&](const std::string& ex) {
@@ -230,27 +231,62 @@ struct HZShared {
         return space->get_domain(dom)->absol_to_num(M);
     }
     // the degenerate surface at node m on the jets' Terms (Newton in r)
-    double locate(const std::vector<Kadath::Term_eq>& T, int m, double rg, double& res) const
+    // ⚠ ROUND 414 (research round 871, stage D): Newton from the guess is kept EXACTLY as before and accepted when it converges inside
+    // domain 1 [lo, hi] (production bitwise when the root is near the guess); otherwise a BRACKETED search: f on a log-spaced scan of
+    // domain 1 (NSCAN points), the sign change nearest the guess, bisection to 1e-15 r.  HZ_R0=r (env): continuation -- the initial
+    // guess r0 replaced by a supplied previous r_H.  nfallback counts the nodes that needed the bracket.
+    mutable long nfallback = 0;
+    double fval_at(const std::vector<Kadath::Term_eq>& T, int m, double r, double* dfo) const
     {
         const Kadath::Val_domain &ps = vd(T[24].get_val_t(), dom), &psr = vd(T[27].get_val_t(), dom),
                                  &ph = vd(T[0].get_val_t(), dom), &phr = vd(T[3].get_val_t(), dom),
                                  &br = vd(T[12].get_val_t(), dom), &brr = vd(T[15].get_val_t(), dom),
                                  &bt = vd(T[18].get_val_t(), dom), &btr = vd(T[21].get_val_t(), dom),
                                  &q = vd(T[30].get_val_t(), dom), &qr = vd(T[33].get_val_t(), dom);
+        const Kadath::Point p = point(r, th[m]);
+        const double PS = at(ps, p), PH = at(ph, p), BR = at(br, p), BT = at(bt, p), Q = at(q, p);
+        const double dPS = at(psr, p), dPH = at(phr, p), dBR = at(brr, p), dBT = at(btr, p), dQ = at(qr, p);
+        const double b2 = BR * BR + r * r * BT * BT, db2 = 2 * BR * dBR + 2 * r * BT * BT + 2 * r * r * BT * dBT;
+        const double g = std::pow(PS, 4) * std::exp(2 * Q) / (PH * PH);
+        const double dg = g * (4 * dPS / PS + 2 * dQ - 2 * dPH / PH);
+        if (dfo) *dfo = -(dg * b2 + g * db2);
+        return 1 - g * b2;
+    }
+    double locate(const std::vector<Kadath::Term_eq>& T, int m, double rg, double& res) const
+    {
         double r = rg;
+        bool conv = false;
         for (int it = 0; it < 60; it++) {
-            const Kadath::Point p = point(r, th[m]);
-            const double PS = at(ps, p), PH = at(ph, p), BR = at(br, p), BT = at(bt, p), Q = at(q, p);
-            const double dPS = at(psr, p), dPH = at(phr, p), dBR = at(brr, p), dBT = at(btr, p), dQ = at(qr, p);
-            const double b2 = BR * BR + r * r * BT * BT, db2 = 2 * BR * dBR + 2 * r * BT * BT + 2 * r * r * BT * dBT;
-            const double g = std::pow(PS, 4) * std::exp(2 * Q) / (PH * PH);
-            const double dg = g * (4 * dPS / PS + 2 * dQ - 2 * dPH / PH);
-            const double f = 1 - g * b2, df = -(dg * b2 + g * db2);
+            if (!(r > lo && r < hi)) break;                     // left domain 1: Newton is not valid there (round 410's a = 0.9 failure)
+            double df;
+            const double f = fval_at(T, m, r, &df);
             const double dr = f / df;
             r -= dr;
             res = f;
-            if (std::fabs(dr) < 1e-15 * r) break;
+            if (std::fabs(dr) < 1e-15 * r) { conv = true; break; }
         }
+        if (conv && r > lo && r < hi && std::isfinite(r)) return r;
+        // the bracket
+        nfallback++;
+        const int NSCAN = 400;
+        double rp = 0, fp = 0, best = -1, bl = 0, bh = 0;
+        for (int i = 0; i <= NSCAN; i++) {
+            const double rr = lo * std::pow(hi / lo, (i + 0.5) / (NSCAN + 1.0));
+            const double f = fval_at(T, m, rr, nullptr);
+            if (i > 0 && std::isfinite(f) && std::isfinite(fp) && (f > 0) != (fp > 0)) {
+                const double d = std::fabs(std::log(0.5 * (rr + rp) / rg));
+                if (best < 0 || d < best) { best = d; bl = rp; bh = rr; }
+            }
+            rp = rr; fp = f;
+        }
+        if (best < 0) throw std::runtime_error("horizon: no sign change of f in domain 1 (node " + std::to_string(m) + ")");
+        double fl = fval_at(T, m, bl, nullptr);
+        for (int it = 0; it < 200 && bh - bl > 1e-15 * bh; it++) {
+            const double mid = 0.5 * (bl + bh), fm = fval_at(T, m, mid, nullptr);
+            if ((fm > 0) == (fl > 0)) { bl = mid; fl = fm; } else bh = mid;
+        }
+        r = 0.5 * (bl + bh);
+        res = fval_at(T, m, r, nullptr);
         return r;
     }
     void rebuild(const std::vector<Kadath::Term_eq>& T)
@@ -264,6 +300,9 @@ struct HZShared {
         rHprev = rH;
         if (!frozen)
             for (int m = 0; m < NTH; m++) rH[m] = fix ? std::atof(fix) : locate(T, m, built ? rH[m] : r0, fres);
+        if (const char* dmp = std::getenv("HZ_RH_DUMP")) {          // round 414: the located surface per node (diagnostic; first rebuild only)
+            if (!built) { std::ofstream o(dmp); o << std::setprecision(17); for (int m = 0; m < NTH; m++) o << th[m] << " " << rH[m] << " " << fval_at(T, m, rH[m], nullptr) << "\n"; }
+        }
         drH = 0;
         if (built) for (int m = 0; m < NTH; m++) drH = std::max(drH, std::fabs(rH[m] - rHprev[m]));
         drHhist.push_back(built ? drH : -1.0);

@@ -25,15 +25,32 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#ifdef TRUMPET_STAGEB_C3
+#if defined(TRUMPET_STAGEB_NG8)
+// Round 417 (research round 877): the 8-grade throat module (grades 0-7, rows -2..5; stageB_codegen.py under THROAT_C3=1 STAGEB_NG=8)
+#ifndef TRUMPET_STAGEB_C3
+#error "TRUMPET_STAGEB_NG8 needs TRUMPET_STAGEB_C3 (the 8-grade module is generated with the C3 terms only)"
+#endif
+#include "stageB_gen_c3_ng8.hpp"
+#define SBE_NG 8
+#elif defined(TRUMPET_STAGEB_C3)
 // Round 410 (research round 858, V2): the throat equations with the C3 twist terms (stageB_codegen.py under THROAT_C3=1); V2 binary only
 #include "stageB_gen_c3.hpp"
+#define SBE_NG 6
 #else
 #include "stageB_gen.hpp"
+#define SBE_NG 6
 #endif
 
 namespace sbe {
 typedef std::complex<double> cplx;
+// round 417: the grade count (6 in production) -- per field 3 NG amplitude symbols (grade x derivative), 6 x 3 NG first partials per field's
+// six jets, NS = 2 x 6 x 3 NG + 1 gradient symbols (A, L, n), NG row orders (-2 .. NG - 3)
+constexpr int NG = SBE_NG, S3 = 3 * NG, DJN = 6 * S3, NSYM = 2 * 6 * S3 + 1;
+constexpr int imax(int a, int b) { return a > b ? a : b; }
+constexpr int D2MAX = imax(400, imax(imax(imax(sbg::D2N_psi2, sbg::D2N_Phb), imax(sbg::D2N_qf, sbg::D2N_br)), imax(sbg::D2N_bt, sbg::D2N_Qb)));
+#if SBE_NG != 6
+static_assert(sbg::NGRADE == SBE_NG, "stageB: the generated module's grade count");
+#endif
 
 struct KeyInfo { int f, gi, kind, nfull; };            // kind 0 ce, 1 qs, 2 se, 3 co
 struct EqInfo { std::string name; int c0, c1, nth, nb; std::vector<double> Q; };
@@ -94,7 +111,7 @@ class Eval {
     Compl cs, ct;
     std::vector<MField> mf;
     std::vector<MKey> mk;
-    int keyof[6][7];
+    int keyof[6][NG + 1];
     double tval = 0, tjac = 0, tmatch = 0;
 
     explicit Eval(const std::string& path) { read(path); }
@@ -318,7 +335,7 @@ class Eval {
     void throat(const State& s, double Jv, std::vector<double>& out, std::vector<double>* G)
     {
         coef_layout();
-        const int NS = 217;                       // 108 A symbols, 108 L symbols, n
+        const int NS = NSYM;                      // 6 S3 A symbols, 6 S3 L symbols, n (217 in production)
         const bool grad = (G != nullptr);
         bool anyL = false;
         for (int k = 0; k < NK; k++) for (const cplx& v : s.lc[k]) if (v != 0.0) anyL = true;
@@ -327,19 +344,19 @@ class Eval {
         if (grad) G->assign(static_cast<size_t>(NTHR) * NC, 0.0);
         const int NV = grad ? NS + 1 : 1;         // slot 0 the value, 1.. the gradient
         std::vector<int> pmin(NE), pmax(NE);
-        for (int e = 0; e < NE; e++) { pmin[e] = eqs[e].c1 - 2; pmax[e] = eqs[e].c1 + 3; }
+        for (int e = 0; e < NE; e++) { pmin[e] = eqs[e].c1 - 2; pmax[e] = eqs[e].c1 + NG - 3; }
         // grid
         std::vector<cplx> rg(NR), xg(NX);
         for (int a = 0; a < NR; a++) rg[a] = std::polar(1.0, 2 * M_PI * a / NR);
         for (int b = 0; b < NX; b++) xg[b] = RX * std::polar(1.0, 2 * M_PI * b / NX);
-        std::vector<cplx> coef(static_cast<size_t>(NE) * 2 * 6 * NV);
+        std::vector<cplx> coef(static_cast<size_t>(NE) * 2 * NG * NV);
         std::vector<cplx> Sx(static_cast<size_t>(NE) * 2 * NV);
         double angv[3];
         for (int t = 0; t < NTH; t++) {
-            // amplitude functions on this node: per field the 18 symbols (grade index x derivative)
-            cplx A[6][18], L[6][18];
+            // amplitude functions on this node: per field the S3 symbols (grade index x derivative)
+            cplx A[6][S3], L[6][S3];
             std::vector<std::vector<std::array<double, 3>>> ang(NK);
-            for (int f = 0; f < 6; f++) for (int s_ = 0; s_ < 18; s_++) { A[f][s_] = 0.0; L[f][s_] = 0.0; }
+            for (int f = 0; f < 6; f++) for (int s_ = 0; s_ < S3; s_++) { A[f][s_] = 0.0; L[f][s_] = 0.0; }
             for (int k = 0; k < NK; k++) {
                 ang[k].resize(keys[k].nfull);
                 for (int j = 0; j < keys[k].nfull; j++) {
@@ -356,32 +373,32 @@ class Eval {
                 std::fill(Sx.begin(), Sx.end(), cplx(0.0));
                 for (int a = 0; a < NR; a++) {
                     const cplx r = rg[a], x = xg[b];
-                    cplx Jt[36], dJ[6][108], dJn[6][6], d2J[6][400], d2Jn[6][108];
+                    cplx Jt[36], dJ[6][DJN], dJn[6][6], d2J[6][D2MAX], d2Jn[6][DJN];
                     for (int f = 0; f < 6; f++) {
                         cplx J6[6];
-                        for (int q = 0; q < 108; q++) dJ[f][q] = 0.0;
+                        for (int q = 0; q < DJN; q++) dJ[f][q] = 0.0;
                         for (int q = 0; q < 6; q++) dJn[f][q] = 0.0;
                         jets1(f)(A[f], r, x, n, J6, dJ[f], dJn[f]);
                         for (int q = 0; q < 6; q++) Jt[jpos(f)[q]] = J6[q];
                         if (anyL) {
-                            for (int q = 0; q < 108; q++) d2Jn[f][q] = 0.0;
+                            for (int q = 0; q < DJN; q++) d2Jn[f][q] = 0.0;
                             jets2(f)(A[f], r, x, n, d2J[f], d2Jn[f]);
                         }
                     }
                     // companions' jets: DJ = dJ/da . L ; CJ the commutator; and their derivatives
                     cplx DJ[36], CJ[36];
                     for (int q = 0; q < 36; q++) { DJ[q] = 0.0; CJ[q] = 0.0; }
-                    cplx dDJ[6][6][18], dDJn[6][6];       // d DJ_(f, jet) / d A_s ; d / dn
+                    cplx dDJ[6][6][S3], dDJn[6][6];       // d DJ_(f, jet) / d A_s ; d / dn
                     if (anyL) {
                         for (int f = 0; f < 6; f++) {
                             for (int q = 0; q < 6; q++) {
                                 cplx acc = 0.0;
-                                for (int s_ = 0; s_ < 18; s_++) acc += dJ[f][18 * q + s_] * L[f][s_];
+                                for (int s_ = 0; s_ < S3; s_++) acc += dJ[f][S3 * q + s_] * L[f][s_];
                                 DJ[jpos(f)[q]] = acc;
                                 cplx an = 0.0;
-                                for (int s_ = 0; s_ < 18; s_++) an += d2Jn[f][18 * q + s_] * L[f][s_];
+                                for (int s_ = 0; s_ < S3; s_++) an += d2Jn[f][S3 * q + s_] * L[f][s_];
                                 dDJn[f][q] = an;
-                                for (int s_ = 0; s_ < 18; s_++) dDJ[f][q][s_] = 0.0;
+                                for (int s_ = 0; s_ < S3; s_++) dDJ[f][q][s_] = 0.0;
                             }
                             const int (*pp)[3] = d2p(f);
                             for (int m = 0; m < d2n(f); m++) {
@@ -421,28 +438,28 @@ class Eval {
                         }
                         for (int f = 0; f < 6; f++) {
                             const int* jp = jpos(f);
-                            for (int s_ = 0; s_ < 18; s_++) {
+                            for (int s_ = 0; s_ < S3; s_++) {
                                 cplx gA0 = 0.0, gA1 = 0.0, gL0 = 0.0, gL1 = 0.0;
                                 for (int q = 0; q < 6; q++) {
-                                    const cplx d = dJ[f][18 * q + s_];
+                                    const cplx d = dJ[f][S3 * q + s_];
                                     gA0 += (P[jp[q]] + hc[jp[q]]) * d;
                                     gA1 += hd[jp[q]] * d;
                                     gL1 += P[jp[q]] * d;
                                 }
                                 // d CJ / d L_s from the commutator of dJ[.][s]
-                                gL0 += P[jp[1]] * (n / r * dJ[f][18 * 0 + s_])
-                                     + P[jp[3]] * (2.0 * n / r * dJ[f][18 * 1 + s_] - n / (r * r) * dJ[f][18 * 0 + s_])
-                                     + P[jp[4]] * (n / r * dJ[f][18 * 2 + s_]);
+                                gL0 += P[jp[1]] * (n / r * dJ[f][S3 * 0 + s_])
+                                     + P[jp[3]] * (2.0 * n / r * dJ[f][S3 * 1 + s_] - n / (r * r) * dJ[f][S3 * 0 + s_])
+                                     + P[jp[4]] * (n / r * dJ[f][S3 * 2 + s_]);
                                 if (anyL) {
                                     for (int q = 0; q < 6; q++) gA1 += P[jp[q]] * dDJ[f][q][s_];
                                     gA0 += P[jp[1]] * (n / r * dDJ[f][0][s_])
                                          + P[jp[3]] * (2.0 * n / r * dDJ[f][1][s_] - n / (r * r) * dDJ[f][0][s_])
                                          + P[jp[4]] * (n / r * dDJ[f][2][s_]);
                                 }
-                                S0[1 + 18 * f + s_] += gA0 * w;
-                                S1[1 + 18 * f + s_] += gA1 * w;
-                                S0[1 + 108 + 18 * f + s_] += gL0 * w;
-                                S1[1 + 108 + 18 * f + s_] += gL1 * w;
+                                S0[1 + S3 * f + s_] += gA0 * w;
+                                S1[1 + S3 * f + s_] += gA1 * w;
+                                S0[1 + DJN + S3 * f + s_] += gL0 * w;
+                                S1[1 + DJN + S3 * f + s_] += gL1 * w;
                             }
                         }
                         cplx gn0 = 0.0, gn1 = 0.0;
@@ -459,18 +476,18 @@ class Eval {
                                      + P[jp[4]] * (DJ[jp[2]] / r + n / r * dDJn[f][2]);
                             }
                         }
-                        S0[1 + 216] += gn0 * w;
-                        S1[1 + 216] += gn1 * w;
+                        S0[1 + 2 * DJN] += gn0 * w;
+                        S1[1 + 2 * DJN] += gn1 * w;
                     }
                 }
                 // fold this x-column into the rho^p coefficients
                 for (int e = 0; e < NE; e++)
-                    for (int g = 0; g < 6; g++) {
+                    for (int g = 0; g < NG; g++) {
                         const int p = pmin[e] + g;
                         const cplx w = std::pow(xg[b], -p) / static_cast<double>(NR * NX);
                         for (int y = 0; y < 2; y++) {
                             const cplx* S = &Sx[(static_cast<size_t>(e) * 2 + y) * NV];
-                            cplx* C = &coef[((static_cast<size_t>(e) * 2 + y) * 6 + g) * NV];
+                            cplx* C = &coef[((static_cast<size_t>(e) * 2 + y) * NG + g) * NV];
                             for (int v = 0; v < NV; v++) C[v] += S[v] * w;
                         }
                     }
@@ -481,7 +498,7 @@ class Eval {
                 const EqInfo& Eq = eqs[R.e];
                 const int g = R.g + 2;                 // g from -2
                 const double qw = Eq.Q[static_cast<size_t>(t) * Eq.nb + R.i] * sw[t] / R.nr;
-                const cplx* C = &coef[((static_cast<size_t>(R.e) * 2 + R.part) * 6 + g) * NV];
+                const cplx* C = &coef[((static_cast<size_t>(R.e) * 2 + R.part) * NG + g) * NV];
                 out[ro] += qw * C[0].real();
                 if (!grad) continue;
                 double* Gr = &(*G)[static_cast<size_t>(ro) * NC];
@@ -490,14 +507,14 @@ class Eval {
                     for (int j = 0; j < keys[k].nfull; j++) {
                         double ga = 0.0, gl = 0.0;
                         for (int d = 0; d < 3; d++) {
-                            ga += C[1 + 18 * f + 3 * gi + d].real() * ang[k][j][d];
-                            gl += C[1 + 108 + 18 * f + 3 * gi + d].real() * ang[k][j][d];
+                            ga += C[1 + S3 * f + 3 * gi + d].real() * ang[k][j][d];
+                            gl += C[1 + DJN + S3 * f + 3 * gi + d].real() * ang[k][j][d];
                         }
                         Gr[caoff[k] + j] += qw * ga;
                         Gr[cloff[k] + j] += qw * gl;
                     }
                 }
-                Gr[NC - 1] += qw * C[1 + 216].real();
+                Gr[NC - 1] += qw * C[1 + 2 * DJN].real();
             }
         }
     }
@@ -536,8 +553,8 @@ class Eval {
         // per field, values at the nodes
         std::vector<std::vector<cplx>> v0(6, std::vector<cplx>(NTHM)), v1(6, std::vector<cplx>(NTHM));
         for (int t = 0; t < NTHM; t++) {
-            cplx A[6][18], L[6][18];
-            for (int f = 0; f < 6; f++) for (int q = 0; q < 18; q++) { A[f][q] = 0.0; L[f][q] = 0.0; }
+            cplx A[6][S3], L[6][S3];
+            for (int f = 0; f < 6; f++) for (int q = 0; q < S3; q++) { A[f][q] = 0.0; L[f][q] = 0.0; }
             for (int k = 0; k < NK; k++)
                 for (int j = 0; j < keys[k].nfull; j++) {
                     angular(keys[k].kind, j + (keys[k].kind == 2 ? 1 : 0), thm[t], angv);
@@ -547,11 +564,11 @@ class Eval {
                     }
                 }
             for (int f = 0; f < 6; f++) {
-                cplx J6[6], dJ[108], dJn[6];
-                for (int q = 0; q < 108; q++) dJ[q] = 0.0;
+                cplx J6[6], dJ[DJN], dJn[6];
+                for (int q = 0; q < DJN; q++) dJ[q] = 0.0;
                 jets1(f)(A[f], cplx(RM), x, n, J6, dJ, dJn);
                 cplx D0 = 0.0, D1 = 0.0;
-                for (int q = 0; q < 18; q++) { D0 += dJ[q] * L[f][q]; D1 += dJ[18 + q] * L[f][q]; }
+                for (int q = 0; q < S3; q++) { D0 += dJ[q] * L[f][q]; D1 += dJ[S3 + q] * L[f][q]; }
                 v0[f][t] = J6[0] + lnr * D0;
                 v1[f][t] = J6[1] + lnr * D1 + n / RM * D0;
             }

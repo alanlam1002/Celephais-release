@@ -186,3 +186,12 @@ set_target_properties(trumpet2d_finiteJ_probe_bulk2_v2 PROPERTIES
 target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_v2 PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_EQREG TRUMPET_C3 TRUMPET_STAGEB_C3)
 target_include_directories(trumpet2d_finiteJ_probe_bulk2_v2 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
+# Code round 417 (research round 877): the V2 binary with the 8-grade throat module (stageB_gen_c3_ng8.hpp; grades 0-7, rows -2..5), for the
+# grade-7 chain.  stageB_run.sh's BULK2_V2=1 STAGEB_NG=8 selects it.  The V2 binary above is unchanged.
+kadath_add_exec(trumpet2d_finiteJ_probe_bulk2_v2_ng8 src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_bulk2_v2_ng8 PROPERTIES
+    OUTPUT_NAME finiteJ_probe_bulk2_v2_ng8)
+target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_v2_ng8 PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_EQREG TRUMPET_C3 TRUMPET_STAGEB_C3 TRUMPET_STAGEB_NG8)
+target_include_directories(trumpet2d_finiteJ_probe_bulk2_v2_ng8 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)

@@ -37,7 +37,9 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#if defined(TRUMPET_STAGEB_NG8)
+#if defined(TRUMPET_STAGEB_NG10)
+#include "stageB_gen_c3_ng10.hpp" // round 425: the 10-grade module
+#elif defined(TRUMPET_STAGEB_NG8)
 #include "stageB_gen_c3_ng8.hpp" // round 417: the 8-grade module (its equations are the C3 module's)
 #elif defined(TRUMPET_STAGEB_C3)
 #include "stageB_gen_c3.hpp"     // round 410 (V2): the same generated module as stageB_eval.hpp

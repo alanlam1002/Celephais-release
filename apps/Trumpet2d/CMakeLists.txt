@@ -205,3 +205,18 @@ set_target_properties(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts PROPERTIES
 target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_EQREG TRUMPET_C3 TRUMPET_STAGEB_C3 TRUMPET_STAGEB_NG8 TRUMPET_STAGEB_TSPLIT)
 target_include_directories(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
+# Code round 425 (research round 893, the grade-9 chain): the 10-grade throat module (TRUMPET_STAGEB_NG10), plain and with the throat split.
+# stageB_run.sh's BULK2_V2=1 STAGEB_NG=10 [STAGEB_TSPLIT=1] selects them.  The other binaries are unchanged.
+kadath_add_exec(trumpet2d_finiteJ_probe_bulk2_v2_ng10 src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_bulk2_v2_ng10 PROPERTIES
+    OUTPUT_NAME finiteJ_probe_bulk2_v2_ng10)
+target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_v2_ng10 PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_EQREG TRUMPET_C3 TRUMPET_STAGEB_C3 TRUMPET_STAGEB_NG10)
+target_include_directories(trumpet2d_finiteJ_probe_bulk2_v2_ng10 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+kadath_add_exec(trumpet2d_finiteJ_probe_bulk2_v2_ng10_ts src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_bulk2_v2_ng10_ts PROPERTIES
+    OUTPUT_NAME finiteJ_probe_bulk2_v2_ng10_ts)
+target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_v2_ng10_ts PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_EQREG TRUMPET_C3 TRUMPET_STAGEB_C3 TRUMPET_STAGEB_NG10 TRUMPET_STAGEB_TSPLIT)
+target_include_directories(trumpet2d_finiteJ_probe_bulk2_v2_ng10_ts PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)

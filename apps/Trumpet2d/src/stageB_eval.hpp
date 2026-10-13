@@ -27,7 +27,14 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#if defined(TRUMPET_STAGEB_NG8)
+#if defined(TRUMPET_STAGEB_NG10)
+// Round 425 (research round 893): the 10-grade throat module (grades 0-9, rows -2..7; stageB_codegen.py under THROAT_C3=1 STAGEB_NG=10)
+#ifndef TRUMPET_STAGEB_C3
+#error "TRUMPET_STAGEB_NG10 needs TRUMPET_STAGEB_C3 (the 10-grade module is generated with the C3 terms only)"
+#endif
+#include "stageB_gen_c3_ng10.hpp"
+#define SBE_NG 10
+#elif defined(TRUMPET_STAGEB_NG8)
 // Round 417 (research round 877): the 8-grade throat module (grades 0-7, rows -2..5; stageB_codegen.py under THROAT_C3=1 STAGEB_NG=8)
 #ifndef TRUMPET_STAGEB_C3
 #error "TRUMPET_STAGEB_NG8 needs TRUMPET_STAGEB_C3 (the 8-grade module is generated with the C3 terms only)"

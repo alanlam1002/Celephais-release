@@ -655,6 +655,15 @@ static double g_lsq_floor_ratio = 0.0;
 //   (threaded dgglse was tried and NOT kept: mkl_set_num_threads_local / mkl_set_num_threads segfault in dgglse with this MKL (2025.2,
 //    gnu_thread; reproduced standalone), omp_set_num_threads has no effect; only a launch-time MKL_NUM_THREADS works -- see LOG round 420.)
 static bool g_lsq_jac_reuse = false;
+// ROUND 423 (research rounds 888-889): --eq-axis-row -- the AXIS VALUE of the registered EQFN lhs (regular-form E_q, its W and defect,
+// i.e. the sum of its theta coefficients: Ope_point at theta = 0) at every radial node of the bulk domains (r = inf skipped), one Eq_int
+// "AXQ <d> <i>" each, registered after the --defect store's rows (the store is unchanged) and placed in dgglse's LEAST-SQUARES set (the
+// imposed set is unchanged).  Needs --eqfn-plain / --eqfn-hybrid (the regular emission).  Default off: nothing registered.
+static bool g_eq_axis_row = false;
+// ROUND 423 (research round 889, task 3): --stageB-lsq-wd1 F -- the least-squares weight of the MATCHING rows' radial-derivative keys
+// ("SBM ... d1 ...") multiplied by F after the row-max W (the value keys keep theirs).  A uniform factor on every least-squares row
+// leaves dgglse's minimiser unchanged, so the matching's weight is varied relative to its own value rows.  Default 1: nothing changes.
+static double g_lsq_wd1 = 1.0;
 static void (*g_sb_timer_print)(const void*, int) = nullptr;
 static bool lsq_sbt_row(const std::string& lb)
 {
@@ -728,9 +737,11 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
             for (const auto& rw : rmeta)
                 if (rw.equation_type == "Eq_int" && rw.eq_index >= 0 && rw.eq_index < static_cast<int>(EI.size()) && rw.row >= 0 &&
                     rw.row < m && ((std::get<0>(EI[rw.eq_index]).rfind("SBM", 0) == 0 &&
-                    !(g_lsq_impose_qb && std::get<0>(EI[rw.eq_index]).rfind("SBM QB ", 0) == 0)) || lsq_sbt_row(std::get<0>(EI[rw.eq_index])))) {
+                    !(g_lsq_impose_qb && std::get<0>(EI[rw.eq_index]).rfind("SBM QB ", 0) == 0)) || lsq_sbt_row(std::get<0>(EI[rw.eq_index])) ||
+                    (g_eq_axis_row && std::get<0>(EI[rw.eq_index]).rfind("AXQ ", 0) == 0))) {
                     ism[rw.row] = 1;
                     const std::string& lb = std::get<0>(EI[rw.eq_index]);
+                    if (g_lsq_wd1 != 1.0 && lb.rfind("SBM ", 0) == 0 && lb.find(" d1 ") != std::string::npos) ism[rw.row] = 2;
                     if (g_lsq_wmode == 1 && lb.rfind("SBT ", 0) != 0) {
                         if (lb.rfind("SBM ", 0) != 0) throw std::runtime_error("--stageB-lsq-w scalefree: combination rows (" + lb + ") not supported");
                         sfw[rw.row] = lb.find(" d1 ") != std::string::npos ? g_lsq_rm : 1.0;
@@ -752,6 +763,11 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
             const double cf = rat[rat.size() / 2];
             for (int r = 0; r < m; r++) if (ism[r]) R0[r] = cf * sfw[r];
             if (it == 0) std::cout << "#  lsq: matching-row W scale-free [C0; r_m C1], r_m " << std::setprecision(12) << g_lsq_rm << ", common factor " << cf << "\n";
+        }
+        if (g_lsq_wd1 != 1.0) {                                        // round 423: the matching d1 keys' weight x F
+            int nd1 = 0;
+            for (int r = 0; r < m; r++) if (ism[r] == 2) { R0[r] *= g_lsq_wd1; nd1++; }
+            if (it == 0) std::cout << "#  lsq: --stageB-lsq-wd1 " << g_lsq_wd1 << ": " << nd1 << " matching d1 rows reweighted\n";
         }
         std::vector<double> Cs(n, 0.0);
         for (int c = 0; c < n; c++) {
@@ -1257,6 +1273,7 @@ int main(int argc, char** argv)
 #ifdef TRUMPET_BULK2
     // ⚠ ROUND 335 (research round 664, step 2): the bulk changes, each OFF by default and announced when registered.
     bool eqfnsin2 = false;          // --eqfn-sin2: EQFN imposed as multsint(multsint(EQFN)) (sin^2-weighted tests)
+    std::map<int, std::string> eqaxis_lhs;   // round 423: the registered EQFN lhs per domain (--eq-axis-row)
     bool eqfnhybrid = false;        // --eqfn-hybrid (round 406, research round 850, HYBRID_QROW_SPEC): implies --eqfn-plain; EQFN's tested
                                     // modes 0..nt-3 PLAIN (regular emission) and mode nt-2 sin^2-WEIGHTED (Eq_inside_window x 2)
     bool eqfnplain = false;         // --eqfn-plain (round 393, research rounds 810-811): EQFN registered UNWEIGHTED in theta (the regular
@@ -1682,6 +1699,8 @@ int main(int argc, char** argv)
         else if (k == "--eqfn-sin2") eqfnsin2 = true;
         else if (k == "--eqfn-plain") eqfnplain = true;
         else if (k == "--eqfn-hybrid") { eqfnplain = true; eqfnhybrid = true; }
+        else if (k == "--eq-axis-row") g_eq_axis_row = true;
+        else if (k == "--stageB-lsq-wd1") g_lsq_wd1 = std::stod(argv[++i]);
         else if (k == "--recombine") recomb = argv[++i];
         else if (k == "--eqfn-sin2-droptop") eqfndrop = true;
         else if (k == "--amax-table") amaxtable = argv[++i];
@@ -4322,6 +4341,7 @@ int main(int argc, char** argv)
                     // and the defect as registered) at theta modes 0..nt-3, and multsint(multsint(that)) -- the sin^2-weighted row, W
                     // being radial commutes -- at mode nt-2 only: two Eq_inside_window registrations with complementary COS_EVEN masks.
                     // The row count is production's (nt-1 tested modes per radial index).
+                    if (std::string(ename) == "EQFN") eqaxis_lhs[d] = lhs;      // round 423: --eq-axis-row reads the registered lhs
                     if (eqfnhybrid && std::string(ename) == "EQFN") {
                         syst.add_eq_inside_window(d, (lhs + " = 0").c_str(), 0, ntheta - 3);
                         syst.add_eq_inside_window(d, ("multsint(multsint(" + lhs + ")) = 0").c_str(), ntheta - 2, ntheta - 2);
@@ -5693,6 +5713,44 @@ int main(int argc, char** argv)
             if (rank == 0)
                 std::cout << "#  --defect: " << nap << " of " << ni << " Eq_int rows carry a constant -b0 (the rest store 0)\n";
             emit("FJPD_eqint_corrected", nap);
+        }
+        // ⚠ ROUND 423 (research rounds 888-889): --eq-axis-row -- the E_q AXIS ROWS, AFTER the defect store's rows (store unchanged): per
+        // bulk domain d and radial node i (r = inf skipped), Ope_point(registered EQFN lhs at (x_i, theta = 0)) = the sum of its theta
+        // coefficients (every mode, the top included).  dgglse's least-squares set (app_lsq); the imposed set is unchanged.
+        if (g_eq_axis_row) {
+            if (!eqfnplain || !stageBlsq) { std::cerr << "FATAL: --eq-axis-row needs --eqfn-plain / --eqfn-hybrid and --stageB-lsq\n"; return 1; }
+            int nax = 0;
+            for (int d = 0; d <= dtop; d++) {
+                if (!eqaxis_lhs.count(d)) { std::cerr << "FATAL: --eq-axis-row: EQFN not registered in domain " << d << "\n"; return 1; }
+                const Kadath::Domain* dm = space.get_domain(d);
+                const int nr = dm->get_nbr_points()(0);
+                char nrm[Kadath::LMAX];
+                Kadath::trim_spaces(nrm, eqaxis_lhs[d].c_str());
+                for (int i = 0; i < nr; i++) {
+                    Index ix(dm->get_nbr_points());
+                    ix.set(0) = i;
+                    if (!std::isfinite(dm->get_radius()(ix))) continue;
+                    Point num(2);
+                    num.set(1) = dm->get_coloc(1)(i);
+                    num.set(2) = 0.0;
+                    EqIntAdd::add_sum(syst, d, "AXQ " + std::to_string(d) + " " + std::to_string(i),
+                                      {new Kadath::Ope_point(&syst, num, syst.give_ope(d, nrm))});
+                    nax++;
+                }
+                if (rank == 0) std::cout << "#  --eq-axis-row: domain " << d << ": " << eqaxis_lhs[d] << " at theta = 0\n";
+            }
+            if (rank == 0) std::cout << "#  --eq-axis-row: " << nax << " E_q axis rows (Eq_int AXQ), least-squares set\n";
+            emit("FJPA_axis_rows", nax);
+            const Kadath::Array<double> b0(syst.sec_member());   // the rows' values at the registered state (every rank)
+            if (rank == 0) {
+                std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
+                syst.classify_equation_row_metadata(rmeta);
+                const auto& EI = EqListPeek::eqints(syst);
+                for (const auto& rw : rmeta)
+                    if (rw.equation_type == "Eq_int" && rw.eq_index >= 0 && rw.eq_index < static_cast<int>(EI.size()) &&
+                        std::get<0>(EI[rw.eq_index]).rfind("AXQ ", 0) == 0)
+                        std::cout << "#  AXQ0 " << std::get<0>(EI[rw.eq_index]) << " " << std::setprecision(17) << b0(rw.row) << "\n";
+            }
         }
         // ⚠ ROUND 346 (iii-c): the wall time of one residual evaluation (sec_member), every rank
         const auto t_res0 = std::chrono::steady_clock::now();

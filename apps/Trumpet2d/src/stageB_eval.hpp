@@ -16,6 +16,7 @@
 //   the anchor is the seed they were built at (the fitted W), carried in the section so a run seeded elsewhere keeps them.
 // Data: scripts/stageB_kadath.py export.  Lives in the Celephais clone (apps/Trumpet2d/src) next to the generated stageB_gen.hpp.
 #pragma once
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -41,8 +42,15 @@
 #define SBE_NG 6
 #endif
 
+#ifdef TRUMPET_STAGEB_TSPLIT
+#include <mpi.h>
+#endif
 namespace sbe {
 typedef std::complex<double> cplx;
+// round 419 (the throat split): with TRUMPET_STAGEB_TSPLIT the throat rows / Jacobian sum over theta nodes is split across the MPI ranks
+// while tsplit_flag() is set (bulk2's least-squares Newton step, where every rank evaluates the same states together), then reduced on
+// rank 0 and broadcast; otherwise (and without the define) the serial loop.  The partial sums change the summation order: roundoff only.
+inline bool& tsplit_flag() { static bool f = false; return f; }
 // round 417: the grade count (6 in production) -- per field 3 NG amplitude symbols (grade x derivative), 6 x 3 NG first partials per field's
 // six jets, NS = 2 x 6 x 3 NG + 1 gradient symbols (A, L, n), NG row orders (-2 .. NG - 3)
 constexpr int NG = SBE_NG, S3 = 3 * NG, DJN = 6 * S3, NSYM = 2 * 6 * S3 + 1;
@@ -100,6 +108,7 @@ class Eval {
   public:
     int NT = 0, NR = 0, NX = 0, NTH = 0, NK = 0, NE = 0, NU = 0, NROW = 0, NMK = 0, NOFF = 0, NTHM = 0;
     int NTHR = 0, NORTH = 0;                              // throat rows, orthogonality rows (NROW = NTHR + NORTH)
+    int NGR = NG;                                         // round 419: row orders extracted (-2 .. NGR - 3; NG unless the data's rows go higher)
     std::vector<double> orth, orthu0;                     // NORTH x NU, row-major; the anchor (the seed they were built at)
     double RM = 0, RX = 0;
     std::vector<double> th, sw, thm;
@@ -147,7 +156,7 @@ class Eval {
         }
         need("ROWS"); in >> NROW;
         rows.resize(NROW);
-        for (auto& r : rows) in >> r.e >> r.g >> r.i >> r.part >> r.nr >> r.twist;
+        for (auto& r : rows) { in >> r.e >> r.g >> r.i >> r.part >> r.nr >> r.twist; NGR = std::max(NGR, r.g + 3); }
         need("UNK"); in >> NU;
         unk.resize(NU);
         for (auto& u : unk) { std::string t; in >> t >> u.key >> u.ia >> u.u0; u.t = t[0]; }
@@ -344,15 +353,19 @@ class Eval {
         if (grad) G->assign(static_cast<size_t>(NTHR) * NC, 0.0);
         const int NV = grad ? NS + 1 : 1;         // slot 0 the value, 1.. the gradient
         std::vector<int> pmin(NE), pmax(NE);
-        for (int e = 0; e < NE; e++) { pmin[e] = eqs[e].c1 - 2; pmax[e] = eqs[e].c1 + NG - 3; }
+        for (int e = 0; e < NE; e++) { pmin[e] = eqs[e].c1 - 2; pmax[e] = eqs[e].c1 + NGR - 3; }
         // grid
         std::vector<cplx> rg(NR), xg(NX);
         for (int a = 0; a < NR; a++) rg[a] = std::polar(1.0, 2 * M_PI * a / NR);
         for (int b = 0; b < NX; b++) xg[b] = RX * std::polar(1.0, 2 * M_PI * b / NX);
-        std::vector<cplx> coef(static_cast<size_t>(NE) * 2 * NG * NV);
+        std::vector<cplx> coef(static_cast<size_t>(NE) * 2 * NGR * NV);
         std::vector<cplx> Sx(static_cast<size_t>(NE) * 2 * NV);
         double angv[3];
-        for (int t = 0; t < NTH; t++) {
+        int t_first = 0, t_step = 1;
+#ifdef TRUMPET_STAGEB_TSPLIT
+        if (tsplit_flag()) { MPI_Comm_rank(MPI_COMM_WORLD, &t_first); MPI_Comm_size(MPI_COMM_WORLD, &t_step); }
+#endif
+        for (int t = t_first; t < NTH; t += t_step) {
             // amplitude functions on this node: per field the S3 symbols (grade index x derivative)
             cplx A[6][S3], L[6][S3];
             std::vector<std::vector<std::array<double, 3>>> ang(NK);
@@ -482,12 +495,12 @@ class Eval {
                 }
                 // fold this x-column into the rho^p coefficients
                 for (int e = 0; e < NE; e++)
-                    for (int g = 0; g < NG; g++) {
+                    for (int g = 0; g < NGR; g++) {
                         const int p = pmin[e] + g;
                         const cplx w = std::pow(xg[b], -p) / static_cast<double>(NR * NX);
                         for (int y = 0; y < 2; y++) {
                             const cplx* S = &Sx[(static_cast<size_t>(e) * 2 + y) * NV];
-                            cplx* C = &coef[((static_cast<size_t>(e) * 2 + y) * NG + g) * NV];
+                            cplx* C = &coef[((static_cast<size_t>(e) * 2 + y) * NGR + g) * NV];
                             for (int v = 0; v < NV; v++) C[v] += S[v] * w;
                         }
                     }
@@ -498,7 +511,7 @@ class Eval {
                 const EqInfo& Eq = eqs[R.e];
                 const int g = R.g + 2;                 // g from -2
                 const double qw = Eq.Q[static_cast<size_t>(t) * Eq.nb + R.i] * sw[t] / R.nr;
-                const cplx* C = &coef[((static_cast<size_t>(R.e) * 2 + R.part) * NG + g) * NV];
+                const cplx* C = &coef[((static_cast<size_t>(R.e) * 2 + R.part) * NGR + g) * NV];
                 out[ro] += qw * C[0].real();
                 if (!grad) continue;
                 double* Gr = &(*G)[static_cast<size_t>(ro) * NC];
@@ -517,6 +530,27 @@ class Eval {
                 Gr[NC - 1] += qw * C[1 + 2 * DJN].real();
             }
         }
+    #ifdef TRUMPET_STAGEB_TSPLIT
+        if (t_step > 1) {                                  // the partial sums: reduced on rank 0, broadcast (every rank the same result)
+            std::vector<double> buf(out.size());
+            MPI_Reduce(out.data(), buf.data(), static_cast<int>(out.size()), MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+            if (t_first == 0) out.swap(buf);
+            MPI_Bcast(out.data(), static_cast<int>(out.size()), MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            if (grad) {
+                std::vector<double> gb(G->size());
+                const size_t CH = static_cast<size_t>(1) << 24;
+                for (size_t o = 0; o < G->size(); o += CH) {
+                    const int c = static_cast<int>(std::min(CH, G->size() - o));
+                    MPI_Reduce(G->data() + o, gb.data() + o, c, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+                }
+                if (t_first == 0) G->swap(gb);
+                for (size_t o = 0; o < G->size(); o += CH) {
+                    const int c = static_cast<int>(std::min(CH, G->size() - o));
+                    MPI_Bcast(G->data() + o, c, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+                }
+            }
+        }
+#endif
     }
 
     // the linear chain coefficients <- unknowns: CU (NC x NU): exact (the state map is affine)

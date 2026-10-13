@@ -637,9 +637,31 @@ static int g_lsq_wmode = 0;                // 0 row max (round 402), 1 scale-fre
 // ROUND 413 (research round 869, option (a)): --stageB-lsq-impose-qb -- the twist's matching rows ("SBM QB ...") are IMPOSED exactly
 // (dgglse's constraint set) instead of least squares; every other matching row stays least squares.  Default off: unchanged.
 static bool g_lsq_impose_qb = false;
+// ROUND 419 (research round 881, convention R): --stageB-lsq-grades G -- the THROAT rows of grade >= G ("SBT <eq> g<k> ...", k >= G) join
+// the least-squares set (row-max W, as the matching): the grade-6/7 rows with the grade-8/9 amplitudes zero, overdetermined and
+// inconsistent at the level of the neglected content.  Default off (-1): unchanged.
+static int g_lsq_grades = -1;
+// ROUND 419 (research round 881 addendum): TRUMPET_TIMERS=1 (env) prints, per least-squares step, the throat evaluator's cumulative cost on
+// rank 0 (values / Jacobian calls and seconds; the bulk share of the assembly = assembly - throat Jacobian).  Output only: bitwise-neutral.
+static const void* g_sbshared_timers = nullptr;
+// ROUND 419 (research round 881 addendum, Newton stop at the least-squares floor): --stageB-lsq-floor-stop W -- the step is AT THE FLOOR when
+// the least-squares step's own linear prediction cannot reduce the matching residual (||W (A X - F)||_m > 0.5 ||W F||_m: before the floor it
+// is orders smaller); after W consecutive floor steps the solve stops (those W steps are the readings' window).  Default off (-1): unchanged.
+static int g_lsq_floor_w = -1;
+static double g_lsq_floor_ratio = 0.0;
+static void (*g_sb_timer_print)(const void*, int) = nullptr;
+static bool lsq_sbt_row(const std::string& lb)
+{
+    if (g_lsq_grades < 0 || lb.rfind("SBT ", 0) != 0) return false;
+    const size_t p = lb.find(" g", 4);
+    return p != std::string::npos && std::atoi(lb.c_str() + p + 2) >= g_lsq_grades;
+}
 static double g_lsq_rm = 0.0;              // r_m (the stage-B export's RM)
 static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int it, int rank)
 {
+#ifdef TRUMPET_STAGEB_TSPLIT
+    struct TsplitOn { TsplitOn() { sbe::tsplit_flag() = true; } ~TsplitOn() { sbe::tsplit_flag() = false; } } tsplit_on;   // round 419
+#endif
     int nproc = 1;
     MPI_Comm_size(MPI_COMM_WORLD, &nproc);
     const Kadath::Array<double> sec(syst.sec_member());
@@ -691,11 +713,11 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
             const auto& EI = EqListPeek::eqints(syst);
             for (const auto& rw : rmeta)
                 if (rw.equation_type == "Eq_int" && rw.eq_index >= 0 && rw.eq_index < static_cast<int>(EI.size()) && rw.row >= 0 &&
-                    rw.row < m && std::get<0>(EI[rw.eq_index]).rfind("SBM", 0) == 0 &&
-                    !(g_lsq_impose_qb && std::get<0>(EI[rw.eq_index]).rfind("SBM QB ", 0) == 0)) {
+                    rw.row < m && ((std::get<0>(EI[rw.eq_index]).rfind("SBM", 0) == 0 &&
+                    !(g_lsq_impose_qb && std::get<0>(EI[rw.eq_index]).rfind("SBM QB ", 0) == 0)) || lsq_sbt_row(std::get<0>(EI[rw.eq_index])))) {
                     ism[rw.row] = 1;
                     const std::string& lb = std::get<0>(EI[rw.eq_index]);
-                    if (g_lsq_wmode == 1) {
+                    if (g_lsq_wmode == 1 && lb.rfind("SBT ", 0) != 0) {
                         if (lb.rfind("SBM ", 0) != 0) throw std::runtime_error("--stageB-lsq-w scalefree: combination rows (" + lb + ") not supported");
                         sfw[rw.row] = lb.find(" d1 ") != std::string::npos ? g_lsq_rm : 1.0;
                     }
@@ -704,6 +726,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         std::vector<int> im, ic;
         for (int r = 0; r < m; r++) (ism[r] ? im : ic).push_back(r);
         const int mm = static_cast<int>(im.size()), p = static_cast<int>(ic.size());
+        if (g_lsq_grades >= 0 && it == 0) std::cout << "#  lsq: --stageB-lsq-grades " << g_lsq_grades << ": throat rows of grade >= " << g_lsq_grades << " in the least-squares set\n";
         if (g_lsq_impose_qb && it == 0) std::cout << "#  lsq: --stageB-lsq-impose-qb: the SBM QB rows imposed; " << mm << " least-squares rows, " << p << " imposed\n";
         std::fill(R0.begin(), R0.end(), 0.0);
         for (int c = 0; c < n; c++) for (int r = 0; r < m; r++) R0[r] = std::max(R0[r], std::fabs(Aat(r, c)));
@@ -762,6 +785,8 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
             }
             for (int c = 0; c < n; c++) { X.set(c) = Cs[c] * z[c]; xn += X(c) * X(c); }
             const double tsol = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+            if (g_sb_timer_print && std::getenv("TRUMPET_TIMERS")) g_sb_timer_print(g_sbshared_timers, it);
+            g_lsq_floor_ratio = wm2 > 0 ? std::sqrt(lm2) / std::sqrt(wm2) : 0.0;
             std::cout << "#  lsq step " << it << ": assembly " << tasm << " s, rank-0 dgglse " << tsol << " s;  linear: imposed rows max "
                       << "|W (A X - F)| " << std::setprecision(4) << lc << ", matching ||W (A X - F)||_m " << std::sqrt(lm2) << " (of "
                       << std::sqrt(wm2) << ");  |X| " << std::sqrt(xn) << "\n";
@@ -769,6 +794,13 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
     }
     MPI_Bcast(&fail, 1, MPI_INT, 0, MPI_COMM_WORLD);
     if (fail) throw std::runtime_error("--stageB-lsq: the least-squares step failed");
+    static int floor_run = 0;                                   // round 419: consecutive floor steps
+    if (g_lsq_floor_w > 0) {
+        MPI_Bcast(&g_lsq_floor_ratio, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        floor_run = g_lsq_floor_ratio > 0.5 ? floor_run + 1 : 0;
+        if (rank == 0) std::cout << "#  lsq step " << it << ": floor test ||W (A X - F)||_m / ||W F||_m " << std::setprecision(4)
+                                 << g_lsq_floor_ratio << " -> consecutive floor steps " << floor_run << " of " << g_lsq_floor_w << "\n";
+    }
     MPI_Bcast(X.set_data(), n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Bcast(R0.data(), m, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     // line search on ||W F||
@@ -803,6 +835,10 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         std::cout << "#  lsq step " << it << ": line search ||W F||: " << std::setprecision(6) << phi0 << " ->";
         for (int k = 0; k < 4 && (acc < 0 || k <= acc); k++) std::cout << " (a " << al[k] << ") " << ph[k];
         std::cout << ";  " << (acc >= 0 ? "accepted a " : "NO DECREASE, step rejected: a ") << cur << "\n";
+    }
+    if (g_lsq_floor_w > 0 && floor_run >= g_lsq_floor_w) {      // round 419: W consecutive steps at the floor -- stop (the window)
+        if (rank == 0) std::cout << "#  lsq step " << it << ": --stageB-lsq-floor-stop: " << g_lsq_floor_w << " consecutive floor steps -- stop\n";
+        return true;
     }
     return false;
 }
@@ -1647,6 +1683,8 @@ int main(int argc, char** argv)
         else if (k == "--stageB-mcomb") stageBmcomb = argv[++i];
         else if (k == "--stageB-lsq") stageBlsq = true;
         else if (k == "--stageB-lsq-impose-qb") g_lsq_impose_qb = true;
+        else if (k == "--stageB-lsq-grades") g_lsq_grades = std::atoi(argv[++i]);
+        else if (k == "--stageB-lsq-floor-stop") g_lsq_floor_w = std::atoi(argv[++i]);
         else if (k == "--apply-step") { applystep = argv[++i]; applyeps = std::stod(argv[++i]); }
         else if (k == "--stageB-lsq-w") { const std::string w_ = argv[++i]; if (w_ == "scalefree") g_lsq_wmode = 1; else if (w_ != "rowmax") { std::cerr << "FATAL: --stageB-lsq-w rowmax|scalefree\n"; return 1; } }
         else if (k == "--stageB-xform") stageBxform = argv[++i];
@@ -3877,6 +3915,12 @@ int main(int argc, char** argv)
         // ⚠ ROUND 345: the stage-B unknowns, one scalar each (STATIC: add_var stores a pointer), seeded from the data
         if (!stageB.empty()) {
             sbshared.reset(new SBShared(stageB, havejj ? jjoverride : 0.0));
+            g_sbshared_timers = sbshared.get();           // round 419: TRUMPET_TIMERS
+            g_sb_timer_print = [](const void* p, int it) {
+                const SBShared* h = static_cast<const SBShared*>(p);
+                std::cout << "#  timers lsq step " << it << " (rank 0, cumulative): throat values " << h->nval << " calls " << h->tv
+                          << " s, throat Jacobian " << h->njac << " calls " << h->tj << " s\n";
+            };
             g_lsq_rm = sbshared->ev.RM;                     // round 403: r_m for --stageB-lsq-w scalefree
             static std::vector<double> sbu;
             sbu.resize(sbshared->ev.NU);

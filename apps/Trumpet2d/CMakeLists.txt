@@ -195,3 +195,13 @@ set_target_properties(trumpet2d_finiteJ_probe_bulk2_v2_ng8 PROPERTIES
 target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_v2_ng8 PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_EQREG TRUMPET_C3 TRUMPET_STAGEB_C3 TRUMPET_STAGEB_NG8)
 target_include_directories(trumpet2d_finiteJ_probe_bulk2_v2_ng8 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
+# Code round 419 (research round 881 addendum, the throat split): the NG8 V2 binary with the throat evaluator's theta-node sum split across the
+# MPI ranks inside the least-squares Newton step (TRUMPET_STAGEB_TSPLIT; reduced + broadcast; roundoff-level differences).  stageB_run.sh's
+# BULK2_V2=1 STAGEB_NG=8 STAGEB_TSPLIT=1 selects it.  The other binaries are unchanged.
+kadath_add_exec(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts PROPERTIES
+    OUTPUT_NAME finiteJ_probe_bulk2_v2_ng8_ts)
+target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_EQREG TRUMPET_C3 TRUMPET_STAGEB_C3 TRUMPET_STAGEB_NG8 TRUMPET_STAGEB_TSPLIT)
+target_include_directories(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)

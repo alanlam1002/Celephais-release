@@ -20,6 +20,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <complex>
 #include <fstream>
 #include <sstream>
@@ -122,8 +123,17 @@ class Eval {
     std::vector<MKey> mk;
     int keyof[6][NG + 1];
     double tval = 0, tjac = 0, tmatch = 0;
+    // Round 420 (research round 883, STAGE_D_E3_SPEC.md E3.3): the near-resonant pair.  With DEL = delta(J) != 0 (env STAGEB_DELTA, rho
+    // units, the l = 2 lapse partner's offset from the grade-1 lattice) the companions multiply L_d = (rho^d - 1)/d instead of ln rho:
+    // D_r L_d = (n/r)(1 + d L_d), so the commutator's second r-derivative gains d n^2/r^2, the y1 rows become y1 + d P.CJ (= the
+    // rho^(k+d) slice, L[rho^d l]/rho^d), and the matching uses L_d(rho_m) and rho_m^d.  DEL = 0 is the log column, bitwise.
+    double DEL = 0;
 
-    explicit Eval(const std::string& path) { read(path); }
+    explicit Eval(const std::string& path)
+    {
+        read(path);
+        if (const char* d = std::getenv("STAGEB_DELTA")) DEL = std::atof(d);
+    }
 
     // ---------------------------------------------------------------- data
     void read(const std::string& path)
@@ -422,6 +432,7 @@ class Eval {
                             const int* jp = jpos(f);
                             CJ[jp[1]] = n / r * DJ[jp[0]];
                             CJ[jp[3]] = 2.0 * n / r * DJ[jp[1]] - n / (r * r) * DJ[jp[0]];
+                            if (DEL != 0.0) CJ[jp[3]] += DEL * n * n / (r * r) * DJ[jp[0]];
                             CJ[jp[4]] = n / r * DJ[jp[2]];
                         }
                     }
@@ -432,6 +443,7 @@ class Eval {
                         eqfn(eqs[e].name)(Jt, r, th[t], Jv, E, P, H);
                         cplx y0 = E, y1 = 0.0;
                         for (int q = 0; q < 36; q++) { y0 += P[q] * CJ[q]; y1 += P[q] * DJ[q]; }
+                        if (DEL != 0.0) { cplx pc = 0.0; for (int q = 0; q < 36; q++) pc += P[q] * CJ[q]; y1 += DEL * pc; }
                         const cplx w = std::pow(r, -eqs[e].c0);
                         cplx* S0 = &Sx[(static_cast<size_t>(e) * 2 + 0) * NV];
                         cplx* S1 = &Sx[(static_cast<size_t>(e) * 2 + 1) * NV];
@@ -452,9 +464,10 @@ class Eval {
                         for (int f = 0; f < 6; f++) {
                             const int* jp = jpos(f);
                             for (int s_ = 0; s_ < S3; s_++) {
-                                cplx gA0 = 0.0, gA1 = 0.0, gL0 = 0.0, gL1 = 0.0;
+                                cplx gA0 = 0.0, gA1 = 0.0, gL0 = 0.0, gL1 = 0.0, pd = 0.0;
                                 for (int q = 0; q < 6; q++) {
                                     const cplx d = dJ[f][S3 * q + s_];
+                                    if (DEL != 0.0) pd += P[jp[q]] * d;
                                     gA0 += (P[jp[q]] + hc[jp[q]]) * d;
                                     gA1 += hd[jp[q]] * d;
                                     gL1 += P[jp[q]] * d;
@@ -463,22 +476,26 @@ class Eval {
                                 gL0 += P[jp[1]] * (n / r * dJ[f][S3 * 0 + s_])
                                      + P[jp[3]] * (2.0 * n / r * dJ[f][S3 * 1 + s_] - n / (r * r) * dJ[f][S3 * 0 + s_])
                                      + P[jp[4]] * (n / r * dJ[f][S3 * 2 + s_]);
+                                if (DEL != 0.0) gL0 += P[jp[3]] * (DEL * n * n / (r * r) * dJ[f][S3 * 0 + s_]);
                                 if (anyL) {
                                     for (int q = 0; q < 6; q++) gA1 += P[jp[q]] * dDJ[f][q][s_];
                                     gA0 += P[jp[1]] * (n / r * dDJ[f][0][s_])
                                          + P[jp[3]] * (2.0 * n / r * dDJ[f][1][s_] - n / (r * r) * dDJ[f][0][s_])
                                          + P[jp[4]] * (n / r * dDJ[f][2][s_]);
+                                    if (DEL != 0.0) gA0 += P[jp[3]] * (DEL * n * n / (r * r) * dDJ[f][0][s_]);
                                 }
+                                if (DEL != 0.0) { gA1 += DEL * (gA0 - pd); gL1 += DEL * gL0; }   // d(P.CJ) = gA0 - P.d ; P.dCJ/dL = gL0
                                 S0[1 + S3 * f + s_] += gA0 * w;
                                 S1[1 + S3 * f + s_] += gA1 * w;
                                 S0[1 + DJN + S3 * f + s_] += gL0 * w;
                                 S1[1 + DJN + S3 * f + s_] += gL1 * w;
                             }
                         }
-                        cplx gn0 = 0.0, gn1 = 0.0;
+                        cplx gn0 = 0.0, gn1 = 0.0, pdn = 0.0;
                         for (int f = 0; f < 6; f++) {
                             const int* jp = jpos(f);
                             for (int q = 0; q < 6; q++) {
+                                if (DEL != 0.0) pdn += P[jp[q]] * dJn[f][q];
                                 gn0 += (P[jp[q]] + hc[jp[q]]) * dJn[f][q];
                                 gn1 += hd[jp[q]] * dJn[f][q];
                             }
@@ -487,8 +504,10 @@ class Eval {
                                 gn0 += P[jp[1]] * (DJ[jp[0]] / r + n / r * dDJn[f][0])
                                      + P[jp[3]] * (2.0 / r * DJ[jp[1]] + 2.0 * n / r * dDJn[f][1] - DJ[jp[0]] / (r * r) - n / (r * r) * dDJn[f][0])
                                      + P[jp[4]] * (DJ[jp[2]] / r + n / r * dDJn[f][2]);
+                                if (DEL != 0.0) gn0 += P[jp[3]] * (DEL * (2.0 * n / (r * r) * DJ[jp[0]] + n * n / (r * r) * dDJn[f][0]));
                             }
                         }
+                        if (DEL != 0.0) gn1 += DEL * (gn0 - pdn);
                         S0[1 + 2 * DJN] += gn0 * w;
                         S1[1 + 2 * DJN] += gn1 * w;
                     }
@@ -583,6 +602,8 @@ class Eval {
         const cplx n = s.n;
         const cplx x = std::pow(cplx(RM), n);
         const cplx lnr = n * std::log(RM);
+        const cplx Ld = DEL != 0.0 ? (std::exp(DEL * lnr) - 1.0) / DEL : lnr;       // round 420 (E3.3): L_d(rho_m); ln rho_m at DEL = 0
+        const cplx rd = DEL != 0.0 ? std::exp(DEL * lnr) : cplx(1.0);              // rho_m^d
         double angv[3];
         // per field, values at the nodes
         std::vector<std::vector<cplx>> v0(6, std::vector<cplx>(NTHM)), v1(6, std::vector<cplx>(NTHM));
@@ -603,8 +624,13 @@ class Eval {
                 jets1(f)(A[f], cplx(RM), x, n, J6, dJ, dJn);
                 cplx D0 = 0.0, D1 = 0.0;
                 for (int q = 0; q < S3; q++) { D0 += dJ[q] * L[f][q]; D1 += dJ[S3 + q] * L[f][q]; }
-                v0[f][t] = J6[0] + lnr * D0;
-                v1[f][t] = J6[1] + lnr * D1 + n / RM * D0;
+                if (DEL != 0.0) {
+                    v0[f][t] = J6[0] + Ld * D0;
+                    v1[f][t] = J6[1] + Ld * D1 + n / RM * rd * D0;
+                } else {
+                    v0[f][t] = J6[0] + lnr * D0;
+                    v1[f][t] = J6[1] + lnr * D1 + n / RM * D0;
+                }
             }
         }
         for (int q = 0; q < NMK; q++) {

@@ -649,6 +649,12 @@ static const void* g_sbshared_timers = nullptr;
 // is orders smaller); after W consecutive floor steps the solve stops (those W steps are the readings' window).  Default off (-1): unchanged.
 static int g_lsq_floor_w = -1;
 static double g_lsq_floor_ratio = 0.0;
+// ROUND 420 (research round 883, speed-ups to be adopted only if results-neutral; both default off: unchanged):
+//   --stageB-lsq-jac-reuse: on a step that follows a floor step (the floor test above), the previous step's assembled Jacobian is reused
+//     (a chord step at the floor: the assembly -- ~half of a window step -- is skipped); the floor test is evaluated with the option.
+//   (threaded dgglse was tried and NOT kept: mkl_set_num_threads_local / mkl_set_num_threads segfault in dgglse with this MKL (2025.2,
+//    gnu_thread; reproduced standalone), omp_set_num_threads has no effect; only a launch-time MKL_NUM_THREADS works -- see LOG round 420.)
+static bool g_lsq_jac_reuse = false;
 static void (*g_sb_timer_print)(const void*, int) = nullptr;
 static bool lsq_sbt_row(const std::string& lb)
 {
@@ -671,15 +677,22 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
     if (rank == 0) std::cout << "#  lsq step " << it << ": max|resid| before " << std::setprecision(10) << err << "  (" << m << " rows x "
                              << n << " unknowns)\n";
     if (err < prec) return true;
+    static int floor_run = 0;                                   // round 419: consecutive floor steps
+    static std::vector<double> A_keep;                          // round 420: the last assembled Jacobian (rank 0), --stageB-lsq-jac-reuse
+    const bool reuse = g_lsq_jac_reuse && floor_run >= 1 && (rank != 0 || !A_keep.empty());
     const auto t0 = std::chrono::steady_clock::now();
-    syst.reset_do_col_J_cache();
     std::vector<double> mine;
+    if (!reuse) {
+    syst.reset_do_col_J_cache();
     for (int c = rank; c < n; c += nproc) {
         Kadath::Array<double> col(syst.do_col_J(c));
         for (int r = 0; r < m; r++) mine.push_back(col(r));
     }
+    }
     std::vector<double> A;                                           // column-major m x n, rank 0
-    if (rank == 0) {
+    if (reuse) {
+        if (rank == 0) { A = A_keep; std::cout << "#  lsq step " << it << ": --stageB-lsq-jac-reuse: the previous Jacobian reused (chord step at the floor)\n"; }
+    } else if (rank == 0) {
         A.assign(static_cast<size_t>(n) * m, 0.0);
         for (int p = 0; p < nproc; p++) {
             std::vector<double> buf;
@@ -695,6 +708,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
     } else if (!mine.empty()) {
         MPI_Send(mine.data(), static_cast<int>(mine.size()), MPI_DOUBLE, 0, 402, MPI_COMM_WORLD);
     }
+    if (g_lsq_jac_reuse && rank == 0 && !reuse) A_keep = A;
     const double tasm = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     Kadath::Array<double> X(n);
     std::vector<double> R0(m, 1.0);
@@ -794,8 +808,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
     }
     MPI_Bcast(&fail, 1, MPI_INT, 0, MPI_COMM_WORLD);
     if (fail) throw std::runtime_error("--stageB-lsq: the least-squares step failed");
-    static int floor_run = 0;                                   // round 419: consecutive floor steps
-    if (g_lsq_floor_w > 0) {
+    if (g_lsq_floor_w > 0 || g_lsq_jac_reuse) {
         MPI_Bcast(&g_lsq_floor_ratio, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
         floor_run = g_lsq_floor_ratio > 0.5 ? floor_run + 1 : 0;
         if (rank == 0) std::cout << "#  lsq step " << it << ": floor test ||W (A X - F)||_m / ||W F||_m " << std::setprecision(4)
@@ -1685,6 +1698,7 @@ int main(int argc, char** argv)
         else if (k == "--stageB-lsq-impose-qb") g_lsq_impose_qb = true;
         else if (k == "--stageB-lsq-grades") g_lsq_grades = std::atoi(argv[++i]);
         else if (k == "--stageB-lsq-floor-stop") g_lsq_floor_w = std::atoi(argv[++i]);
+        else if (k == "--stageB-lsq-jac-reuse") g_lsq_jac_reuse = true;
         else if (k == "--apply-step") { applystep = argv[++i]; applyeps = std::stod(argv[++i]); }
         else if (k == "--stageB-lsq-w") { const std::string w_ = argv[++i]; if (w_ == "scalefree") g_lsq_wmode = 1; else if (w_ != "rowmax") { std::cerr << "FATAL: --stageB-lsq-w rowmax|scalefree\n"; return 1; } }
         else if (k == "--stageB-xform") stageBxform = argv[++i];

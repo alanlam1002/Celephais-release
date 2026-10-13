@@ -123,16 +123,26 @@ class Eval {
     std::vector<MKey> mk;
     int keyof[6][NG + 1];
     double tval = 0, tjac = 0, tmatch = 0;
-    // Round 420 (research round 883, STAGE_D_E3_SPEC.md E3.3): the near-resonant pair.  With DEL = delta(J) != 0 (env STAGEB_DELTA, rho
-    // units, the l = 2 lapse partner's offset from the grade-1 lattice) the companions multiply L_d = (rho^d - 1)/d instead of ln rho:
-    // D_r L_d = (n/r)(1 + d L_d), so the commutator's second r-derivative gains d n^2/r^2, the y1 rows become y1 + d P.CJ (= the
-    // rho^(k+d) slice, L[rho^d l]/rho^d), and the matching uses L_d(rho_m) and rho_m^d.  DEL = 0 is the log column, bitwise.
+    // Round 421 (research round 885, STAGE_D_E3_SPEC.md E3.3 as revised in round 884): the near-resonant pair ON lambda V ONLY.  With DEL =
+    // delta(J) != 0 (env STAGEB_DELTA, rho units: the l = 2 lapse partner's offset from the grade-1 lattice) and the data's PAIRV section
+    // (per scalar companion unknown q: V_q, the Jacobi vector, and w_q, lambda's projection weight, lambda = sum_q w_q u_q over grades 1-3),
+    // the companion field l (on ln rho) is joined by lambda V on L_d = (rho^d - 1)/d - ln rho, i.e. the ansatz a + ln rho (l - lambda V) +
+    // L_d lambda V.  With D_r L_d = (n/r)(1 + d L_d): y0 += P.Dl (Dl: the rr jet's extra d n^2/r^2 DJ(lambda V)), and the ln^1 rows carry the
+    // pair's slice: y1 += d P.CV (CV = the full commutator jets of lambda V incl. Dl).  The y_ln and y_Ld slices are imposed as their SUM
+    // (the y1 rows): imposed separately they would overdetermine (y_Ld = lambda x a fixed vector); y_Ld itself is a check.  The matching:
+    // + (L_d - ln rho_m) D(lambda V) and its r-derivative + (n/r_m)(rho_m^d - 1) D(lambda V).  DEL = 0 (or no PAIRV): the log column,
+    // bitwise.  (Round 420's pairing of EVERY companion -- retracted by research round 884 -- is gone.)
     double DEL = 0;
+    bool PAIR = false;
+    std::vector<int> pv_q;                                // PAIRV: unknown index, V, w
+    std::vector<double> pv_V, pv_w;
 
     explicit Eval(const std::string& path)
     {
         read(path);
         if (const char* d = std::getenv("STAGEB_DELTA")) DEL = std::atof(d);
+        if (DEL != 0.0 && pv_q.empty()) throw std::runtime_error("stageB: STAGEB_DELTA != 0 needs the data's PAIRV section (scripts/e33_pairv.py)");
+        PAIR = DEL != 0.0;
     }
 
     // ---------------------------------------------------------------- data
@@ -209,8 +219,15 @@ class Eval {
         for (auto& m : mk) { in >> m.F >> m.d >> m.k >> m.kept; m.off.resize(NOFF); for (double& v : m.off) in >> v; }
         if (!in) throw std::runtime_error("stageB data: truncated " + path);
         NTHR = NROW;
-        if (in >> tag) {
-            if (tag != "ORTH") throw std::runtime_error("stageB data: expected ORTH or the end, got " + tag);
+        while (in >> tag) {
+            if (tag == "PAIRV") {                         // round 421 (E3.3 on lambda V)
+                int np; in >> np;
+                pv_q.resize(np); pv_V.resize(np); pv_w.resize(np);
+                for (int a = 0; a < np; a++) in >> pv_q[a] >> pv_V[a] >> pv_w[a];
+                if (!in) throw std::runtime_error("stageB data: truncated PAIRV in " + path);
+                continue;
+            }
+            if (tag != "ORTH") throw std::runtime_error("stageB data: expected ORTH, PAIRV or the end, got " + tag);
             in >> NORTH;
             orthu0.resize(NU);
             for (double& v : orthu0) in >> v;
@@ -223,7 +240,7 @@ class Eval {
 
     // ---------------------------------------------------------------- states
     // amp / lc: per key, full-mode coefficients; complex so the matching can take a complex step
-    struct State { std::vector<std::vector<cplx>> amp, lc; cplx n; std::vector<cplx> off; };
+    struct State { std::vector<std::vector<cplx>> amp, lc, lcV; cplx n; std::vector<cplx> off; };
 
     State state(const std::vector<cplx>& u) const
     {
@@ -243,6 +260,13 @@ class Eval {
         }
         complete(s, cs, true);
         complete(s, ct, false);
+        if (PAIR) {                                       // round 421: lambda V (lambda from the unknowns, linear)
+            cplx lam = 0.0;
+            for (size_t a = 0; a < pv_q.size(); a++) lam += pv_w[a] * u[pv_q[a]];
+            s.lcV.resize(NK);
+            for (int k = 0; k < NK; k++) s.lcV[k].assign(keys[k].nfull, cplx(0.0));
+            for (size_t a = 0; a < pv_q.size(); a++) s.lcV[unk[pv_q[a]].key][unk[pv_q[a]].ia] = lam * pv_V[a];
+        }
         return s;
     }
 
@@ -338,7 +362,7 @@ class Eval {
 
     // ---------------------------------------------------------------- throat rows
     // coefficient space: amp coefficients (key, mode) -> ca[key] offset; lc -> cl[key] offset; n -> the last
-    std::vector<int> caoff, cloff;
+    std::vector<int> caoff, cloff, clvoff;
     int NC = 0;
     void coef_layout()
     {
@@ -347,6 +371,7 @@ class Eval {
         int o = 0;
         for (int k = 0; k < NK; k++) { caoff[k] = o; o += keys[k].nfull; }
         for (int k = 0; k < NK; k++) { cloff[k] = o; o += keys[k].nfull; }
+        if (PAIR) { clvoff.resize(NK); for (int k = 0; k < NK; k++) { clvoff[k] = o; o += keys[k].nfull; } }   // round 421: lambda V
         NC = o + 1;
     }
 
@@ -361,7 +386,8 @@ class Eval {
         const cplx n = s.n;
         out.assign(NTHR, 0.0);
         if (grad) G->assign(static_cast<size_t>(NTHR) * NC, 0.0);
-        const int NV = grad ? NS + 1 : 1;         // slot 0 the value, 1.. the gradient
+        const int NV = grad ? NS + 1 + (PAIR ? DJN : 0) : 1;   // slot 0 the value, 1.. the gradient (round 421: + the lambda V symbols)
+        const int OV = 2 + 2 * DJN;                // the lambda V symbols' gradient slots
         std::vector<int> pmin(NE), pmax(NE);
         for (int e = 0; e < NE; e++) { pmin[e] = eqs[e].c1 - 2; pmax[e] = eqs[e].c1 + NGR - 3; }
         // grid
@@ -377,9 +403,9 @@ class Eval {
 #endif
         for (int t = t_first; t < NTH; t += t_step) {
             // amplitude functions on this node: per field the S3 symbols (grade index x derivative)
-            cplx A[6][S3], L[6][S3];
+            cplx A[6][S3], L[6][S3], LV[6][S3];
             std::vector<std::vector<std::array<double, 3>>> ang(NK);
-            for (int f = 0; f < 6; f++) for (int s_ = 0; s_ < S3; s_++) { A[f][s_] = 0.0; L[f][s_] = 0.0; }
+            for (int f = 0; f < 6; f++) for (int s_ = 0; s_ < S3; s_++) { A[f][s_] = 0.0; L[f][s_] = 0.0; LV[f][s_] = 0.0; }
             for (int k = 0; k < NK; k++) {
                 ang[k].resize(keys[k].nfull);
                 for (int j = 0; j < keys[k].nfull; j++) {
@@ -388,6 +414,7 @@ class Eval {
                     for (int d = 0; d < 3; d++) {
                         A[keys[k].f][3 * keys[k].gi + d] += s.amp[k][j] * angv[d];
                         L[keys[k].f][3 * keys[k].gi + d] += s.lc[k][j] * angv[d];
+                        if (PAIR) LV[keys[k].f][3 * keys[k].gi + d] += s.lcV[k][j] * angv[d];
                     }
                 }
             }
@@ -403,7 +430,7 @@ class Eval {
                         for (int q = 0; q < 6; q++) dJn[f][q] = 0.0;
                         jets1(f)(A[f], r, x, n, J6, dJ[f], dJn[f]);
                         for (int q = 0; q < 6; q++) Jt[jpos(f)[q]] = J6[q];
-                        if (anyL) {
+                        if (anyL || PAIR) {
                             for (int q = 0; q < DJN; q++) d2Jn[f][q] = 0.0;
                             jets2(f)(A[f], r, x, n, d2J[f], d2Jn[f]);
                         }
@@ -432,8 +459,33 @@ class Eval {
                             const int* jp = jpos(f);
                             CJ[jp[1]] = n / r * DJ[jp[0]];
                             CJ[jp[3]] = 2.0 * n / r * DJ[jp[1]] - n / (r * r) * DJ[jp[0]];
-                            if (DEL != 0.0) CJ[jp[3]] += DEL * n * n / (r * r) * DJ[jp[0]];
                             CJ[jp[4]] = n / r * DJ[jp[2]];
+                        }
+                    }
+                    // round 421: the pair on lambda V -- DJV = dJ/da . LV, Dl (the rr jet's d n^2/r^2 DJV), CV = the full commutator jets of LV
+                    cplx DJV[36], Dl[36], CV[36];
+                    cplx dDJV[6][6][S3], dDJVn[6][6];
+                    if (PAIR) {
+                        for (int q = 0; q < 36; q++) { DJV[q] = 0.0; Dl[q] = 0.0; CV[q] = 0.0; }
+                        for (int f = 0; f < 6; f++) {
+                            for (int q = 0; q < 6; q++) {
+                                cplx acc = 0.0, an = 0.0;
+                                for (int s_ = 0; s_ < S3; s_++) { acc += dJ[f][S3 * q + s_] * LV[f][s_]; an += d2Jn[f][S3 * q + s_] * LV[f][s_]; }
+                                DJV[jpos(f)[q]] = acc;
+                                dDJVn[f][q] = an;
+                                for (int s_ = 0; s_ < S3; s_++) dDJV[f][q][s_] = 0.0;
+                            }
+                            const int (*pp)[3] = d2p(f);
+                            for (int m = 0; m < d2n(f); m++) {
+                                const int q = pp[m][0], s1 = pp[m][1], s2 = pp[m][2];
+                                dDJV[f][q][s1] += d2J[f][m] * LV[f][s2];
+                                if (s1 != s2) dDJV[f][q][s2] += d2J[f][m] * LV[f][s1];
+                            }
+                            const int* jp = jpos(f);
+                            Dl[jp[3]] = DEL * n * n / (r * r) * DJV[jp[0]];
+                            CV[jp[1]] = n / r * DJV[jp[0]];
+                            CV[jp[3]] = 2.0 * n / r * DJV[jp[1]] - n / (r * r) * DJV[jp[0]] + Dl[jp[3]];
+                            CV[jp[4]] = n / r * DJV[jp[2]];
                         }
                     }
                     for (int e = 0; e < NE; e++) {
@@ -443,7 +495,7 @@ class Eval {
                         eqfn(eqs[e].name)(Jt, r, th[t], Jv, E, P, H);
                         cplx y0 = E, y1 = 0.0;
                         for (int q = 0; q < 36; q++) { y0 += P[q] * CJ[q]; y1 += P[q] * DJ[q]; }
-                        if (DEL != 0.0) { cplx pc = 0.0; for (int q = 0; q < 36; q++) pc += P[q] * CJ[q]; y1 += DEL * pc; }
+                        if (PAIR) { cplx pl = 0.0, pc = 0.0; for (int q = 0; q < 36; q++) { pl += P[q] * Dl[q]; pc += P[q] * CV[q]; } y0 += pl; y1 += DEL * pc; }
                         const cplx w = std::pow(r, -eqs[e].c0);
                         cplx* S0 = &Sx[(static_cast<size_t>(e) * 2 + 0) * NV];
                         cplx* S1 = &Sx[(static_cast<size_t>(e) * 2 + 1) * NV];
@@ -461,13 +513,22 @@ class Eval {
                                 if (i1 != i2) { hc[i2] += H[m] * CJ[i1]; hd[i2] += H[m] * DJ[i1]; }
                             }
                         }
+                        cplx hl[36], hv[36];                  // round 421: H.Dl, H.CV
+                        if (PAIR) {
+                            for (int q = 0; q < 36; q++) { hl[q] = 0.0; hv[q] = 0.0; }
+                            const int (*hpp)[2] = hp(eqs[e].name);
+                            for (int m = 0; m < nh; m++) {
+                                const int i1 = hpp[m][0], i2 = hpp[m][1];
+                                hl[i1] += H[m] * Dl[i2]; hv[i1] += H[m] * CV[i2];
+                                if (i1 != i2) { hl[i2] += H[m] * Dl[i1]; hv[i2] += H[m] * CV[i1]; }
+                            }
+                        }
                         for (int f = 0; f < 6; f++) {
                             const int* jp = jpos(f);
                             for (int s_ = 0; s_ < S3; s_++) {
-                                cplx gA0 = 0.0, gA1 = 0.0, gL0 = 0.0, gL1 = 0.0, pd = 0.0;
+                                cplx gA0 = 0.0, gA1 = 0.0, gL0 = 0.0, gL1 = 0.0;
                                 for (int q = 0; q < 6; q++) {
                                     const cplx d = dJ[f][S3 * q + s_];
-                                    if (DEL != 0.0) pd += P[jp[q]] * d;
                                     gA0 += (P[jp[q]] + hc[jp[q]]) * d;
                                     gA1 += hd[jp[q]] * d;
                                     gL1 += P[jp[q]] * d;
@@ -476,26 +537,36 @@ class Eval {
                                 gL0 += P[jp[1]] * (n / r * dJ[f][S3 * 0 + s_])
                                      + P[jp[3]] * (2.0 * n / r * dJ[f][S3 * 1 + s_] - n / (r * r) * dJ[f][S3 * 0 + s_])
                                      + P[jp[4]] * (n / r * dJ[f][S3 * 2 + s_]);
-                                if (DEL != 0.0) gL0 += P[jp[3]] * (DEL * n * n / (r * r) * dJ[f][S3 * 0 + s_]);
                                 if (anyL) {
                                     for (int q = 0; q < 6; q++) gA1 += P[jp[q]] * dDJ[f][q][s_];
                                     gA0 += P[jp[1]] * (n / r * dDJ[f][0][s_])
                                          + P[jp[3]] * (2.0 * n / r * dDJ[f][1][s_] - n / (r * r) * dDJ[f][0][s_])
                                          + P[jp[4]] * (n / r * dDJ[f][2][s_]);
-                                    if (DEL != 0.0) gA0 += P[jp[3]] * (DEL * n * n / (r * r) * dDJ[f][0][s_]);
                                 }
-                                if (DEL != 0.0) { gA1 += DEL * (gA0 - pd); gL1 += DEL * gL0; }   // d(P.CJ) = gA0 - P.d ; P.dCJ/dL = gL0
+                                if (PAIR) {                   // round 421: the pair's terms (y0 += P.Dl, y1 += DEL P.CV)
+                                    const cplx k2 = DEL * n * n / (r * r);
+                                    cplx a0 = P[jp[3]] * k2 * dDJV[f][0][s_], a1 = 0.0, v0 = P[jp[3]] * k2 * dJ[f][S3 * 0 + s_], v1 = 0.0;
+                                    for (int q = 0; q < 6; q++) { a0 += hl[jp[q]] * dJ[f][S3 * q + s_]; a1 += hv[jp[q]] * dJ[f][S3 * q + s_]; }
+                                    a1 += P[jp[1]] * (n / r * dDJV[f][0][s_])
+                                        + P[jp[3]] * (2.0 * n / r * dDJV[f][1][s_] - n / (r * r) * dDJV[f][0][s_] + k2 * dDJV[f][0][s_])
+                                        + P[jp[4]] * (n / r * dDJV[f][2][s_]);
+                                    v1 += P[jp[1]] * (n / r * dJ[f][S3 * 0 + s_])
+                                        + P[jp[3]] * (2.0 * n / r * dJ[f][S3 * 1 + s_] - n / (r * r) * dJ[f][S3 * 0 + s_] + k2 * dJ[f][S3 * 0 + s_])
+                                        + P[jp[4]] * (n / r * dJ[f][S3 * 2 + s_]);
+                                    gA0 += a0; gA1 += DEL * a1;
+                                    S0[OV + S3 * f + s_] += v0 * w;
+                                    S1[OV + S3 * f + s_] += DEL * v1 * w;
+                                }
                                 S0[1 + S3 * f + s_] += gA0 * w;
                                 S1[1 + S3 * f + s_] += gA1 * w;
                                 S0[1 + DJN + S3 * f + s_] += gL0 * w;
                                 S1[1 + DJN + S3 * f + s_] += gL1 * w;
                             }
                         }
-                        cplx gn0 = 0.0, gn1 = 0.0, pdn = 0.0;
+                        cplx gn0 = 0.0, gn1 = 0.0;
                         for (int f = 0; f < 6; f++) {
                             const int* jp = jpos(f);
                             for (int q = 0; q < 6; q++) {
-                                if (DEL != 0.0) pdn += P[jp[q]] * dJn[f][q];
                                 gn0 += (P[jp[q]] + hc[jp[q]]) * dJn[f][q];
                                 gn1 += hd[jp[q]] * dJn[f][q];
                             }
@@ -504,10 +575,22 @@ class Eval {
                                 gn0 += P[jp[1]] * (DJ[jp[0]] / r + n / r * dDJn[f][0])
                                      + P[jp[3]] * (2.0 / r * DJ[jp[1]] + 2.0 * n / r * dDJn[f][1] - DJ[jp[0]] / (r * r) - n / (r * r) * dDJn[f][0])
                                      + P[jp[4]] * (DJ[jp[2]] / r + n / r * dDJn[f][2]);
-                                if (DEL != 0.0) gn0 += P[jp[3]] * (DEL * (2.0 * n / (r * r) * DJ[jp[0]] + n * n / (r * r) * dDJn[f][0]));
                             }
                         }
-                        if (DEL != 0.0) gn1 += DEL * (gn0 - pdn);
+                        if (PAIR) {                           // round 421: d/dn of P.Dl and DEL P.CV
+                            for (int f = 0; f < 6; f++) {
+                                const int* jp = jpos(f);
+                                const cplx X0 = DJV[jp[0]], X1 = DJV[jp[1]], X2 = DJV[jp[2]];
+                                const cplx Y0 = dDJVn[f][0], Y1 = dDJVn[f][1], Y2 = dDJVn[f][2];
+                                const cplx dDl = DEL * (2.0 * n / (r * r) * X0 + n * n / (r * r) * Y0);
+                                cplx b0 = P[jp[3]] * dDl, b1 = 0.0;
+                                for (int q = 0; q < 6; q++) { b0 += hl[jp[q]] * dJn[f][q]; b1 += hv[jp[q]] * dJn[f][q]; }
+                                b1 += P[jp[1]] * (X0 / r + n / r * Y0)
+                                    + P[jp[3]] * (2.0 / r * X1 + 2.0 * n / r * Y1 - X0 / (r * r) - n / (r * r) * Y0 + dDl)
+                                    + P[jp[4]] * (X2 / r + n / r * Y2);
+                                gn0 += b0; gn1 += DEL * b1;
+                            }
+                        }
                         S0[1 + 2 * DJN] += gn0 * w;
                         S1[1 + 2 * DJN] += gn1 * w;
                     }
@@ -544,6 +627,11 @@ class Eval {
                         }
                         Gr[caoff[k] + j] += qw * ga;
                         Gr[cloff[k] + j] += qw * gl;
+                        if (PAIR) {
+                            double gv = 0.0;
+                            for (int d = 0; d < 3; d++) gv += C[OV + S3 * f + 3 * gi + d].real() * ang[k][j][d];
+                            Gr[clvoff[k] + j] += qw * gv;
+                        }
                     }
                 }
                 Gr[NC - 1] += qw * C[1 + 2 * DJN].real();
@@ -589,6 +677,7 @@ class Eval {
                 for (int j = 0; j < keys[k].nfull; j++) {
                     CU[static_cast<size_t>(caoff[k] + j) * NU + q] = (s1.amp[k][j] - s0.amp[k][j]).real();
                     CU[static_cast<size_t>(cloff[k] + j) * NU + q] = (s1.lc[k][j] - s0.lc[k][j]).real();
+                    if (PAIR) CU[static_cast<size_t>(clvoff[k] + j) * NU + q] = (s1.lcV[k][j] - s0.lcV[k][j]).real();
                 }
             CU[static_cast<size_t>(NC - 1) * NU + q] = (s1.n - s0.n).real();
         }
@@ -602,20 +691,21 @@ class Eval {
         const cplx n = s.n;
         const cplx x = std::pow(cplx(RM), n);
         const cplx lnr = n * std::log(RM);
-        const cplx Ld = DEL != 0.0 ? (std::exp(DEL * lnr) - 1.0) / DEL : lnr;       // round 420 (E3.3): L_d(rho_m); ln rho_m at DEL = 0
-        const cplx rd = DEL != 0.0 ? std::exp(DEL * lnr) : cplx(1.0);              // rho_m^d
+        const cplx Ld = PAIR ? (std::exp(DEL * lnr) - 1.0) / DEL : lnr;       // round 421 (E3.3 on lambda V): L_d(rho_m)
+        const cplx rd = PAIR ? std::exp(DEL * lnr) : cplx(1.0);              // rho_m^d
         double angv[3];
         // per field, values at the nodes
         std::vector<std::vector<cplx>> v0(6, std::vector<cplx>(NTHM)), v1(6, std::vector<cplx>(NTHM));
         for (int t = 0; t < NTHM; t++) {
-            cplx A[6][S3], L[6][S3];
-            for (int f = 0; f < 6; f++) for (int q = 0; q < S3; q++) { A[f][q] = 0.0; L[f][q] = 0.0; }
+            cplx A[6][S3], L[6][S3], LV[6][S3];
+            for (int f = 0; f < 6; f++) for (int q = 0; q < S3; q++) { A[f][q] = 0.0; L[f][q] = 0.0; LV[f][q] = 0.0; }
             for (int k = 0; k < NK; k++)
                 for (int j = 0; j < keys[k].nfull; j++) {
                     angular(keys[k].kind, j + (keys[k].kind == 2 ? 1 : 0), thm[t], angv);
                     for (int d = 0; d < 3; d++) {
                         A[keys[k].f][3 * keys[k].gi + d] += s.amp[k][j] * angv[d];
                         L[keys[k].f][3 * keys[k].gi + d] += s.lc[k][j] * angv[d];
+                        if (PAIR) LV[keys[k].f][3 * keys[k].gi + d] += s.lcV[k][j] * angv[d];
                     }
                 }
             for (int f = 0; f < 6; f++) {
@@ -624,12 +714,13 @@ class Eval {
                 jets1(f)(A[f], cplx(RM), x, n, J6, dJ, dJn);
                 cplx D0 = 0.0, D1 = 0.0;
                 for (int q = 0; q < S3; q++) { D0 += dJ[q] * L[f][q]; D1 += dJ[S3 + q] * L[f][q]; }
-                if (DEL != 0.0) {
-                    v0[f][t] = J6[0] + Ld * D0;
-                    v1[f][t] = J6[1] + Ld * D1 + n / RM * rd * D0;
-                } else {
-                    v0[f][t] = J6[0] + lnr * D0;
-                    v1[f][t] = J6[1] + lnr * D1 + n / RM * D0;
+                v0[f][t] = J6[0] + lnr * D0;
+                v1[f][t] = J6[1] + lnr * D1 + n / RM * D0;
+                if (PAIR) {                                   // round 421: + (L_d - ln rho_m) lambda V, its r-derivative
+                    cplx V0 = 0.0, V1 = 0.0;
+                    for (int q = 0; q < S3; q++) { V0 += dJ[q] * LV[f][q]; V1 += dJ[S3 + q] * LV[f][q]; }
+                    v0[f][t] += (Ld - lnr) * V0;
+                    v1[f][t] += (Ld - lnr) * V1 + n / RM * (rd - 1.0) * V0;
                 }
             }
         }

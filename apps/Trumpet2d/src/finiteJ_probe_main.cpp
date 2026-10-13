@@ -129,6 +129,8 @@ struct EqListPeek : Kadath::System_of_eqs {
     { return s.*(&EqListPeek::eq_list); }
     static const L& eqints(const Kadath::System_of_eqs& s)
     { return s.*(&EqListPeek::eq_int_list); }
+    static L& eqints_mut(Kadath::System_of_eqs& s)
+    { return s.*(&EqListPeek::eq_int_list); }
 };
 
 #ifdef TRUMPET_BULK2
@@ -664,6 +666,14 @@ static bool g_eq_axis_row = false;
 // ("SBM ... d1 ...") multiplied by F after the row-max W (the value keys keep theirs).  A uniform factor on every least-squares row
 // leaves dgglse's minimiser unchanged, so the matching's weight is varied relative to its own value rows.  Default 1: nothing changes.
 static double g_lsq_wd1 = 1.0;
+// ROUND 424 (research rounds 890-891): --qf-pad2 -- q~ represented with ONE MORE theta mode padded, so that q = sin^2 th q~ is exact within
+// the stored modes (Kadath's truncated sin^2 product drops the -1/4 cos 2K th part of q~'s top unknown: axis weight 1 - K^2/2 = -31, the
+// Fejer near-null).  Realised without touching the library's unknown count: q~'s top unknown theta mode nt-2 is PINNED to 0 by imposed
+// coefficient rows (Eq_int "QP7 d i", registered after the --defect store's rows) on radial coefficients 0..nr-3 of every domain plus nr-2
+// in domain 0 -- with the mode's interface / outer rows (5) that is a square homogeneous system, so the mode is identically 0 -- and the
+// hybrid's sin^2-weighted mode nt-2 q row is dropped (the plain rows 0..nt-3 stay).  Unknowns unchanged; imposed rows +1 (the least-squares
+// freedom 57 -> 56).  Default off: nothing changes.
+static bool g_qf_pad2 = false;
 static void (*g_sb_timer_print)(const void*, int) = nullptr;
 static bool lsq_sbt_row(const std::string& lb)
 {
@@ -1700,6 +1710,7 @@ int main(int argc, char** argv)
         else if (k == "--eqfn-plain") eqfnplain = true;
         else if (k == "--eqfn-hybrid") { eqfnplain = true; eqfnhybrid = true; }
         else if (k == "--eq-axis-row") g_eq_axis_row = true;
+        else if (k == "--qf-pad2") g_qf_pad2 = true;
         else if (k == "--stageB-lsq-wd1") g_lsq_wd1 = std::stod(argv[++i]);
         else if (k == "--recombine") recomb = argv[++i];
         else if (k == "--eqfn-sin2-droptop") eqfndrop = true;
@@ -4344,6 +4355,10 @@ int main(int argc, char** argv)
                     if (std::string(ename) == "EQFN") eqaxis_lhs[d] = lhs;      // round 423: --eq-axis-row reads the registered lhs
                     if (eqfnhybrid && std::string(ename) == "EQFN") {
                         syst.add_eq_inside_window(d, (lhs + " = 0").c_str(), 0, ntheta - 3);
+                        if (g_qf_pad2) {                                 // round 424: the sin^2-weighted top row dropped
+                            if (d == 0 && rank == 0) std::cout << "#  --qf-pad2: EQFN plain at modes 0.." << ntheta - 3 << " only (the sin^2-weighted mode " << ntheta - 2 << " row dropped)\n";
+                            continue;
+                        }
                         syst.add_eq_inside_window(d, ("multsint(multsint(" + lhs + ")) = 0").c_str(), ntheta - 2, ntheta - 2);
                         if (d == 0 && rank == 0)
                             std::cout << "#  --eqfn-hybrid: EQFN plain at modes 0.." << ntheta - 3 << ", sin^2-weighted at mode " << ntheta - 2
@@ -5717,6 +5732,26 @@ int main(int argc, char** argv)
         // ⚠ ROUND 423 (research rounds 888-889): --eq-axis-row -- the E_q AXIS ROWS, AFTER the defect store's rows (store unchanged): per
         // bulk domain d and radial node i (r = inf skipped), Ope_point(registered EQFN lhs at (x_i, theta = 0)) = the sum of its theta
         // coefficients (every mode, the top included).  dgglse's least-squares set (app_lsq); the imposed set is unchanged.
+        if (g_qf_pad2) {                          // round 424: q~'s top unknown theta mode pinned to 0 (see g_qf_pad2)
+            if (!eqfnhybrid || !thetapad) { std::cerr << "FATAL: --qf-pad2 needs --eqfn-hybrid and --theta-pad\n"; return 1; }
+            int npin = 0;
+            for (int d = 0; d <= dtop; d++) {
+                const Kadath::Domain* dm = space.get_domain(d);
+                const int nr = dm->get_nbr_coefs()(0);
+                const int imax = d == 0 ? nr - 2 : nr - 3;
+                for (int i = 0; i <= imax; i++) {
+                    Index pc(dm->get_nbr_coefs());
+                    pc.set(0) = i;
+                    pc.set(1) = ntheta - 2;
+                    const int before = SysPeek::neqint(syst);
+                    syst.add_eq_val_mode(d, "QF", pc, 0.0);
+                    std::get<0>((EqListPeek::eqints_mut(syst))[before]) = "QP7 " + std::to_string(d) + " " + std::to_string(i);
+                    npin++;
+                }
+            }
+            if (rank == 0) std::cout << "#  --qf-pad2: " << npin << " pins of q~'s theta mode " << ntheta - 2 << " (Eq_int QP7, imposed)\n";
+            emit("FJPQ_pins", npin);
+        }
         if (g_eq_axis_row) {
             if (!eqfnplain || !stageBlsq) { std::cerr << "FATAL: --eq-axis-row needs --eqfn-plain / --eqfn-hybrid and --stageB-lsq\n"; return 1; }
             int nax = 0;

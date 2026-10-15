@@ -674,6 +674,16 @@ static double g_lsq_wd1 = 1.0;
 // hybrid's sin^2-weighted mode nt-2 q row is dropped (the plain rows 0..nt-3 stay).  Unknowns unchanged; imposed rows +1 (the least-squares
 // freedom 57 -> 56).  Default off: nothing changes.
 static bool g_qf_pad2 = false;
+// ROUND 429 (research round 901, task 2): --stageB-lsq-soft-orth LIST -- SOFT truncation holds: the truncation-orthogonality rows
+// "SBO #k" with k in LIST (comma-separated indices / ranges a-b) move from dgglse's IMPOSED set into its LEAST-SQUARES set, with the same
+// row-max W as every least-squares row; the others stay imposed.  Default empty: nothing changes.
+static std::vector<char> g_lsq_soft_orth;
+static bool lsq_soft_orth_row(const std::string& lb)
+{
+    if (g_lsq_soft_orth.empty() || lb.rfind("SBO #", 0) != 0) return false;
+    const int k = std::atoi(lb.c_str() + 5);
+    return k >= 0 && k < static_cast<int>(g_lsq_soft_orth.size()) && g_lsq_soft_orth[k];
+}
 static void (*g_sb_timer_print)(const void*, int) = nullptr;
 static bool lsq_sbt_row(const std::string& lb)
 {
@@ -748,6 +758,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
                 if (rw.equation_type == "Eq_int" && rw.eq_index >= 0 && rw.eq_index < static_cast<int>(EI.size()) && rw.row >= 0 &&
                     rw.row < m && ((std::get<0>(EI[rw.eq_index]).rfind("SBM", 0) == 0 &&
                     !(g_lsq_impose_qb && std::get<0>(EI[rw.eq_index]).rfind("SBM QB ", 0) == 0)) || lsq_sbt_row(std::get<0>(EI[rw.eq_index])) ||
+                    lsq_soft_orth_row(std::get<0>(EI[rw.eq_index])) ||
                     (g_eq_axis_row && std::get<0>(EI[rw.eq_index]).rfind("AXQ ", 0) == 0))) {
                     ism[rw.row] = 1;
                     const std::string& lb = std::get<0>(EI[rw.eq_index]);
@@ -762,6 +773,11 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         for (int r = 0; r < m; r++) (ism[r] ? im : ic).push_back(r);
         const int mm = static_cast<int>(im.size()), p = static_cast<int>(ic.size());
         if (g_lsq_grades >= 0 && it == 0) std::cout << "#  lsq: --stageB-lsq-grades " << g_lsq_grades << ": throat rows of grade >= " << g_lsq_grades << " in the least-squares set\n";
+        if (!g_lsq_soft_orth.empty() && it == 0) {
+            int ns = 0;
+            for (char c : g_lsq_soft_orth) ns += c ? 1 : 0;
+            std::cout << "#  lsq: --stageB-lsq-soft-orth: " << ns << " truncation-orthogonality rows (SBO) listed for the least-squares set\n";
+        }
         if (g_lsq_impose_qb && it == 0) std::cout << "#  lsq: --stageB-lsq-impose-qb: the SBM QB rows imposed; " << mm << " least-squares rows, " << p << " imposed\n";
         std::fill(R0.begin(), R0.end(), 0.0);
         for (int c = 0; c < n; c++) for (int r = 0; r < m; r++) R0[r] = std::max(R0[r], std::fabs(Aat(r, c)));
@@ -1712,6 +1728,17 @@ int main(int argc, char** argv)
         else if (k == "--eq-axis-row") g_eq_axis_row = true;
         else if (k == "--qf-pad2") g_qf_pad2 = true;
         else if (k == "--stageB-lsq-wd1") g_lsq_wd1 = std::stod(argv[++i]);
+        else if (k == "--stageB-lsq-soft-orth") {                       // round 429: "a-b,c,..." -> the SBO indices
+            std::stringstream ss(argv[++i]);
+            std::string tok;
+            while (std::getline(ss, tok, ',')) {
+                const size_t d = tok.find('-');
+                const int a = std::atoi(tok.substr(0, d).c_str()), b = d == std::string::npos ? a : std::atoi(tok.substr(d + 1).c_str());
+                if (a < 0 || b < a) { std::cerr << "FATAL: --stageB-lsq-soft-orth: bad range " << tok << "\n"; return 1; }
+                if (static_cast<int>(g_lsq_soft_orth.size()) <= b) g_lsq_soft_orth.resize(b + 1, 0);
+                for (int q = a; q <= b; q++) g_lsq_soft_orth[q] = 1;
+            }
+        }
         else if (k == "--recombine") recomb = argv[++i];
         else if (k == "--eqfn-sin2-droptop") eqfndrop = true;
         else if (k == "--amax-table") amaxtable = argv[++i];

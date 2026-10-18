@@ -118,6 +118,8 @@ class Eval {
     int NTHR = 0, NORTH = 0;                              // throat rows, orthogonality rows (NROW = NTHR + NORTH)
     int NGR = NG;                                         // round 419: row orders extracted (-2 .. NGR - 3; NG unless the data's rows go higher)
     std::vector<double> orth, orthu0;                     // NORTH x NU, row-major; the anchor (the seed they were built at)
+    int LAMQ = -1;                                        // round 437 (E3.3c): LAMROW -- unknown LAMQ adds LAMQ's value x lamrow[ro] to throat row ro
+    std::vector<double> lamrow;                           //   (lambda R[D] on the lattice rows; absent: no term, bitwise as before)
     double RM = 0, RX = 0;
     std::vector<double> th, sw, thm;
     std::vector<KeyInfo> keys;
@@ -234,7 +236,15 @@ class Eval {
                 if (!in) throw std::runtime_error("stageB data: truncated PAIRV in " + path);
                 continue;
             }
-            if (tag != "ORTH") throw std::runtime_error("stageB data: expected ORTH, PAIRV or the end, got " + tag);
+            if (tag == "LAMROW") {                        // round 437 (E3.3c)
+                int nr; in >> LAMQ >> nr;
+                if (nr != NTHR || LAMQ < 0 || LAMQ >= NU) throw std::runtime_error("stageB data: LAMROW size / unknown mismatch in " + path);
+                lamrow.resize(nr);
+                for (double& v : lamrow) in >> v;
+                if (!in) throw std::runtime_error("stageB data: truncated LAMROW in " + path);
+                continue;
+            }
+            if (tag != "ORTH") throw std::runtime_error("stageB data: expected ORTH, PAIRV, LAMROW or the end, got " + tag);
             in >> NORTH;
             orthu0.resize(NU);
             for (double& v : orthu0) in >> v;
@@ -764,6 +774,7 @@ class Eval {
         std::vector<cplx> uc(u.begin(), u.end());
         const State s = state(uc);
         throat(s, Jv, rv, nullptr);
+        if (LAMQ >= 0) for (int ro = 0; ro < NTHR; ro++) rv[ro] += u[LAMQ] * lamrow[ro];      // round 437 (E3.3c)
         append_orth(u, rv);
         auto t1 = std::chrono::steady_clock::now();
         const std::vector<cplx> m = matching(s);
@@ -794,6 +805,7 @@ class Eval {
                 double* jr = &Jr[static_cast<size_t>(ro) * NU];
                 for (int q = 0; q < NU; q++) jr[q] += g * cu[q];
             }
+        if (LAMQ >= 0) for (int ro = 0; ro < NTHR; ro++) Jr[static_cast<size_t>(ro) * NU + LAMQ] += lamrow[ro];   // round 437 (E3.3c)
         for (int o = 0; o < NORTH; o++)
             for (int q = 0; q < NU; q++) Jr[static_cast<size_t>(NTHR + o) * NU + q] = orth[static_cast<size_t>(o) * NU + q];
         Jm.assign(static_cast<size_t>(NMK) * NU, 0.0);

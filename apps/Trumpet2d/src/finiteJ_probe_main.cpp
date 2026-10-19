@@ -662,6 +662,12 @@ static bool g_lsq_jac_reuse = false;
 // "AXQ <d> <i>" each, registered after the --defect store's rows (the store is unchanged) and placed in dgglse's LEAST-SQUARES set (the
 // imposed set is unchanged).  Needs --eqfn-plain / --eqfn-hybrid (the regular emission).  Default off: nothing registered.
 static bool g_eq_axis_row = false;
+// ROUND 440 (research round 929, task 3(i)): --eq-axis-swap -- the STRONG SWAP: in every bulk domain, E_q's axis-limit row (the sum of the
+// registered EQFN lhs's theta coefficients at a radial node, Ope_point at theta = 0; Eq_int "AXS <d> <i>") IMPOSED at the interior radial nodes
+// (domains 0-1: i = 1..nr-2; domain 2: i = 1..nr-2, r = inf skipped) IN PLACE OF E_q's plain theta-mode-0 rows (the EQFN rows with eq_local_row
+// < nr_coef - 2 -- mode-major, checked on the dump), which go to dgglse's least-squares set with weight 0 (dropped).  Counts 31 / 31 / 15 each.
+// Needs --eqfn-hybrid and --stageB-lsq.  Default off: nothing registered, nothing reclassified.
+static bool g_eq_axis_swap = false;
 // ROUND 423 (research round 889, task 3): --stageB-lsq-wd1 F -- the least-squares weight of the MATCHING rows' radial-derivative keys
 // ("SBM ... d1 ...") multiplied by F after the row-max W (the value keys keep theirs).  A uniform factor on every least-squares row
 // leaves dgglse's minimiser unchanged, so the matching's weight is varied relative to its own value rows.  Default 1: nothing changes.
@@ -769,6 +775,21 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
                     }
                 }
         }
+        if (g_eq_axis_swap) {                      // round 440: E_q's plain theta-mode-0 rows dropped (least-squares set, weight 0)
+            std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
+            syst.classify_equation_row_metadata(rmeta);
+            const auto& EL = EqListPeek::eqs(syst);
+            int ndrop = 0;
+            for (const auto& rw : rmeta) {
+                if (rw.equation_type == "Eq_int" || rw.eq_index < 0 || rw.eq_index >= static_cast<int>(EL.size()) || rw.row < 0 || rw.row >= m) continue;
+                const std::string& en = std::get<0>(EL[rw.eq_index]);
+                if (en.find("EQFN") == std::string::npos) continue;
+                const int d = std::get<1>(EL[rw.eq_index]);
+                const int nrr = syst.get_space().get_domain(d)->get_nbr_coefs()(0) - 2;
+                if (rw.eq_local_row < nrr) { ism[rw.row] = 3; ndrop++; }
+            }
+            if (it == 0) std::cout << "#  lsq: --eq-axis-swap: " << ndrop << " E_q theta-mode-0 rows dropped (least-squares set, weight 0); the AXS rows imposed\n";
+        }
         std::vector<int> im, ic;
         for (int r = 0; r < m; r++) (ism[r] ? im : ic).push_back(r);
         const int mm = static_cast<int>(im.size()), p = static_cast<int>(ic.size());
@@ -790,6 +811,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
             for (int r = 0; r < m; r++) if (ism[r]) R0[r] = cf * sfw[r];
             if (it == 0) std::cout << "#  lsq: matching-row W scale-free [C0; r_m C1], r_m " << std::setprecision(12) << g_lsq_rm << ", common factor " << cf << "\n";
         }
+        if (g_eq_axis_swap) for (int r = 0; r < m; r++) if (ism[r] == 3) R0[r] = 0.0;   // round 440: the dropped rows, weight 0
         if (g_lsq_wd1 != 1.0) {                                        // round 423: the matching d1 keys' weight x F
             int nd1 = 0;
             for (int r = 0; r < m; r++) if (ism[r] == 2) { R0[r] *= g_lsq_wd1; nd1++; }
@@ -1726,6 +1748,7 @@ int main(int argc, char** argv)
         else if (k == "--eqfn-plain") eqfnplain = true;
         else if (k == "--eqfn-hybrid") { eqfnplain = true; eqfnhybrid = true; }
         else if (k == "--eq-axis-row") g_eq_axis_row = true;
+        else if (k == "--eq-axis-swap") g_eq_axis_swap = true;
         else if (k == "--qf-pad2") g_qf_pad2 = true;
         else if (k == "--stageB-lsq-wd1") g_lsq_wd1 = std::stod(argv[++i]);
         else if (k == "--stageB-lsq-soft-orth") {                       // round 429: "a-b,c,..." -> the SBO indices
@@ -5778,6 +5801,30 @@ int main(int argc, char** argv)
             }
             if (rank == 0) std::cout << "#  --qf-pad2: " << npin << " pins of q~'s theta mode " << ntheta - 2 << " (Eq_int QP7, imposed)\n";
             emit("FJPQ_pins", npin);
+        }
+        if (g_eq_axis_swap) {                     // round 440 (see g_eq_axis_swap): the AXS rows, imposed (default classification)
+            if (!eqfnplain || !stageBlsq || g_eq_axis_row) { std::cerr << "FATAL: --eq-axis-swap needs --eqfn-hybrid and --stageB-lsq (and not --eq-axis-row)\n"; return 1; }
+            int nax = 0;
+            for (int d = 0; d <= dtop; d++) {
+                if (!eqaxis_lhs.count(d)) { std::cerr << "FATAL: --eq-axis-swap: EQFN not registered in domain " << d << "\n"; return 1; }
+                const Kadath::Domain* dm = space.get_domain(d);
+                const int nr = dm->get_nbr_points()(0);
+                char nrm[Kadath::LMAX];
+                Kadath::trim_spaces(nrm, eqaxis_lhs[d].c_str());
+                for (int i = 1; i < nr - 1; i++) {
+                    Index ix(dm->get_nbr_points());
+                    ix.set(0) = i;
+                    if (!std::isfinite(dm->get_radius()(ix))) continue;
+                    Point num(2);
+                    num.set(1) = dm->get_coloc(1)(i);
+                    num.set(2) = 0.0;
+                    EqIntAdd::add_sum(syst, d, "AXS " + std::to_string(d) + " " + std::to_string(i),
+                                      {new Kadath::Ope_point(&syst, num, syst.give_ope(d, nrm))});
+                    nax++;
+                }
+            }
+            if (rank == 0) std::cout << "#  --eq-axis-swap: " << nax << " E_q axis rows (Eq_int AXS), imposed\n";
+            emit("FJPA_axis_swap_rows", nax);
         }
         if (g_eq_axis_row) {
             if (!eqfnplain || !stageBlsq) { std::cerr << "FATAL: --eq-axis-row needs --eqfn-plain / --eqfn-hybrid and --stageB-lsq\n"; return 1; }

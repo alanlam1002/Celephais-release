@@ -698,6 +698,14 @@ static bool lsq_sbt_row(const std::string& lb)
     return p != std::string::npos && std::atoi(lb.c_str() + p + 2) >= g_lsq_grades;
 }
 static double g_lsq_rm = 0.0;              // r_m (the stage-B export's RM)
+#ifdef TRUMPET_LSQ_LM
+// ⚠ CODE ROUND 461 (research round 975, task (a)): --stageB-lsq-lm MU0 -- LEVENBERG-MARQUARDT damping of the LEAST-SQUARES part only: the
+// least-squares set is augmented with sqrt(mu) I rows on the unknowns in dgglse's scaled space (z = X / Cs; right-hand side 0), the imposed
+// rows exact as before; mu adapted per iterate (accepted at a 1: mu / 3; a < 1 or rejected: mu x 4; clamped to [1e-16, 1e-2]).  The fixed
+// points are Gauss-Newton's (X = 0 there); the damping only changes the path.  Its own binary (finiteJ_probe_bulk2_v2_ng8_ts_lm).
+static double g_lsq_lm_mu = -1.0;          // < 0: off
+static double g_lsq_lm_min = 1e-16;        // --stageB-lsq-lm-min MUMIN: the adaptation's floor (round 461: the drift resumes when mu falls back)
+#endif
 static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int it, int rank)
 {
 #ifdef TRUMPET_STAGEB_TSPLIT
@@ -844,10 +852,26 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
             int info = 0, lw = -1;
             double wq = 0;
             const int ldb = std::max(p, 1);
-            dgglse_(&mm, &n, &p, Aq.data(), &mm, Bq.data(), &ldb, cv.data(), dv.data(), z.data(), &wq, &lw, &info);
+            int ma = mm;                                                // the least-squares row count dgglse sees
+#ifdef TRUMPET_LSQ_LM
+            if (g_lsq_lm_mu > 0) {                                      // round 461: [W A_m Cs; sqrt(mu) I] z ~ [W F_m; 0]
+                ma = mm + n;
+                std::vector<double> Aa(static_cast<size_t>(ma) * n, 0.0), ca(ma, 0.0);
+                const double sq = std::sqrt(g_lsq_lm_mu);
+                for (int c = 0; c < n; c++) {
+                    for (int a = 0; a < mm; a++) Aa[static_cast<size_t>(c) * ma + a] = Aq[static_cast<size_t>(c) * mm + a];
+                    Aa[static_cast<size_t>(c) * ma + mm + c] = sq;
+                }
+                for (int a = 0; a < mm; a++) ca[a] = cv[a];
+                Aq.swap(Aa);
+                cv.swap(ca);
+                std::cout << "#  lsq step " << it << ": --stageB-lsq-lm: mu " << std::setprecision(4) << g_lsq_lm_mu << "\n";
+            }
+#endif
+            dgglse_(&ma, &n, &p, Aq.data(), &ma, Bq.data(), &ldb, cv.data(), dv.data(), z.data(), &wq, &lw, &info);
             lw = static_cast<int>(wq) + 1;
             std::vector<double> work(lw);
-            dgglse_(&mm, &n, &p, Aq.data(), &mm, Bq.data(), &ldb, cv.data(), dv.data(), z.data(), work.data(), &lw, &info);
+            dgglse_(&ma, &n, &p, Aq.data(), &ma, Bq.data(), &ldb, cv.data(), dv.data(), z.data(), work.data(), &lw, &info);
             if (info != 0) { std::cout << "#  lsq: dgglse info " << info << "\n"; fail = 1; }
             // the linear residuals, long double: imposed rows max |W (A X - F)|, matching ||W (A X - F)||_m
             double lc = 0, lm2 = 0, xn = 0;
@@ -908,6 +932,11 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         if (ok > 0.5) { acc = k; break; }
     }
     if (acc < 0) { apply(-cur); cur = 0.0; }                       // no decrease: the step is rejected (the floor)
+#ifdef TRUMPET_LSQ_LM
+    if (g_lsq_lm_mu > 0) {                                          // round 461: the damping's adaptation (every rank alike)
+        g_lsq_lm_mu = (acc == 0) ? std::max(g_lsq_lm_mu / 3.0, g_lsq_lm_min) : std::min(g_lsq_lm_mu * 4.0, 1e-2);
+    }
+#endif
     if (rank == 0) {
         std::cout << "#  lsq step " << it << ": line search ||W F||: " << std::setprecision(6) << phi0 << " ->";
         for (int k = 0; k < 4 && (acc < 0 || k <= acc); k++) std::cout << " (a " << al[k] << ") " << ph[k];
@@ -1780,6 +1809,10 @@ int main(int argc, char** argv)
         else if (k == "--stageB-lsq-floor-stop") g_lsq_floor_w = std::atoi(argv[++i]);
         else if (k == "--stageB-lsq-jac-reuse") g_lsq_jac_reuse = true;
         else if (k == "--apply-step") { applystep = argv[++i]; applyeps = std::stod(argv[++i]); }
+#ifdef TRUMPET_LSQ_LM
+        else if (k == "--stageB-lsq-lm") g_lsq_lm_mu = std::stod(argv[++i]);
+        else if (k == "--stageB-lsq-lm-min") g_lsq_lm_min = std::stod(argv[++i]);
+#endif
         else if (k == "--stageB-lsq-w") { const std::string w_ = argv[++i]; if (w_ == "scalefree") g_lsq_wmode = 1; else if (w_ != "rowmax") { std::cerr << "FATAL: --stageB-lsq-w rowmax|scalefree\n"; return 1; } }
         else if (k == "--stageB-xform") stageBxform = argv[++i];
         else if (k == "--lsolve") lsolve = argv[++i];

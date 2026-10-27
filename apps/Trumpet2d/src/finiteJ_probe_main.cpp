@@ -179,10 +179,17 @@ struct EqIntAdd : Kadath::System_of_eqs {
 // the unknowns change; the Jacobian (analytic for the throat rows, a complex step for the matching) only when a lane
 // carries a nonzero derivative of a stage-B unknown.
 #include "stageB_eval.hpp"
+#ifdef TRUMPET_STAGEB_LIN
+// code round 463 part 20 (research round 1005, N3b): the linearised external (Mellin) throat in place of the generated one -- its own target
+#include "stageB_lin.hpp"
+#define SBE_EVAL sbe::LinEval
+#else
+#define SBE_EVAL sbe::Eval
+#endif
 #include "stageB_horizon.hpp"     // round 347: sub-step (iv), the live horizon rows and Komar's beta^phi
 #include "pv2_ops.hpp"            // round 357: puncture v2 phase 2a -- the expm1 user operator (`expmone`) and its gate
 struct SBShared {
-    sbe::Eval ev;
+    SBE_EVAL ev;
     double Jv;
     const Kadath::System_of_eqs* sys = nullptr;
     int base = 0;
@@ -1953,7 +1960,7 @@ int main(int argc, char** argv)
     if (!sbtestin.empty()) {
         // ⚠ ROUND 345 gate (iii-a): the generated evaluator alone, on states from a file -- no system is built
         if (stageB.empty()) { std::cerr << "FATAL: --stageB-eval-test needs --stageB DATA\n"; MPI_Finalize(); return 1; }
-        sbe::Eval ev(stageB);
+        SBE_EVAL ev(stageB);
         std::ifstream fin(sbtestin);
         std::ofstream fo(sbtestout);
         fo << std::setprecision(17);

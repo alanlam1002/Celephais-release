@@ -206,6 +206,15 @@ target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts PRIVATE TRUMP
 target_include_directories(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
 
+# Code round 463 part 20 (research round 1005, N3b): the LINEARISED EXTERNAL (Mellin) THROAT (--stageB LINFILE, stageB_lin.hpp) in place
+# of the generated one, its own binary; every other target is unchanged (the code is under TRUMPET_STAGEB_LIN only).
+kadath_add_exec(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts_lin src/finiteJ_probe_main.cpp)
+set_target_properties(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts_lin PROPERTIES
+    OUTPUT_NAME finiteJ_probe_bulk2_v2_ng8_ts_lin)
+target_compile_definitions(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts_lin PRIVATE TRUMPET_Q_REGULAR TRUMPET_DRVT_FIX TRUMPET_DRVT_FIX_THROAT TRUMPET_BULK2 TRUMPET_SEXP TRUMPET_EQREG TRUMPET_C3 TRUMPET_STAGEB_C3 TRUMPET_STAGEB_NG8 TRUMPET_STAGEB_TSPLIT TRUMPET_STAGEB_LIN)
+target_include_directories(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts_lin PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../Trumpet1d)
+
 # Code round 461 (research round 975): LEVENBERG-MARQUARDT damping of the least-squares part (--stageB-lsq-lm MU0), its own binary;
 # every other target is unchanged (the code is under TRUMPET_LSQ_LM only).
 kadath_add_exec(trumpet2d_finiteJ_probe_bulk2_v2_ng8_ts_lm src/finiteJ_probe_main.cpp)

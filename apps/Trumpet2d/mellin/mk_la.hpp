@@ -78,6 +78,26 @@ inline std::vector<cd> lstsq(std::vector<cd> A, int m, int n, const std::vector<
     return Bx;
 }
 
+// least squares with an explicit rcond (np.polyfit: rcond = len(x) * eps)
+inline std::vector<cd> lstsq_rc(std::vector<cd> A, int m, int n, const std::vector<cd>& B, int nrhs, double rcond) {
+    int ld = std::max(m, n);
+    std::vector<cd> Bx(size_t(ld) * nrhs, 0.0);
+    for (int i = 0; i < m; i++)
+        for (int r = 0; r < nrhs; r++) Bx[size_t(i) * nrhs + r] = B[size_t(i) * nrhs + r];
+    std::vector<double> s(std::min(m, n));
+    lapack_int rk = 0;
+    check(LAPACKE_zgelsd(LAPACK_ROW_MAJOR, m, n, nrhs, A.data(), n, Bx.data(), nrhs, s.data(), rcond, &rk), "zgelsd (rcond)");
+    Bx.resize(size_t(n) * nrhs);
+    return Bx;
+}
+
+// eigenvalues of a general complex matrix (np.linalg.eigvals: zgeev, no vectors)
+inline std::vector<cd> eigvals(std::vector<cd> A, int n) {
+    std::vector<cd> w(n), vl(size_t(std::max(n, 1))), vr(size_t(std::max(n, 1)));   // not referenced; MKL's LAPACKE checks ldvl / ldvr >= n
+    check(LAPACKE_zgeev(LAPACK_ROW_MAJOR, 'N', 'N', n, A.data(), n, w.data(), vl.data(), std::max(n, 1), vr.data(), std::max(n, 1)), "zgeev");
+    return w;
+}
+
 // QR with column pivoting: the permutation (0-based, scipy's P)
 inline std::vector<int> qrpiv(std::vector<cd> A, int m, int n) {
     std::vector<lapack_int> jpvt(n, 0);

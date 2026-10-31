@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <limits>
 #include <stdexcept>
 
 namespace mk {
@@ -147,6 +148,81 @@ int targets(const TgtIn& in, Vec& tgtv, Vec& prevv, std::vector<double>& wt, Vec
     return int(hit.size());
 }
 
+// np.polyfit(x, y, deg) for complex y: the Vandermonde, columns scaled by their norms, lstsq with rcond = len(x) eps, unscaled
+static Vec polyfit(const std::vector<double>& x, const Vec& y, int deg) {
+    int m = int(x.size()), n = deg + 1;
+    Vec A(size_t(m) * n);
+    std::vector<double> sc(n, 0.0);
+    for (int i = 0; i < m; i++)
+        for (int k = 0; k < n; k++) {
+            double v = 1.0;
+            for (int e = 0; e < deg - k; e++) v *= x[i];
+            A[size_t(i) * n + k] = v;
+        }
+    for (int k = 0; k < n; k++) {
+        double q = 0.0;
+        for (int i = 0; i < m; i++) q += A[size_t(i) * n + k].real() * A[size_t(i) * n + k].real();
+        sc[k] = std::sqrt(q);
+        for (int i = 0; i < m; i++) A[size_t(i) * n + k] = cd(A[size_t(i) * n + k].real() / sc[k], 0.0);   // lhs /= scale: real division
+    }
+    Vec c = la::lstsq_rc(A, m, n, y, 1, m * std::numeric_limits<double>::epsilon());
+    for (int k = 0; k < n; k++) c[k] = div(c[k], rc(sc[k]));
+    return c;
+}
+// np.roots: the companion matrix's eigenvalues (leading / trailing zeros stripped; trailing zeros are zero roots)
+static Vec roots(const Vec& p) {
+    int f = -1, l = -1;
+    for (int i = 0; i < int(p.size()); i++)
+        if (p[i] != cd(0.0, 0.0)) { if (f < 0) f = i; l = i; }
+    Vec r;
+    if (f < 0) return r;
+    Vec q(p.begin() + f, p.begin() + l + 1);
+    int N = int(q.size());
+    if (N > 1) {
+        Vec A(size_t(N - 1) * (N - 1), cd(0.0, 0.0));
+        for (int i = 1; i < N - 1; i++) A[size_t(i) * (N - 1) + i - 1] = 1.0;
+        for (int k = 1; k < N; k++) A[k - 1] = -div(q[k], q[0]);
+        r = la::eigvals(A, N - 1);
+    }
+    for (int i = l + 1; i < int(p.size()); i++) r.push_back(cd(0.0, 0.0));
+    return r;
+}
+
+void alt_tau(const DataIn& in, const Eval& ev, const std::function<Vec(const Vec&)>& Xc, const Vec& c, const Vec& Vh, const Vec& F00, DataOut& o) {
+    int rk = in.rk;
+    Vec v(rk);
+    for (int q = 0; q < rk; q++) v[q] = std::conj(Vh[q]);           // Vh[0].conj()
+    double sc = 1 + absmax(c);
+    std::vector<double> taus(7);
+    for (int i = 0; i < 7; i++) taus[i] = (i == 6 ? 2.0 : -2.0 + i * (4.0 / 6)) * sc;   // np.linspace(-2, 2, 7) * (1 + max|c|)
+    auto at = [&](double tt) {
+        Vec cc(rk);
+        for (int q = 0; q < rk; q++) cc[q] = c[q] + mul(rc(tt), v[q]);
+        return cc;
+    };
+    Vec fv(7);
+    for (int i = 0; i < 7; i++) fv[i] = ev.cond(Xc(at(taus[i])))[0];
+    for (auto& z : fv) o.tau_fit.push_back(cabs_(z));
+    Vec pf = polyfit(taus, fv, 4);
+    double pmax = absmax(pf);
+    int nzmin = 4;
+    for (int k = 0; k < 5; k++)
+        if (cabs_(pf[k]) > 1e-10 * pmax) { nzmin = k; break; }
+    o.poly_deg = 4 - nzmin;
+    for (auto& z : pf) o.poly.push_back(z.real());
+    for (auto& r : roots(pf))
+        if (std::abs(r.imag()) < 1e-3 * (1 + std::abs(r.real())) && std::abs(r.real()) > 1e-6 * sc) o.alt_tau.push_back(r.real());
+    for (double tt : o.alt_tau) {
+        Vec X = Xc(at(tt));
+        if (in.j_br0 >= 0) o.b_alt.push_back(tg(X, in.NB, in.e1, in.R)[in.j_br0].real());
+        Vec F = ev.cond(X);
+        std::vector<double> row;
+        for (size_t i = 0; i < F.size(); i++) row.push_back(cabs_(F[i]) / std::max(cabs_(F00[i]), 1e-300));
+        o.rows_at_alt.push_back(row);
+    }
+    o.has_alt = true;
+}
+
 void data_rule(const DataIn& in, const Eval& ev, DataOut& o) {
     int nn = in.nn, NB = in.NB, rk = in.rk;
     o = DataOut();
@@ -164,7 +240,7 @@ void data_rule(const DataIn& in, const Eval& ev, DataOut& o) {
     const std::vector<Vec>& Wq = o.Wq;
     Vec Wsq(2 * NB);
     for (int i = 0; i < 2 * NB; i++) Wsq[i] = rc(std::sqrt(in.wt[i]));
-    auto Xc = [&](const Vec& c) { return xc(in.X0, Wq, c); };
+    std::function<Vec(const Vec&)> Xc = [&](const Vec& c) { return xc(in.X0, Wq, c); };
     auto lsq_target = [&]() {                                     // lstsq(At[idx1], (tgtv - tg_(X0))[idx1])  (nb = 1: idx1 = everything)
         Vec t0 = tg(in.X0, NB, in.e1, in.R), b(2 * NB);
         for (int i = 0; i < 2 * NB; i++) b[i] = in.tgtv[i] - t0[i];
@@ -323,6 +399,7 @@ void data_rule(const DataIn& in, const Eval& ev, DataOut& o) {
     }
     // classification at the solution
     Sub s = csub(c);
+    if (s.r1 == 1 && !in.cond_fit) alt_tau(in, ev, Xc, c, s.Vh, F00, o);
     o.cond_sv = s.S;
     o.cond_rank = s.r1;
     o.c = c;

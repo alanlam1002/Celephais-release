@@ -648,3 +648,24 @@ int mk_lie_flow(void* h, const int* np, const double* keys, const int* isint, co
 }
 
 }  // extern "C"
+
+// ---- M2f: the driver (mk_engine.hpp) ----
+#include "mk_engine.hpp"
+extern "C" {
+// the whole recursion from a setup bundle; the decision log, the final series and the flowed fields written to OUT
+int mk_run_bundle(const char* dir, const char* out, char* err, int errcap) {
+    try {
+        mk::Kernel k;
+        mk::Proj P;
+        mk::en::Setup S;
+        mk::en::Cfg c;
+        mk::en::load_engine(dir, k, P, S, c);
+        mk::en::Engine E(k, P, S, c, out);
+        E.run();
+        return 0;
+    } catch (const std::exception& ex) {
+        std::snprintf(err, size_t(errcap), "%s", ex.what());
+        return 1;
+    }
+}
+}  // extern "C"

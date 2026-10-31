@@ -9,6 +9,8 @@
 //   the binomial shift  x^(c + dl) sum_j v_j (ln x)^j / j!  =  x^c sum_m [sum_j C(m, j) dl^(m - j) v_j] (ln x)^m / m!   (moments >= K dropped).
 // Nothing here depends on Kadath; production targets are untouched (this directory builds its own shared library).
 #pragma once
+#include <cstdio>
+#include <string>
 
 #include <algorithm>
 #include <cmath>
@@ -72,6 +74,8 @@ struct Ctx {
 
     // ---- the registry (n2a_nl.canon) ----
     static double pyround(double g) { return std::nearbyint(g); }       // Python round(): half to even (the default rounding mode)
+    double trace_above = 0.0;                                   // diagnostic (MK_TRACE_CANON): new registrations above this value reported
+    std::string trace_tag;
     std::pair<Key, double> canon(double g) {
         double gi = pyround(g);
         if (std::abs(g - gi) < 1e-9 || (Rm > 0 && std::abs(g - gi) < Rm)) return {Key{gi, true}, g - gi};
@@ -83,6 +87,7 @@ struct Ctx {
         }
         cent.push_back(g);
         std::sort(cent.begin(), cent.end());
+        if (trace_above > 0 && g > trace_above) std::fprintf(stderr, "mk: registered %.12f [%s]\n", g, trace_tag.c_str());   // diagnostic
         return {Key{g, false}, 0.0};
     }
     std::vector<double> shiftmat(double dl) const {

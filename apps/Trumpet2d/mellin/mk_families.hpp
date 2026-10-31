@@ -36,19 +36,30 @@ struct Ann {
     double key, mag;
 };
 // rows: the kernel's out[] for the series stripped at g; adds the announced keys (ckey: registered) to `add`, in Python's order
-inline void announce(Ctx& c, const Ser rows[6], const Proj& P, double g, double gmax, std::vector<Ann>& ann, std::vector<Key>& add) {
-    std::map<double, double> a;
+// the candidates (aligned centre, the piece's magnitude) in the rows of the series stripped at g, in Python's loop order -- computed from the
+// rows at the centre's START (n2a_nl: rr from sources(strip(C, g))); registered (ckey) when the engine does: in every Newton iteration
+inline std::vector<std::pair<double, double>> announce_candidates(const Ser rows[6], const Proj& P, double g, double gmax) {
+    std::vector<std::pair<double, double>> cand;
     for (int i = 0; i < P.nn; i++) {
         int f = P.gfam[i];
         for (auto& kv : rows[f].d) {
             double sc = (kv.first.v - ROWOFF1[f]) - P.dE[i];
-            if (!(g + 1e-9 < sc && sc <= gmax + 1e-9)) continue;
-            double m = pmaxabs(kv.second), r = std::nearbyint(sc * 1e9) / 1e9;
-            a[r] = std::max(a.count(r) ? a[r] : 0.0, m);
-            if (m > ANNOUNCE_MIN) add.push_back(ckey(c, sc));
+            if (g + 1e-9 < sc && sc <= gmax + 1e-9) cand.emplace_back(sc, pmaxabs(kv.second));
         }
     }
+    return cand;
+}
+inline void announce_register(Ctx& c, const std::vector<std::pair<double, double>>& cand, std::vector<Ann>& ann, std::vector<Key>& add) {
+    std::map<double, double> a;
+    for (auto& cm : cand) {
+        double r = std::nearbyint(cm.first * 1e9) / 1e9;
+        a[r] = std::max(a.count(r) ? a[r] : 0.0, cm.second);
+        if (cm.second > ANNOUNCE_MIN) add.push_back(ckey(c, cm.first));
+    }
     for (auto& kv : a) ann.push_back(Ann{kv.first, kv.second});
+}
+inline void announce(Ctx& c, const Ser rows[6], const Proj& P, double g, double gmax, std::vector<Ann>& ann, std::vector<Key>& add) {
+    announce_register(c, announce_candidates(rows, P, g, gmax), ann, add);
 }
 
 struct Lapse {

@@ -63,6 +63,7 @@ struct DataIn {
     double condtol_fixed = 0.0;       // --condtol (0: tied to the truncation)
     bool warm = false;
     Vec cwarm;
+    int j_br0 = -1;                   // the BR0 column (alt_tau's b at the other roots)
     std::vector<int> lc;              // nn
     double g = 0.0;
 };
@@ -75,6 +76,13 @@ struct DataOut {
     double lin_err = 0.0, tau = 0.0, size = 1.0, condtol = 0.0;
     std::vector<Hist> hist;
     std::vector<Fitted> fitted;
+    // alt_tau (research round 1026: a LOGGED DIAGNOSTIC, outside every decision -- it monitors the b1 branch): with ONE constrained direction
+    // v, H_c@P0 (moment 0) along c + tau v at 7 points, its quartic fit, the fit's other real roots, b (BR0's residue) and every condition row
+    // (relative to its start value) there
+    bool has_alt = false;
+    int poly_deg = 0;
+    std::vector<double> poly, alt_tau, b_alt, tau_fit;
+    std::vector<std::vector<double>> rows_at_alt;
 };
 
 // the targets at integer centre g (nb = 1): tgtv from the target series (Cbb: column -> the moment 0 at t = g + kofs(j)), the --tgt items

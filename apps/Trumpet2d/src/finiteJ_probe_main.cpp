@@ -784,6 +784,11 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
                     ism[rw.row] = 1;
                     const std::string& lb = std::get<0>(EI[rw.eq_index]);
                     if (g_lsq_wd1 != 1.0 && lb.rfind("SBM ", 0) == 0 && lb.find(" d1 ") != std::string::npos) ism[rw.row] = 2;
+#ifdef TRUMPET_STAGEB_LIN
+                    // code round 463 part 22 (research round 1008, N3b): the linear throat's TIKHONOV rows ("SBT TIK g<k> ...", in the least-
+                    // squares set through --stageB-lsq-grades) keep W = 1: their weight is the file's (sqrt(w) p / s), not row-max equilibrated
+                    if (lb.rfind("SBT TIK ", 0) == 0) ism[rw.row] = 4;
+#endif
                     if (g_lsq_wmode == 1 && lb.rfind("SBT ", 0) != 0) {
                         if (lb.rfind("SBM ", 0) != 0) throw std::runtime_error("--stageB-lsq-w scalefree: combination rows (" + lb + ") not supported");
                         sfw[rw.row] = lb.find(" d1 ") != std::string::npos ? g_lsq_rm : 1.0;
@@ -827,6 +832,13 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
             if (it == 0) std::cout << "#  lsq: matching-row W scale-free [C0; r_m C1], r_m " << std::setprecision(12) << g_lsq_rm << ", common factor " << cf << "\n";
         }
         if (g_eq_axis_swap) for (int r = 0; r < m; r++) if (ism[r] == 3) R0[r] = 0.0;   // round 440: the dropped rows, weight 0
+#ifdef TRUMPET_STAGEB_LIN
+        {                                                              // code round 463 part 22: the Tikhonov rows unweighted (W = 1)
+            int ntik = 0;
+            for (int r = 0; r < m; r++) if (ism[r] == 4) { R0[r] = 1.0; ntik++; }
+            if (ntik && it == 0) std::cout << "#  lsq: " << ntik << " linear-throat Tikhonov rows (SBT TIK) in the least-squares set, W = 1\n";
+        }
+#endif
         if (g_lsq_wd1 != 1.0) {                                        // round 423: the matching d1 keys' weight x F
             int nd1 = 0;
             for (int r = 0; r < m; r++) if (ism[r] == 2) { R0[r] *= g_lsq_wd1; nd1++; }

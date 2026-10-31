@@ -10,6 +10,7 @@
 // Nothing here depends on Kadath; production targets are untouched (this directory builds its own shared library).
 #pragma once
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include <algorithm>
@@ -74,6 +75,10 @@ struct Ctx {
 
     // ---- the registry (n2a_nl.canon) ----
     static double pyround(double g) { return std::nearbyint(g); }       // Python round(): half to even (the default rounding mode)
+    // the native self-spread (research round 1027; design section 7.3, the counterpart of the oracle's N2A_ORDER=rev): MK_ORDER=rev sums the
+    // moment convolution over j in reverse and each product's pair contributions into their targets in reverse pair order; the pair loop
+    // (hence the registry's fill order and every merge decision) unchanged.  Mathematically the same series.
+    bool order_rev = [] { const char* e = std::getenv("MK_ORDER"); return e && std::string(e) == "rev"; }();
     double trace_above = 0.0;                                   // diagnostic (MK_TRACE_CANON): new registrations above this value reported
     std::string trace_tag;
     std::pair<Key, double> canon(double g) {
@@ -175,7 +180,8 @@ struct Ctx {
             const cd* xa = &fa.a[(fa.B == 1 ? 0 : b) * P];
             const cd* ya = &fb.a[(fb.B == 1 ? 0 : b) * P];
             cd* w = &o.a[b * P];
-            for (int j = 0; j < K; j++) {
+            for (int jj = 0; jj < K; jj++) {
+                int j = order_rev ? K - 1 - jj : jj;
                 if (!nz[j]) continue;
                 for (int m = j; m < K; m++) {
                     const cd* x = xa + j * NF;
@@ -209,7 +215,8 @@ struct Ctx {
                     fb[k * NF + q] = ya[k * NF + q] / fact[k];
                 }
             cd* w = &o.a[b * P];
-            for (int j = 0; j < K; j++) {
+            for (int jj = 0; jj < K; jj++) {
+                int j = order_rev ? K - 1 - jj : jj;
                 if (!nz[j]) continue;
                 for (int m = j; m < K; m++)
                     for (int q = 0; q < NF; q++) w[m * NF + q] += fa[j * NF + q] * fb[(m - j) * NF + q];
@@ -285,6 +292,7 @@ struct Ctx {
         for (size_t i = 0; i < a.d.size(); i++) { fa[i] = scaled(a.d[i].second); nza[i] = nzmom(a.d[i].second); }
         for (size_t i = 0; i < b.d.size(); i++) fb[i] = scaled(b.d[i].second);
         Piece W;
+        std::vector<std::pair<int, Piece>> Wall;                // MK_ORDER=rev: (target position, contribution), summed below in reverse
         for (size_t ia = 0; ia < a.d.size(); ia++)              // the original pair order (the registry fills identically)
             for (size_t ib = 0; ib < b.d.size(); ib++) {
                 const Key& kA = a.d[ia].first;
@@ -297,9 +305,23 @@ struct Ctx {
                 mprod_into(W, fa[ia], fb[ib], nza[ia]);
                 if (std::abs(dl) >= 1e-14) W = shift(W, dl);
                 auto it = at.find(g.v);
+                if (order_rev) {
+                    int pos;
+                    if (it != at.end()) pos = it->second;
+                    else { pos = int(d.size()); at.emplace(g.v, pos); d.emplace_back(g, Piece()); }
+                    Wall.emplace_back(pos, W);
+                    continue;
+                }
                 if (it != at.end()) padd_inplace(d[it->second].second, W);
                 else { at.emplace(g.v, int(d.size())); d.emplace_back(g, W); }
             }
+        if (order_rev) {
+            std::vector<bool> set(d.size(), false);
+            for (auto r = Wall.rbegin(); r != Wall.rend(); ++r) {
+                if (!set[r->first]) { d[r->first].second = std::move(r->second); set[r->first] = true; }
+                else padd_inplace(d[r->first].second, r->second);
+            }
+        }
         std::vector<std::pair<Key, Piece>> dz;                  // exact zeros pruned
         for (auto& kv : d)
             if (anynz(kv.second)) dz.push_back(std::move(kv));

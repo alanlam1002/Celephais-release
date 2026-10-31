@@ -192,6 +192,18 @@ void alt_tau(const DataIn& in, const Eval& ev, const std::function<Vec(const Vec
     int rk = in.rk;
     Vec v(rk);
     for (int q = 0; q < rk; q++) v[q] = std::conj(Vh[q]);           // Vh[0].conj()
+    // research round 1027: v's phase fixed so that its BR0 residue (moment 0: b1 per unit tau) is real positive -- tau along the real line
+    // through b1 (a singular vector's phase is arbitrary; the engines' turned by ~85 degrees with 1e-15 differences in the operator)
+    if (in.j_br0 >= 0) {
+        cd bv(0.0, 0.0);
+        for (int q = 0; q < rk; q++) bv = bv + mul(o.At[size_t(in.j_br0) * rk + q], v[q]);
+        double ab = cabs_(bv);
+        if (ab > 0) {
+            cd ph = div(rc(ab), bv);
+            for (int q = 0; q < rk; q++) v[q] = mul(v[q], ph);
+        }
+        o.alt_b1 = ab;
+    }
     double sc = 1 + absmax(c);
     std::vector<double> taus(7);
     for (int i = 0; i < 7; i++) taus[i] = (i == 6 ? 2.0 : -2.0 + i * (4.0 / 6)) * sc;   // np.linspace(-2, 2, 7) * (1 + max|c|)
@@ -210,7 +222,9 @@ void alt_tau(const DataIn& in, const Eval& ev, const std::function<Vec(const Vec
         if (cabs_(pf[k]) > 1e-10 * pmax) { nzmin = k; break; }
     o.poly_deg = 4 - nzmin;
     for (auto& z : pf) o.poly.push_back(z.real());
-    for (auto& r : roots(pf))
+    // research round 1027: the roots of the fit trimmed to its degree (leading coefficients at roundoff put spurious roots at |tau| ~ 1e7,
+    // real or complex by noise)
+    for (auto& r : roots(Vec(pf.begin() + nzmin, pf.end())))
         if (std::abs(r.imag()) < 1e-3 * (1 + std::abs(r.real())) && std::abs(r.real()) > 1e-6 * sc) o.alt_tau.push_back(r.real());
     for (double tt : o.alt_tau) {
         Vec X = Xc(at(tt));

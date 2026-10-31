@@ -15,6 +15,7 @@
 #include "mk_bundle.hpp"
 #include "mk_families.hpp"
 #include "mk_steps.hpp"
+#include "mk_tangent.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +23,9 @@
 #include <map>
 #include <sstream>
 #include <sys/stat.h>
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 namespace mk {
 namespace en {
@@ -96,6 +100,16 @@ struct Setup {
     std::vector<double> cbb_t;
     Vec cbb_m0;
     std::vector<Entry> C0;
+    std::string set_data;             // --set-data (the data directions' order; absent in older bundles: C0's order)
+    // M3: the fit's output map (bundles from round 1027 on): the condition rows' scale, the matching data (--match-data), the flags
+    std::vector<double> rw_out, rwc;
+    bool has_md = false, g0rows = false;
+    std::string eval_r;
+    double md_rm = 0.0, tan_h = 1e-3;
+    int md_nthm = 0;
+    Vec md_I;                         // nthm x NF
+    std::vector<int> md_key;          // nkeys x 3: field, d, mode
+    std::vector<double> md_p;         // nkeys x nthm
 };
 
 // the driver's inputs from a setup bundle (spinning_trumpet/scripts/m2_bundle.py): the kernel and projections (load_bundle), the gate rows,
@@ -137,7 +151,22 @@ inline void load_engine(const std::string& dir, Kernel& k, Proj& P, Setup& S, Cf
     c.cond_full = B.geti("cond_full", 0); c.robust = B.geti("defect_stop_robust", 0); c.offl_auto = gs("offl") == "auto";
     c.meff_mode = gs("meff_mode") == "jvp" ? 1 : 0;
     c.tgt = gs("tgt");
+    S.set_data = gs("set_data");
     S.j_br0 = B.geti("j_br0", -1);
+    auto exists = [&](const std::string& n) { return bool(std::ifstream(dir + "/" + n + ".npy")); };
+    S.rw_out = npy_as<double>(A("rw_out"));
+    if (exists("rwc")) S.rwc = npy_as<double>(A("rwc"));
+    S.g0rows = B.geti("g0rows", 0);
+    S.eval_r = gs("eval_r");
+    S.tan_h = B.getd("tan_h", 1e-3);
+    if (exists("md_I")) {
+        S.has_md = true;
+        S.md_I = npy_cplx(A("md_I"));
+        S.md_key = npy_as<int>(A("md_key"));
+        S.md_p = npy_as<double>(A("md_p"));
+        S.md_rm = B.getd("md_rm", 0.0);
+        S.md_nthm = int(S.md_I.size() / size_t(k.c.NF));
+    }
     auto items = [](const std::string& s) {
         std::vector<std::pair<std::string, double>> v;
         size_t a = 0;
@@ -160,6 +189,28 @@ inline void load_engine(const std::string& dir, Kernel& k, Proj& P, Setup& S, Cf
     for (auto& kv : items(gs("gauge"))) c.gauge.emplace_back(std::stoi(kv.first.substr(kv.first.find('l') + 1)), kv.second);
 }
 
+// M3: the tangents' options (n2a_nl's --tangent, --tan-tol, --tan-passes, --tan-ctol, --tan-iters, --tan-h, --tan-top-local, --top-margin,
+// --tan-no-stall; the stall measure absolute), the rows' derivative (fd: the oracle's four-point stencil; jvp: the kernel's linear response)
+struct TanOpt {
+    bool on = false, top_local = false, no_stall = false, jvp = false;
+    std::string which = "all";
+    double tol = 1e-10, ctol = tn::TAN_CTOL, h = 1e-3;
+    int passes = 20, iters = tn::TAN_ITERS, margin = 2, threads = 1;
+};
+
+// n2a_nl's strip: the series without the aligned-g columns (data grades, t < 1, never stripped)
+inline std::vector<Entry> strip_g(Ctx& c, const std::vector<Entry>& C, double g, const std::vector<int>& kofs) {
+    std::vector<Entry> o;
+    std::vector<Key> ks;
+    for (size_t j = 0; j < kofs.size(); j++) ks.push_back(ckey(c, g + kofs[j]));
+    for (auto& en : C) {
+        const Key& t = ks[en.j];
+        if (t.v >= 1 && keq(en.t, t)) continue;
+        o.push_back(en);
+    }
+    return o;
+}
+
 class Engine {
   public:
     Engine(Kernel& k, Proj& P, const Setup& S, const Cfg& c, const std::string& out) : k_(k), P_(P), S_(S), c_(c), out_(out) {
@@ -167,6 +218,9 @@ class Engine {
         mkdir((out + "/arrays").c_str(), 0755);
     }
     void run();
+    void tangents(const TanOpt& T);
+    // n2a_nl fit_out's fvec: the fit's equations and outputs on a series (the gauge families' amplitudes given)
+    std::vector<cd> fvec(Kernel& kc, const std::vector<Entry>& Cx, const std::vector<std::pair<int, double>>& gauge, const std::vector<double>& cents);
 
   private:
     Kernel& k_;
@@ -258,6 +312,12 @@ class Engine {
         return r;
     }
     std::vector<int> xrows_;
+    // M3: the forward's last pass -- each centre's step state, the centre order, the final series, the families
+    std::map<double, tn::StepState> steps_;
+    std::vector<double> order_last_;
+    std::vector<Entry> C_final_;
+    std::vector<std::pair<std::string, Key>> fams_;
+    static double kf(double g) { return std::nearbyint(g * 1e9) / 1e9; }
 };
 
 inline void Engine::run() {
@@ -313,6 +373,9 @@ inline void Engine::run() {
             J_.okey("newton");
             J_.open('[');
             Vec Ms, Mc, Xk, Xg;
+            tn::StepState stc;                                      // M3: the step's linear data (n2a_nl step_state; the last pass's kept)
+            stc.isint = isint;
+            stc.kept_only = isint;                                  // nb = 1, no --dc-predictor
             std::vector<double> newton_hist;
             bool offint_done = false;
             std::vector<char> act;
@@ -343,6 +406,11 @@ inline void Engine::run() {
                 ct::contour(Ms, NB, S_.rw, S_.cw, S_.e1, c_.R, act, Sn, rk_fix.count(kf) ? rk_fix[kf] : -1, o);
                 if (!rk_fix.count(kf)) rk_fix[kf] = o.rk_thr;
                 int rk = o.rk;
+                stc.Minv = o.Minv;
+                stc.act = act;
+                stc.rk = rk;
+                stc.Wq.clear();
+                stc.has_src = false;
                 J_.sep();
                 J_.open('{');
                 J_.kv("operator", Json::str(opname));
@@ -411,6 +479,10 @@ inline void Engine::run() {
                     st::DefectOut d;
                     st::defect_off(Xs, o.Minv, Wn, K, NB, S_.e1, c_.R, std::max(c_.defect, 4), c_.robust, rowsfn(Cs, g), d);
                     C = with_grade(k_.c, C, d.X, g, P_.kofs, S_.e1, c_.R);
+                    stc.Wq = Wn;
+                    stc.X = d.X;
+                    stc.has_label = !lab.empty();
+                    stc.label = lab;
                     J_.close('}');
                     J_.close(']');
                     J_.kv("offlattice", "true");
@@ -447,6 +519,9 @@ inline void Engine::run() {
                     }
                     std::vector<std::pair<int, double>> hit;
                     dt::targets(ti, din.tgtv, din.prevv, din.wt, din.tg0, hit);
+                    stc.has_src = true;
+                    stc.src_tgt.assign(2 * size_t(NB), std::string());
+                    for (auto& h : hit) stc.src_tgt[h.first] = S_.collab[h.first] + "@t" + std::to_string(int(g + P_.kofs[h.first]));
                     din.nn = nn; din.NB = NB; din.rk = rk; din.R = c_.R; din.e1 = S_.e1; din.X0 = o.X0; din.Wq = o.Wq; din.g = g;
                     din.notgt = c_.notgt; din.cond_fit = c_.cond_fit; din.cond_full = c_.cond_full; din.condtol_fixed = c_.condtol; din.lc = S_.lc;
                     din.j_br0 = S_.j_br0;
@@ -456,6 +531,8 @@ inline void Engine::run() {
                     c_warm[kf] = dout.c;
                     Xg = dout.Xg;
                     Wn = dout.Wq;
+                    stc.Wq = dout.Wq;
+                    stc.wt = din.wt;
                     if (c_.cond_fit) dfix = [din, dout](const Vec& X) { return dt::data_fix(X, din, dout); };
                     Json D;
                     D.open('{');
@@ -492,7 +569,7 @@ inline void Engine::run() {
                     if (dout.has_alt) {
                         std::string ra = "[";
                         for (size_t q = 0; q < dout.rows_at_alt.size(); q++) ra += (q ? "," : "") + Json::nums(dout.rows_at_alt[q]);
-                        D.kv("alt", "{\"poly_deg\":" + std::to_string(dout.poly_deg) + ",\"poly\":" + Json::nums(dout.poly) + ",\"alt_tau\":" +
+                        D.kv("alt", "{\"poly_deg\":" + std::to_string(dout.poly_deg) + ",\"alt_b1\":" + Json::num(dout.alt_b1) + ",\"poly\":" + Json::nums(dout.poly) + ",\"alt_tau\":" +
                                         Json::nums(dout.alt_tau) + ",\"b_alt\":" + Json::nums(dout.b_alt) + ",\"tau_fit\":" + Json::nums(dout.tau_fit) +
                                         ",\"rows_at_alt\":" + ra + "]}");
                     }
@@ -503,6 +580,7 @@ inline void Engine::run() {
                 st::DefectOut d;
                 st::defect_int(Xg, o.Minv, Wn, act, Smax, K, NB, S_.e1, c_.R, c_.defect, c_.robust, dfix, rowsfn(Cs, g), d);
                 Xg = d.X;
+                stc.X = Xg;
                 newton_hist.push_back(d.rows_after);
                 J_.kv("defect", Json::nums(d.hist));
                 J_.kv("defect_drift", Json::num(d.drift));
@@ -516,6 +594,7 @@ inline void Engine::run() {
                 }
                 break;
             }
+            steps_[std::nearbyint(g * 1e9) / 1e9] = stc;
             if (!offint_done) {
                 J_.close(']');
                 C = with_grade(k_.c, C, Xg, g, P_.kofs, S_.e1, c_.R);
@@ -544,6 +623,7 @@ inline void Engine::run() {
             for (size_t i = 0; i < en.m.size(); i++) dch = std::max(dch, std::abs(en.m[i] - (pv ? pv->m[i] : cd(0.0, 0.0))));
         }
         J_.kv("order", Json::nums(order));
+        order_last_ = order;
         J_.kv("change", Json::num(dch));
         J_.kv("cent_end", cent());
         J_.close('}');
@@ -551,6 +631,8 @@ inline void Engine::run() {
     }
     J_.close(']');
     J_.kv("families", families_json);
+    C_final_ = C;
+    fams_ = fams;
     J_.kv("passes_run", std::to_string(std::min(ps, c_.passes)));
     // the final series and the gauge families' Lie flow of it
     {
@@ -589,6 +671,410 @@ inline void Engine::run() {
     J_.kv("cent_final", cent());
     J_.close('}');
     std::ofstream(out_ + "/declog.json") << J_.s.str();
+}
+
+
+// n2a_nl fit_out's fvec (route a, nb = 1): [the square rows at the data grades (moments 0, 1; / rw_out); the l = 0 conditions at every centre
+// (/ the condition rows' scale); the monitored square rows at the other centres (zeros where the grade is beyond the rows' validity); grade
+// 0's rows (--g0rows: aligned -1, 0); stage B's matching keys (--match-data: the fields through gmax + 1 after the gauge families' Lie flow,
+// summed at r_m -- values, d/dr -- on the engine grid, interpolated to the matching nodes, each key's projector row)]
+inline std::vector<cd> Engine::fvec(Kernel& kc, const std::vector<Entry>& Cx, const std::vector<std::pair<int, double>>& gauge,
+                                    const std::vector<double>& cents) {
+    int nn = P_.nn, nc = P_.nc, K = kc.c.K, NF = kc.c.NF;
+    if (!S_.eval_r.empty()) throw std::runtime_error("mk: --eval-r (the outputs at radii) is not ported");
+    kc.run(Cx, nullptr, c_.top);
+    std::vector<cd> v;
+    auto gal = [&](double gg, bool soft) {
+        std::vector<cd> G;
+        try {
+            G = project(kc.c, kc.out, gg, 1, P_.gfam, P_.dE, P_.W, false);
+        } catch (const std::runtime_error&) {
+            if (!soft) throw;
+            G.assign(size_t(K) * nn, cd(0.0, 0.0));
+        }
+        for (int m = 0; m < 2; m++)
+            for (int i = 0; i < nn; i++) v.push_back(G[size_t(m) * nn + i] / S_.rw_out[i]);
+    };
+    for (int gg = 1; gg <= c_.gdata; gg++) gal(gg, false);
+    for (double gc : cents) {
+        auto Sq = project(kc.c, kc.out, gc, 1, P_.cfam, P_.cdE, P_.Wc, true);
+        for (int m = 0; m < 2; m++)
+            for (int q = 0; q < nc; q++) v.push_back(Sq[size_t(m) * nc + q] / S_.rwc[q]);
+    }
+    for (size_t i = size_t(c_.gdata); i < cents.size(); i++) gal(cents[i], true);
+    if (S_.g0rows)
+        for (int gg = -1; gg <= 0; gg++) gal(gg, false);
+    if (S_.has_md) {
+        Ser F[6];
+        kc.fields(Cx, c_.gmax + 1, F);
+        if (!gauge.empty()) fm::lie_flow(kc.c, F, gauge, c_.J, S_.TH, c_.gauge_steps);
+        double r = S_.md_rm, n = kc.c.n;
+        // n3_throat_eval.ms_at: r^e sum_t x^t sum_m c_m (ln x)^m / m!, x = r^n (None for an empty series)
+        auto ms_at = [&](const Ser& ms, std::vector<cd>& tot) {
+            if (ms.d.empty()) return false;
+            double x = std::pow(r, n), lx = std::log(x);
+            std::vector<double> fac(K);
+            double f = 1.0;
+            for (int m = 0; m < K; m++) { if (m) f *= m; fac[m] = std::pow(lx, m) / f; }
+            tot.assign(NF, cd(0.0, 0.0));
+            for (auto& kv : ms.d) {
+                double xt = std::pow(x, kv.first.v);
+                for (int q = 0; q < NF; q++) {
+                    cd s = 0.0;
+                    for (int m = 0; m < K; m++) s += fac[m] * kv.second.a[size_t(m) * NF + q];
+                    tot[q] += xt * s;
+                }
+            }
+            double re = std::pow(r, double(ms.e));
+            for (auto& z : tot) z *= re;
+            return true;
+        };
+        std::vector<cd> val[6], dval[6];
+        bool hv[6], hd[6];
+        for (int f = 0; f < 6; f++) {
+            hv[f] = ms_at(F[f], val[f]);
+            hd[f] = ms_at(kc.c.drad(F[f]), dval[f]);
+            if (hd[f])
+                for (auto& z : dval[f]) z = (r * z) / r;               // fields_at returns r d/dr; stage B's C1 is d/dr (fv / r_m)
+        }
+        size_t nk = S_.md_key.size() / 3;
+        int nt = S_.md_nthm;
+        for (size_t q = 0; q < nk; q++) {
+            int f = S_.md_key[3 * q], d = S_.md_key[3 * q + 1];
+            const std::vector<cd>& fv = d ? dval[f] : val[f];
+            if (!(d ? hd[f] : hv[f])) { v.push_back(0.0); continue; }
+            double s = 0.0;
+            for (int t = 0; t < nt; t++) {
+                cd y = 0.0;
+                for (int k = 0; k < NF; k++) y += fv[k] * S_.md_I[size_t(t) * NF + k];
+                s += y.real() * S_.md_p[q * size_t(nt) + t];
+            }
+            v.push_back(s);
+        }
+    }
+    return v;
+}
+
+// M3: the tangents (n2a_nl fit_out, --tangent): per direction the tangent series dC, carried through the forward's last-pass order with
+// each centre's step state, tangent passes until the change is < tol relative (with --tan-no-stall no stall exit; else the absolute stall
+// test: the change failing to halve over two consecutive passes, from pass 3).  Directions: the data parameters (--set-data; a unit moment 0
+// at the column's data centre), the --tgt targets ('tgt NAME'), the lapse families in order of their centres, the gauge families (their
+// tangent series is zero: their derivative enters through the outputs' Lie flow).  Each direction runs on its own copy of the kernel (its
+// own registry, as the oracle's forked workers).  Output: OUT/tangent/<i>_{col,key,isint,mom}.npy, OUT/tangent.json.
+inline void Engine::tangents(const TanOpt& T) {
+    int nn = P_.nn, K = k_.c.K, NB = nn;
+    const std::vector<int>& kofs = P_.kofs;
+    std::vector<std::pair<std::string, tn::Seed>> dirs;
+    auto collab_of = [&](const std::string& nm, int& j, double& t) {
+        size_t at = nm.find("@t");
+        std::string cl = nm.substr(0, at);
+        t = std::stod(nm.substr(at + 2));
+        j = -1;
+        for (int q = 0; q < nn; q++)
+            if (S_.collab[q] == cl) { j = q; break; }
+        if (j < 0) throw std::runtime_error("mk: tangent direction " + nm + ": no such column");
+    };
+    if (!S_.set_data.empty()) {
+        size_t a = 0;
+        while (a < S_.set_data.size()) {
+            size_t b = S_.set_data.find(',', a);
+            if (b == std::string::npos) b = S_.set_data.size();
+            std::string it = S_.set_data.substr(a, b - a);
+            if (it.find('=') != std::string::npos) dirs.push_back({it.substr(0, it.find('=')), tn::Seed{"data", it.substr(0, it.find('='))}});
+            a = b + 1;
+        }
+    } else {
+        for (auto& en : S_.C0)
+            if (en.t.isint) {
+                std::string nm = S_.collab[en.j] + "@t" + std::to_string(int(en.t.v));
+                dirs.push_back({nm, tn::Seed{"data", nm}});
+            }
+    }
+    {
+        size_t a = 0;
+        const std::string& t = c_.tgt;
+        while (a < t.size()) {
+            size_t b = t.find(';', a);
+            if (b == std::string::npos) b = t.size();
+            std::string it = t.substr(a, b - a);
+            size_t e = it.find('=');
+            if (e != std::string::npos) {
+                std::string nm = it.substr(0, e);
+                nm.erase(0, nm.find_first_not_of(' '));
+                nm.erase(nm.find_last_not_of(' ') + 1);
+                dirs.push_back({"tgt " + nm, tn::Seed{"tgt", nm}});
+            }
+            a = b + 1;
+        }
+    }
+    {
+        auto fs = fams_;
+        std::stable_sort(fs.begin(), fs.end(), [](const std::pair<std::string, Key>& x, const std::pair<std::string, Key>& y) { return x.second.v < y.second.v; });
+        for (auto& f : fs) dirs.push_back({f.first, tn::Seed{"lap", f.first}});
+        auto gs = c_.gauge;
+        std::sort(gs.begin(), gs.end());
+        for (auto& gl : gs) dirs.push_back({"gauge l" + std::to_string(gl.first), tn::Seed{"gauge", "l" + std::to_string(gl.first)}});
+    }
+    if (T.which != "all") {
+        std::vector<std::pair<std::string, tn::Seed>> keep;
+        std::string w = ";" + T.which + ";";
+        for (auto& d : dirs)
+            if (w.find(";" + d.first + ";") != std::string::npos) keep.push_back(d);
+        dirs = keep;
+    }
+    // the fit's centres (n2a_nl: the data grades, then the forward's last-pass order without them) and its outputs on the final series,
+    // computed on the main kernel before the directions' copies are taken (the oracle computes them before forking its workers)
+    std::vector<double> cents;
+    for (int gg = 1; gg <= c_.gdata; gg++) cents.push_back(gg);
+    for (double g : order_last_) {
+        bool dat = false;
+        for (int gg = 1; gg <= c_.gdata; gg++)
+            if (std::abs(g - gg) < 1e-9) dat = true;
+        if (!dat) cents.push_back(g);
+    }
+    std::vector<double> base;
+    double base_imag = 0.0;
+    bool outputs = !S_.rwc.empty();
+    if (outputs) {
+        for (auto& z : fvec(k_, C_final_, c_.gauge, cents)) { base.push_back(z.real()); base_imag = std::max(base_imag, std::abs(z.imag())); }
+    }
+    struct Res {
+        std::vector<Entry> dC;
+        std::vector<double> dv;
+        double dv_imag = 0.0;
+        std::vector<double> ph, step_max, step_last, step_last_abs;
+        double secs = 0.0;
+        std::string err;
+    };
+    std::vector<Res> res(dirs.size());
+    auto dmax = [](const std::vector<Entry>& D) {
+        double m = 0.0;
+        for (auto& en : D)
+            for (auto& z : en.m) m = std::max(m, std::abs(z));
+        return m;
+    };
+    auto one = [&](size_t i, Kernel& kc) {
+        auto t0 = std::chrono::steady_clock::now();
+        const tn::Seed& seed = dirs[i].second;
+        Res& r = res[i];
+        std::vector<Entry>& dC = r.dC;
+        if (seed.kind == "data") {
+            int j;
+            double t;
+            collab_of(seed.name, j, t);
+            std::vector<cd> mv(K, cd(0.0, 0.0));
+            mv[0] = 1.0;
+            dC.push_back(Entry{j, Key{t, true}, 1, mv});
+        }
+        if (seed.kind != "gauge") {
+            for (int tp = 0; tp < T.passes; tp++) {
+                std::vector<Entry> prev = dC;
+                for (double g : order_last_) {
+                    const tn::StepState& st = steps_.at(kf(g));
+                    double sc = dmax(dC);
+                    double top_g = T.top_local ? std::min(c_.top, std::ceil(g - 1e-9) + T.margin) : c_.top;
+                    std::vector<Entry> Cpt = with_grade(kc.c, C_final_, st.X, g, kofs, S_.e1, c_.R);
+                    std::vector<Entry> Cs = strip_g(kc.c, C_final_, g, kofs);
+                    auto drows = [&](const Vec* dX) -> Vec {
+                        std::vector<Entry> dCf = dX ? with_grade(kc.c, dC, *dX, g, kofs, S_.e1, c_.R) : strip_g(kc.c, dC, g, kofs);
+                        const std::vector<Entry>& Cb = dX ? Cpt : Cs;
+                        Vec out(size_t(K) * NB, cd(0.0, 0.0));
+                        double mx = dmax(dCf);
+                        if (mx == 0.0) return out;
+                        if (T.jvp) {
+                            kc.run(Cb, &dCf, top_g);
+                            out = project(kc.c, kc.dout, g, 1, P_.gfam, P_.dE, P_.W, false);
+                        } else {
+                            // _dfd_b: the four-point stencil [8 (f(h) - f(-h)) - (f(2h) - f(-2h))] / 12 h, its four evaluations batched (_addCb)
+                            double h = T.h / mx;
+                            const double es[4] = {h, -h, 2 * h, -2 * h};
+                            std::vector<Entry> Cq = Cb;
+                            for (auto& d : dCf) {
+                                int at = -1;
+                                for (size_t e = 0; e < Cq.size(); e++)
+                                    if (Cq[e].j == d.j && keq(Cq[e].t, d.t)) { at = int(e); break; }
+                                std::vector<cd> base = at >= 0 ? Cq[at].m : std::vector<cd>(K, cd(0.0, 0.0));
+                                std::vector<cd> m(4 * size_t(K));
+                                for (int b = 0; b < 4; b++)
+                                    for (int k = 0; k < K; k++) m[size_t(b) * K + k] = base[k] + ct::mul(cd(es[b], 0.0), d.m[k]);
+                                if (at >= 0) { Cq[at].m = std::move(m); Cq[at].nb = 4; }
+                                else Cq.push_back(Entry{d.j, d.t, 4, std::move(m)});
+                            }
+                            kc.run(Cq, nullptr, top_g);
+                            Vec v = project(kc.c, kc.out, g, 4, P_.gfam, P_.dE, P_.W, false);
+                            size_t P = size_t(K) * NB;
+                            for (size_t q = 0; q < P; q++)
+                                out[q] = ct::div(ct::mul(cd(8.0, 0.0), v[q] - v[P + q]) - (v[2 * P + q] - v[3 * P + q]), cd(12 * h, 0.0));
+                        }
+                        for (int m = 0; m < K; m++)
+                            for (int j = 0; j < NB; j++)
+                                if (!st.act[j]) out[size_t(m) * NB + j] = 0.0;
+                        if (const char* dg = std::getenv("MK_TAN_DROWS")) {   // diagnostic: the other mode's rows' derivative at centre g
+                            if (std::abs(g - std::atof(dg)) < 1e-6 && !T.jvp && dX && std::getenv("MK_TAN_DUMP")) {
+                                static int nd = 0;
+                                std::string b = std::string(std::getenv("MK_TAN_DUMP")) + std::to_string(nd++);
+                                auto dump = [&](const std::vector<Entry>& D, const std::string& nm) {
+                                    std::vector<int> col, isi;
+                                    std::vector<double> key;
+                                    Vec mom;
+                                    for (auto& en : D) {
+                                        col.push_back(en.j); key.push_back(en.t.v); isi.push_back(en.t.isint);
+                                        for (int k = 0; k < K; k++) mom.push_back(en.m[k]);
+                                    }
+                                    npy_write(b + nm + "_col.npy", col.data(), "<i4", {long(col.size())}, 4);
+                                    npy_write(b + nm + "_key.npy", key.data(), "<f8", {long(key.size())}, 8);
+                                    npy_write(b + nm + "_isint.npy", isi.data(), "<i4", {long(isi.size())}, 4);
+                                    npy_write(b + nm + "_mom.npy", mom.data(), "<c16", {long(col.size()), K}, 16);
+                                };
+                                dump(Cb, "_Cb");
+                                dump(dCf, "_dC");
+                                npy_write(b + "_cent.npy", kc.c.cent.data(), "<f8", {long(kc.c.cent.size())}, 8);
+                                std::ofstream(b + "_top.txt") << Json::num(top_g) << "\n";
+                                Kernel kd = kc;
+                                kd.jvp_check(Cb, dCf, top_g, 1e-7 / mx);
+                            }
+                            if (std::abs(g - std::atof(dg)) < 1e-6 && !T.jvp) {
+                                kc.run(Cb, &dCf, top_g);
+                                Vec jv = project(kc.c, kc.dout, g, 1, P_.gfam, P_.dE, P_.W, false);
+                                for (int j = 0; j < NB; j++) {
+                                    double a = 0.0, b = 0.0, d = 0.0;
+                                    for (int m = 0; m < K; m++) {
+                                        size_t q = size_t(m) * NB + j;
+                                        if (!st.act[j]) continue;
+                                        a = std::max(a, std::abs(out[q])); b = std::max(b, std::abs(jv[q])); d = std::max(d, std::abs(out[q] - jv[q]));
+                                    }
+                                    if (d > 1e-8 * std::max(a, 1e-300)) std::fprintf(stderr, "drows g %.6f %s col %s FD %.3e JVP %.3e diff %.3e\n", g, dX ? "dX" : "base", S_.collab[j].c_str(), a, b, d);
+                                }
+                            }
+                        }
+                        return out;
+                    };
+                    tn::StepOut so;
+                    tn::tan_step(st, seed, sc, T.ctol, T.iters, K, NB, nn, S_.e1, c_.R, drows, so);
+                    if (std::getenv("MK_TAN_TRACE")) {                  // diagnostic: per step |dX| (moments) and the update history
+                        auto mo = ct::moments_of(so.dX, K, NB, S_.e1, c_.R);
+                        double m = 0.0;
+                        for (auto& z : mo) m = std::max(m, std::abs(z));
+                        std::string hs;
+                        for (double x : so.hh) hs += " " + Json::num(x);
+                        std::fprintf(stderr, "tan %s pass %d g %.9f int %d rk %d |dX| %.6e sc %.3e hist%s\n", dirs[i].first.c_str(), tp, g, int(st.isint),
+                                     st.rk, m, sc, hs.c_str());
+                    }
+                    r.step_max.push_back(so.hh.empty() ? 0.0 : *std::max_element(so.hh.begin(), so.hh.end()));
+                    r.step_last.push_back(so.hh.empty() ? 0.0 : so.hh.back());
+                    r.step_last_abs.push_back(so.hha.empty() ? 0.0 : so.hha.back());
+                    dC = with_grade(kc.c, dC, so.dX, g, kofs, S_.e1, c_.R);
+                }
+                double ch = 0.0;
+                for (auto& en : dC) {
+                    const Entry* pv = nullptr;
+                    for (auto& q : prev)
+                        if (q.j == en.j && keq(q.t, en.t)) { pv = &q; break; }
+                    for (size_t k = 0; k < en.m.size(); k++) ch = std::max(ch, std::abs(en.m[k] - (pv ? pv->m[k] : cd(0.0, 0.0))));
+                }
+                r.ph.push_back(ch / std::max(dmax(dC), 1e-300));
+                size_t n = r.ph.size();
+                bool stall = tp > 2 && r.ph[n - 1] > 0.5 * r.ph[n - 2] && r.ph[n - 2] > 0.5 * r.ph[n - 3];
+                if (tp && (r.ph.back() < T.tol || (!T.no_stall && stall))) break;
+                // the step histories of the last pass only (n2a_nl keeps every pass's; the last pass's are the converged ones)
+                if (tp + 1 < T.passes) { r.step_max.clear(); r.step_last.clear(); r.step_last_abs.clear(); }
+            }
+        }
+        // the outputs' derivative: the four-point stencil of fvec in the direction (dC, d gauge), h = --tan-h / the direction's largest
+        // coefficient (n2a_nl's one batched call; here four evaluations)
+        if (outputs) {
+            std::map<int, double> gc;
+            if (seed.kind == "gauge") gc[std::stoi(seed.name.substr(1))] = 1.0;
+            double mx = dmax(dC);
+            for (auto& q : gc) mx = std::max(mx, std::abs(q.second));
+            double h = T.h / std::max(mx, 1e-300);
+            std::map<int, double> gall;
+            for (auto& q : c_.gauge) gall[q.first] = q.second;
+            for (auto& q : gc) gall.emplace(q.first, 0.0);
+            auto f = [&](double e) {
+                std::vector<Entry> Cx = C_final_;
+                for (auto& d : dC) {
+                    int at = -1;
+                    for (size_t q = 0; q < Cx.size(); q++)
+                        if (Cx[q].j == d.j && keq(Cx[q].t, d.t)) { at = int(q); break; }
+                    std::vector<cd> m(K);
+                    for (int k = 0; k < K; k++) m[k] = (at >= 0 ? Cx[at].m[k] : cd(0.0, 0.0)) + ct::mul(cd(e, 0.0), d.m[k]);
+                    if (at >= 0) Cx[at].m = m;
+                    else Cx.push_back(Entry{d.j, d.t, 1, m});
+                }
+                std::vector<std::pair<int, double>> ga;
+                for (auto& q : gall) ga.emplace_back(q.first, q.second + e * (gc.count(q.first) ? gc[q.first] : 0.0));
+                return fvec(kc, Cx, ga, cents);
+            };
+            auto v1 = f(h), v2 = f(-h), v3 = f(2 * h), v4 = f(-2 * h);
+            for (size_t q = 0; q < v1.size(); q++) {
+                cd z = ct::div(ct::mul(cd(8.0, 0.0), v1[q] - v2[q]) - (v3[q] - v4[q]), cd(12 * h, 0.0));
+                r.dv.push_back(z.real());
+                r.dv_imag = std::max(r.dv_imag, std::abs(z.imag()));
+            }
+        }
+        r.secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    };
+    std::atomic<size_t> next(0);
+    auto worker = [&]() {
+        Kernel kc = k_;
+        for (size_t i; (i = next++) < dirs.size();) {
+            try {
+                Kernel ki = kc;
+                one(i, ki);
+            } catch (std::exception& e) {
+                res[i].err = e.what();
+            }
+        }
+    };
+    std::vector<std::thread> th;
+    int nt = std::max(1, std::min<int>(T.threads, int(dirs.size())));
+    for (int q = 0; q < nt; q++) th.emplace_back(worker);
+    for (auto& t : th) t.join();
+    mkdir((out_ + "/tangent").c_str(), 0755);
+    Json J;
+    J.open('{');
+    J.kv("mode", Json::str(T.jvp ? "jvp" : "fd"));
+    J.kv("tol", Json::num(T.tol));
+    J.kv("passes_max", std::to_string(T.passes));
+    J.kv("top_local", T.top_local ? "true" : "false");
+    J.kv("no_stall", T.no_stall ? "true" : "false");
+    J.kv("centres", Json::nums(cents));
+    J.kv("base_imag", Json::num(base_imag));
+    if (outputs) npy_write(out_ + "/fit_base.npy", base.data(), "<f8", {long(base.size())}, 8);
+    J.okey("directions");
+    J.open('[');
+    for (size_t i = 0; i < dirs.size(); i++) {
+        const Res& r = res[i];
+        std::vector<int> col, isi;
+        std::vector<double> key;
+        Vec mom;
+        for (auto& en : r.dC) {
+            col.push_back(en.j); key.push_back(en.t.v); isi.push_back(en.t.isint);
+            for (int k = 0; k < K; k++) mom.push_back(en.m[k]);
+        }
+        std::string b = out_ + "/tangent/" + std::to_string(i);
+        npy_write(b + "_col.npy", col.data(), "<i4", {long(col.size())}, 4);
+        npy_write(b + "_key.npy", key.data(), "<f8", {long(key.size())}, 8);
+        npy_write(b + "_isint.npy", isi.data(), "<i4", {long(isi.size())}, 4);
+        npy_write(b + "_mom.npy", mom.data(), "<c16", {long(col.size()), K}, 16);
+        J.sep();
+        J.open('{');
+        J.kv("name", Json::str(dirs[i].first));
+        J.kv("index", std::to_string(i));
+        J.kv("pass_change", Json::nums(r.ph));
+        J.kv("step_max", Json::nums(r.step_max));
+        J.kv("step_last", Json::nums(r.step_last));
+        J.kv("step_last_abs", Json::nums(r.step_last_abs));
+        J.kv("secs", Json::num(r.secs));
+        J.kv("dv_imag", Json::num(r.dv_imag));
+        if (outputs) npy_write(b + "_dv.npy", r.dv.data(), "<f8", {long(r.dv.size())}, 8);
+        J.kv("error", r.err.empty() ? "null" : Json::str(r.err));
+        J.close('}');
+    }
+    J.close(']');
+    J.close('}');
+    std::ofstream(out_ + "/tangent.json") << J.s.str();
 }
 
 }  // namespace en

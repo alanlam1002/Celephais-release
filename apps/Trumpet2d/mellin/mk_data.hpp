@@ -11,8 +11,6 @@
 //
 // The conditions and the gate rows need the kernel: they reach this code as callbacks (Eval), built in mk_kernel.cpp's translation unit, so
 // this file (compiled -ffp-contract=off, numpy's arithmetic as in M2b) never instantiates the kernel's inline code with other flags.
-// NOT ported (a diagnostic, not logged, no decision depends on it): the other roots of H_c@P0 along a single constrained direction (polyfit /
-// roots, 'alt_tau' in the run json's per-centre record).
 #pragma once
 #include "mk_contour.hpp"
 
@@ -81,6 +79,7 @@ struct DataOut {
     // (relative to its start value) there
     bool has_alt = false;
     int poly_deg = 0;
+    double alt_b1 = 0.0;              // |BR0's residue per unit tau| (round 1027: v phased so that it is real positive)
     std::vector<double> poly, alt_tau, b_alt, tau_fit;
     std::vector<std::vector<double>> rows_at_alt;
 };

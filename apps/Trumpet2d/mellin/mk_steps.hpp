@@ -35,6 +35,12 @@ struct DefectOut {
     Vec conditions;                            // off-integer: K x nc at the final X
 };
 
+// the pieces shared with the tangents (M3): tg_dc(X) = (R / N e1 X).sum(0) (u_g's residues); [-Minv[k] @ v for v in nodes_of(rows)]; the
+// components along the residue directions removed (d - sum a_q Wq[q], a = lstsq(A_hold[:nh], tg_dc(d)[:nh]))
+Vec tg_dc(const Vec& X, int NB, const Vec& e1, double R);
+Vec correction(const Vec& rows, const std::vector<Vec>& Minv, int K, int NB, const Vec& e1, double R);
+void hold(Vec& d, const std::vector<Vec>& Wq, int nh, int NB, const Vec& e1, double R);
+
 // integer centre.  Minv: N x (NB x NB); Wq: the data rule's normalised directions (rk); act: NB; dfix: --cond-fit's data fix or empty
 void defect_int(const Vec& X0, const std::vector<Vec>& Minv, const std::vector<Vec>& Wq, const std::vector<char>& act, double Smax, int K,
                 int NB, const Vec& e1, double R, int ndc, bool robust, const std::function<Vec(const Vec&)>& dfix, const Rows& rows, DefectOut& o);

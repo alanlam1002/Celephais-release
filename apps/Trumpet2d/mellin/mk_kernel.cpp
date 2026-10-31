@@ -668,4 +668,48 @@ int mk_run_bundle(const char* dir, const char* out, char* err, int errcap) {
         return 1;
     }
 }
+// M3: the forward run, then the tangents.  opts: 'key=value;...' -- which (';'-list as n2a_nl's --tangent, '|'-separated here), tol, passes,
+// ctol, iters, h, margin, threads, top_local, no_stall, mode (fd / jvp)
+int mk_run_bundle_tan(const char* dir, const char* out, const char* opts, char* err, int errcap) {
+    try {
+        mk::Kernel k;
+        mk::Proj P;
+        mk::en::Setup S;
+        mk::en::Cfg c;
+        mk::en::load_engine(dir, k, P, S, c);
+        mk::en::TanOpt T;
+        T.on = true;
+        std::string o(opts);
+        size_t a = 0;
+        while (a < o.size()) {
+            size_t b = o.find(';', a);
+            if (b == std::string::npos) b = o.size();
+            std::string it = o.substr(a, b - a);
+            size_t e = it.find('=');
+            if (e != std::string::npos) {
+                std::string kk = it.substr(0, e), v = it.substr(e + 1);
+                if (kk == "which") { for (auto& ch : v) if (ch == '|') ch = ';'; T.which = v; }
+                else if (kk == "tol") T.tol = std::stod(v);
+                else if (kk == "passes") T.passes = std::stoi(v);
+                else if (kk == "ctol") T.ctol = std::stod(v);
+                else if (kk == "iters") T.iters = std::stoi(v);
+                else if (kk == "h") T.h = std::stod(v);
+                else if (kk == "margin") T.margin = std::stoi(v);
+                else if (kk == "threads") T.threads = std::stoi(v);
+                else if (kk == "top_local") T.top_local = v == "1";
+                else if (kk == "no_stall") T.no_stall = v == "1";
+                else if (kk == "mode") T.jvp = v == "jvp";
+                else throw std::runtime_error("mk: unknown tangent option " + kk);
+            }
+            a = b + 1;
+        }
+        mk::en::Engine E(k, P, S, c, out);
+        E.run();
+        E.tangents(T);
+        return 0;
+    } catch (const std::exception& ex) {
+        std::snprintf(err, size_t(errcap), "%s", ex.what());
+        return 1;
+    }
+}
 }  // extern "C"

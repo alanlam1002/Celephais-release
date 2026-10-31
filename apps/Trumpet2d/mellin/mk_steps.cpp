@@ -22,7 +22,7 @@ static Vec gemv(const Vec& A, const cd* x, int n) {
     return y;
 }
 // tg_dc(X) = (R / N * e1[:, None] * X).sum(0)
-static Vec tg_dc(const Vec& X, int NB, const Vec& e1, double R) {
+Vec tg_dc(const Vec& X, int NB, const Vec& e1, double R) {
     int N = int(e1.size());
     Vec o(NB);
     for (int k = 0; k < N; k++) {
@@ -35,7 +35,7 @@ static Vec tg_dc(const Vec& X, int NB, const Vec& e1, double R) {
     return o;
 }
 // [-Minv[k] @ v for k, v in enumerate(nodes_of(rows, g))]
-static Vec correction(const Vec& rows, const std::vector<Vec>& Minv, int K, int NB, const Vec& e1, double R) {
+Vec correction(const Vec& rows, const std::vector<Vec>& Minv, int K, int NB, const Vec& e1, double R) {
     int N = int(e1.size());
     Vec nd = ct::nodes_of(rows, K, NB, e1, R), out(size_t(N) * NB);
     for (int k = 0; k < N; k++) {
@@ -47,7 +47,7 @@ static Vec correction(const Vec& rows, const std::vector<Vec>& Minv, int K, int 
     return out;
 }
 // d - sum(a[q] * Wq[q]) with a = lstsq(A_hold, tg_dc(d)[:nh]): the components along the residue directions removed
-static void hold(Vec& d, const std::vector<Vec>& Wq, int nh, int NB, const Vec& e1, double R) {
+void hold(Vec& d, const std::vector<Vec>& Wq, int nh, int NB, const Vec& e1, double R) {
     int rk = int(Wq.size());
     if (!rk) return;
     Vec A(size_t(nh) * rk), t = tg_dc(d, NB, e1, R);

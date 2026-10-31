@@ -135,6 +135,70 @@ struct Kernel {
 
     Ser Fin[6];                                // fields given directly (mk_rows_fields)
     bool use_fin = false;
+    std::vector<Ser>* keep_v = nullptr;        // diagnostic (jvp_check): every op's value / derivative kept
+    std::vector<Ser>* keep_dv = nullptr;
+    // diagnostic: each op's linear response against the central difference of its values at C +- h dC; the first ops that differ reported
+    void jvp_check(const std::vector<Entry>& C, const std::vector<Entry>& dC, double top, double h, int nrep = 8) {
+        auto shifted = [&](double e) {
+            std::vector<Entry> Cx = C;
+            for (auto& d : dC) {
+                int at = -1;
+                for (size_t q = 0; q < Cx.size(); q++)
+                    if (Cx[q].j == d.j && keq(Cx[q].t, d.t)) { at = int(q); break; }
+                std::vector<cd> m(c.K);
+                for (int k = 0; k < c.K; k++) m[k] = (at >= 0 ? Cx[at].m[k] : cd(0.0, 0.0)) + e * d.m[k];
+                if (at >= 0) Cx[at].m = m;
+                else Cx.push_back(Entry{d.j, d.t, 1, m});
+            }
+            return Cx;
+        };
+        std::vector<Ser> vp, vm, v0, dv;
+        keep_v = &vp; run(shifted(h), nullptr, top);
+        keep_v = &vm; run(shifted(-h), nullptr, top);
+        keep_v = &v0; keep_dv = &dv; run(C, &dC, top);
+        keep_v = nullptr; keep_dv = nullptr;
+        static const char* ON[] = {"IN", "EMPTY", "C0", "ADD", "SUB", "MUL", "SCALE", "DRAD", "DTH", "INV", "EXP", "LOG"};
+        int rep = 0;
+        for (size_t i = 0; i < dv.size() && rep < nrep; i++) {
+            std::vector<Key> keys;
+            for (auto* S : {&vp[i], &vm[i], &dv[i]})
+                for (auto& kv : S->d) {
+                    bool f = false;
+                    for (auto& k : keys) if (keq(k, kv.first)) { f = true; break; }
+                    if (!f) keys.push_back(kv.first);
+                }
+            double sc = 0.0, worst = 0.0;
+            Key wk{0.0, true};
+            double wfd = 0.0, wjv = 0.0;
+            for (auto& k : keys) {
+                int ip = vp[i].find(k), im = vm[i].find(k), id = dv[i].find(k);
+                size_t P = c.psz();
+                for (size_t q = 0; q < P; q++) {
+                    cd a = ip >= 0 ? vp[i].d[ip].second.a[q] : cd(0.0), b = im >= 0 ? vm[i].d[im].second.a[q] : cd(0.0);
+                    cd fd = (a - b) / (2 * h), jv = id >= 0 ? dv[i].d[id].second.a[q] : cd(0.0);
+                    sc = std::max(sc, std::max(std::abs(fd), std::abs(jv)));
+                    if (std::abs(fd - jv) > worst) { worst = std::abs(fd - jv); wk = k; wfd = std::abs(fd); wjv = std::abs(jv); }
+                }
+            }
+            if (worst > 1e-5 * std::max(sc, 1e-300) && sc > 1e-20) {
+                std::fprintf(stderr, "jvp_check op %zu %s (a %d b %d): worst at key %.6f%s |FD| %.3e |JVP| %.3e diff %.3e (scale %.3e); tops v %.3f dv %.3f; pmin v %.3f\n",
+                             i, ON[tp.op[i]], tp.a[i], tp.b[i], wk.v, wk.isint ? "i" : "", wfd, wjv, worst, sc, v0[i].top, dv[i].top, v0[i].pmin());
+                rep++;
+                if (std::getenv("MK_JVP_KEYS")) {
+                    auto pk = [&](const char* nm, const Ser& S) {
+                        std::fprintf(stderr, "   %s (e %d top %.3f):", nm, S.e, S.top);
+                        for (auto& kv : S.d) std::fprintf(stderr, " %.6f", kv.first.v);
+                        std::fprintf(stderr, "\n");
+                    };
+                    pk("value", v0[i]); pk("value+h", vp[i]); pk("jvp", dv[i]);
+                    if (tp.a[i] >= 0 && size_t(tp.a[i]) < dv.size()) { pk("input value", v0[tp.a[i]]); pk("input jvp", dv[tp.a[i]]); }
+                    std::fprintf(stderr, "   registry now:");
+                    for (double x : c.cent) std::fprintf(stderr, " %.6f", x);
+                    std::fprintf(stderr, "\n");
+                }
+            }
+        }
+    }
     void run(const std::vector<Entry>& C, const std::vector<Entry>* dC, double top) {
         Ser F[6], dF[6], U2, dU2;
         if (use_fin) {
@@ -213,6 +277,8 @@ struct Kernel {
             out[k] = v[tp.outputs[k]];
             if (dC) dout[k] = dv[tp.outputs[k]];
         }
+        if (keep_v) *keep_v = v;
+        if (keep_dv && dC) *keep_dv = dv;
     }
 };
 

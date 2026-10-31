@@ -12,6 +12,7 @@
 //   scipy.linalg.eig(A, B) eigenvalues    eiggen     zggev, right vectors on (scipy's default), alpha / beta (beta = 0 -> inf)
 #pragma once
 #include <complex>
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -50,8 +51,8 @@ inline void svd(std::vector<cd> A, int m, int n, std::vector<double>& s, std::ve
     int k = std::min(m, n);
     s.assign(k, 0.0);
     if (!U) {
-        std::vector<cd> du(1), dv(1);
-        check(LAPACKE_zgesdd(LAPACK_ROW_MAJOR, 'N', m, n, A.data(), n, s.data(), du.data(), 1, dv.data(), 1), "zgesdd (N)");
+        std::vector<cd> du(std::max(m, 1)), dv(std::max(n, 1));      // not referenced by jobz 'N'; MKL's LAPACKE still checks ldvt >= n
+        check(LAPACKE_zgesdd(LAPACK_ROW_MAJOR, 'N', m, n, A.data(), n, s.data(), du.data(), std::max(m, 1), dv.data(), std::max(n, 1)), "zgesdd (N)");
         return;
     }
     int ucols = full ? m : k, vrows = full ? n : k;

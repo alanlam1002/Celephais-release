@@ -12,9 +12,9 @@ endif()
 # -fcx-fortran-rules: the plain complex product (numpy's), not C99 Annex G's NaN-recovery call (__muldc3); division keeps its range reduction
 # -O3 -march=cascadelake: the cluster's Xeon Gold 6248 (login and p.sakura nodes alike); FMA contraction changes rounding at ~1e-16 only
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=cascadelake -fcx-fortran-rules ${MK_EXTRA_FLAGS}")
-add_library(mellin_kernel SHARED mk_kernel.cpp mk_contour.cpp mk_data.cpp)
+add_library(mellin_kernel SHARED mk_kernel.cpp mk_contour.cpp mk_data.cpp mk_steps.cpp)
 # M2b onwards: numpy's loops do not fuse multiply-adds, and the recursion's linear algebra is compared with the oracle BITWISE
-set_source_files_properties(mk_contour.cpp mk_data.cpp PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
+set_source_files_properties(mk_contour.cpp mk_data.cpp mk_steps.cpp PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
 target_compile_options(mellin_kernel PRIVATE -Wall -Wextra)
 # the GCC 13 runtime linked in: the library loads in the system Python without GCC 13's lib64 on the path
 target_link_options(mellin_kernel PRIVATE -static-libstdc++ -static-libgcc)

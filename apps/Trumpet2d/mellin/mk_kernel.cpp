@@ -4,6 +4,7 @@
 #include "mk_la.hpp"
 #include "mk_bundle.hpp"
 #include "mk_data.hpp"
+#include "mk_steps.hpp"
 
 #include <climits>
 #include <cstring>
@@ -434,6 +435,94 @@ int mk_offl_start(void* h, double g, double top, int nent, const int* col, const
         putv(Xg, Xg_o);
         *fixed = hf;
         amp_o[0] = amp.real(); amp_o[1] = amp.imag();
+        k->err.clear();
+        return 0;
+    } catch (const std::exception& ex) {
+        k->err = ex.what();
+        return 1;
+    }
+}
+
+}  // extern "C"
+
+// ---- M2d: the nonlinear steps (mk_steps.hpp); the rows callbacks built here ----
+namespace {
+mk::st::Rows make_rows(mk::Kernel& k, const mk::Proj& P, const std::vector<mk::Entry>& base, double g, double top, const std::vector<cd>& e1,
+                       double R) {
+    mk::st::Rows r;
+    r.gal = [&k, &P, base, g, top, e1, R](const std::vector<cd>& X) {
+        k.run(mk::with_grade(k.c, base, X, g, P.kofs, e1, R), nullptr, top);
+        return mk::project(k.c, k.out, g, 1, P.gfam, P.dE, P.W, false);
+    };
+    r.stored = [&k, &P, base, g, top, e1, R](const std::vector<cd>& X) {
+        k.run(mk::with_grade(k.c, base, X, g, P.kofs, e1, R), nullptr, top);
+        return mk::project(k.c, k.out, g, 1, P.cfam, P.cdE, P.Wc, true);
+    };
+    return r;
+}
+}  // namespace
+
+extern "C" {
+
+// the defect correction at centre g about `base` (the series stripped at g).  isint: the integer loop (ndc = --defect; act; Smax; the data fix
+// when dfix: At (2nn x rk), wt, tg0), else the off-integer loop (ndc = max(--defect, 4)).  Minv: N x nn x nn; Wqn: rk x N x nn (normalised);
+// outputs X (N x nn), hist (cap 64), drift, rows_after (integer), cond (K x nc, off-integer)
+int mk_defect(void* h, double g, double top, int nent, const int* col, const double* key, const int* isint_, const int* nbs, const double* mom,
+              int N, double R, const double* e1, int isint, int rk, const double* Minv, const double* Wqn, const double* X0, const int* act,
+              double Smax, int ndc, int robust, int dfix, const double* At, const double* wt, const double* tg0, double* X_o, double* hist_o,
+              int* nhist, double* drift, double* rows_after, double* cond_o) {
+    auto* k = static_cast<mk::Kernel*>(h);
+    try {
+        const mk::Proj& P = g_proj.at(h);
+        int nn = P.nn, K = k->c.K;
+        auto base = entries(nent, col, key, isint_, nbs, mom, K);
+        auto e = cvec(e1, N);
+        std::vector<std::vector<cd>> Mi, W;
+        for (int q = 0; q < N; q++) Mi.push_back(cvec(Minv + size_t(q) * 2 * nn * nn, size_t(nn) * nn));
+        for (int q = 0; q < rk; q++) W.push_back(cvec(Wqn + size_t(q) * 2 * N * nn, size_t(N) * nn));
+        auto rows = make_rows(*k, P, base, g, top, e, R);
+        mk::st::DefectOut o;
+        if (isint) {
+            std::function<std::vector<cd>(const std::vector<cd>&)> fix;
+            mk::dt::DataIn in;
+            mk::dt::DataOut d;
+            if (dfix && rk) {
+                in.nn = nn; in.NB = nn; in.rk = rk; in.R = R; in.e1 = e;
+                in.wt.assign(wt, wt + 2 * nn);
+                in.tg0 = cvec(tg0, 2 * nn);
+                d.At = cvec(At, size_t(2) * nn * rk);
+                d.Wq = W;
+                fix = [in, d](const std::vector<cd>& X) { return mk::dt::data_fix(X, in, d); };
+            }
+            mk::st::defect_int(cvec(X0, size_t(N) * nn), Mi, W, std::vector<char>(act, act + nn), Smax, K, nn, e, R, ndc, robust != 0, fix, rows, o);
+        } else {
+            mk::st::defect_off(cvec(X0, size_t(N) * nn), Mi, W, K, nn, e, R, ndc, robust != 0, rows, o);
+            putv(o.conditions, cond_o);
+        }
+        putv(o.X, X_o);
+        *nhist = int(std::min<size_t>(o.hist.size(), 64));
+        for (int i = 0; i < *nhist; i++) hist_o[i] = o.hist[i];
+        *drift = o.drift;
+        *rows_after = o.rows_after;
+        k->err.clear();
+        return 0;
+    } catch (const std::exception& ex) {
+        k->err = ex.what();
+        return 1;
+    }
+}
+
+// Newton's sources at the nodes about X_k (base: the series stripped at g; Ms: the re-linearised operator, 3 x nn x nn)
+int mk_newton_sources(void* h, double g, double top, int nent, const int* col, const double* key, const int* isint_, const int* nbs, const double* mom,
+                      int N, double R, const double* e1, const double* Ms, const double* Xk, double* Sn_o) {
+    auto* k = static_cast<mk::Kernel*>(h);
+    try {
+        const mk::Proj& P = g_proj.at(h);
+        int nn = P.nn;
+        auto base = entries(nent, col, key, isint_, nbs, mom, k->c.K);
+        auto e = cvec(e1, N);
+        auto rows = make_rows(*k, P, base, g, top, e, R);
+        putv(mk::st::newton_sources(cvec(Xk, size_t(N) * nn), cvec(Ms, size_t(3) * nn * nn), k->c.K, nn, e, R, rows), Sn_o);
         k->err.clear();
         return 0;
     } catch (const std::exception& ex) {

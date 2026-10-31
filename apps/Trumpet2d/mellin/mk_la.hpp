@@ -98,5 +98,13 @@ inline std::vector<cd> eiggen(std::vector<cd> A, std::vector<cd> B, int n) {
     return ev;
 }
 
+// generalized eigenvalues as (alpha, beta), right vectors computed (scipy.linalg.eig(A, B)'s zggev call); the caller forms alpha / beta
+inline void eiggen_ab(std::vector<cd> A, std::vector<cd> B, int n, std::vector<cd>& alpha, std::vector<cd>& beta) {
+    alpha.assign(n, 0.0);
+    beta.assign(n, 0.0);
+    std::vector<cd> vl(1), vr(size_t(n) * n);
+    check(LAPACKE_zggev(LAPACK_ROW_MAJOR, 'N', 'V', n, A.data(), n, B.data(), n, alpha.data(), beta.data(), vl.data(), 1, vr.data(), n), "zggev");
+}
+
 }  // namespace la
 }  // namespace mk

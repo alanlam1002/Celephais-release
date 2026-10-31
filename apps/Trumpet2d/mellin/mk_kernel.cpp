@@ -5,6 +5,7 @@
 #include "mk_bundle.hpp"
 #include "mk_data.hpp"
 #include "mk_steps.hpp"
+#include "mk_families.hpp"
 
 #include <climits>
 #include <cstring>
@@ -523,6 +524,121 @@ int mk_newton_sources(void* h, double g, double top, int nent, const int* col, c
         auto e = cvec(e1, N);
         auto rows = make_rows(*k, P, base, g, top, e, R);
         putv(mk::st::newton_sources(cvec(Xk, size_t(N) * nn), cvec(Ms, size_t(3) * nn * nn), k->c.K, nn, e, R, rows), Sn_o);
+        k->err.clear();
+        return 0;
+    } catch (const std::exception& ex) {
+        k->err = ex.what();
+        return 1;
+    }
+}
+
+}  // extern "C"
+
+// ---- M2e: the families and the registry (mk_families.hpp) ----
+extern "C" {
+
+// the centres the rows of `base` (the series stripped at g) announce above g: ann (key, magnitude; cap 1024), the keys added to the queue
+int mk_announce(void* h, double g, double top, double gmax, int nent, const int* col, const double* key, const int* isint, const int* nbs,
+                const double* mom, int* nann, double* ann, int* nadd, double* add_v, int* add_int) {
+    auto* k = static_cast<mk::Kernel*>(h);
+    try {
+        const mk::Proj& P = g_proj.at(h);
+        k->run(entries(nent, col, key, isint, nbs, mom, k->c.K), nullptr, top);
+        std::vector<mk::fm::Ann> a;
+        std::vector<mk::Key> ad;
+        mk::fm::announce(k->c, k->out, P, g, gmax, a, ad);
+        *nann = int(std::min<size_t>(a.size(), 1024));
+        for (int i = 0; i < *nann; i++) { ann[2 * i] = a[i].key; ann[2 * i + 1] = a[i].mag; }
+        *nadd = int(std::min<size_t>(ad.size(), 4096));
+        for (int i = 0; i < *nadd; i++) { add_v[i] = ad[i].v; add_int[i] = ad[i].isint; }
+        k->err.clear();
+        return 0;
+    } catch (const std::exception& ex) {
+        k->err = ex.what();
+        return 1;
+    }
+}
+
+// the lapse families from the bordered pencil at aligned g (Ms: 3 x NB x NB; bord: nbord (row, column) pairs, full indices)
+int mk_lapse_roots(void* h, int NB, const double* Ms, const double* rw, const double* cw, int nbord, const int* bord, double g, double gmax, int lmax,
+                   double* eig, int* nev, double* evr, int* nevr, int* nl, int* lapse_l, double* lapse_key, int* nreg, int* reg_l, double* reg_guess) {
+    auto* k = static_cast<mk::Kernel*>(h);
+    try {
+        std::vector<std::pair<int, int>> b;
+        for (int q = 0; q < nbord; q++) b.emplace_back(bord[2 * q], bord[2 * q + 1]);
+        mk::fm::Lapse o;
+        mk::fm::lapse_roots(k->c, cvec(Ms, size_t(3) * NB * NB), NB, std::vector<double>(rw, rw + NB), std::vector<double>(cw, cw + NB), b, g, k->c.n,
+                            gmax, lmax, o);
+        *nev = int(o.eig_all.size());
+        putv(o.eig_all, eig);
+        *nevr = int(o.evr.size());
+        for (int i = 0; i < *nevr; i++) evr[i] = o.evr[i];
+        *nl = int(o.lapse.size());
+        for (int i = 0; i < *nl; i++) { lapse_l[i] = o.lapse[i].first; lapse_key[i] = o.lapse[i].second.v; }
+        *nreg = int(o.registry.size());
+        for (int i = 0; i < *nreg; i++) { reg_l[i] = o.registry[i].first; reg_guess[i] = o.registry[i].second; }
+        k->err.clear();
+        return 0;
+    } catch (const std::exception& ex) {
+        k->err = ex.what();
+        return 1;
+    }
+}
+
+int mk_towers(void* h, int nf, const double* fv, double gmax, double* out_v, int* out_int, int cap) {
+    auto* k = static_cast<mk::Kernel*>(h);
+    std::vector<mk::Key> f;
+    for (int i = 0; i < nf; i++) f.push_back(mk::Key{fv[i], false});
+    auto t = mk::fm::towers(k->c, f, gmax);
+    int n = int(std::min<size_t>(t.size(), size_t(cap)));
+    for (int i = 0; i < n; i++) { out_v[i] = t[i].v; out_int[i] = t[i].isint; }
+    return int(t.size());
+}
+
+// the pending queue (the driver's; exposed for the unit test)
+void* mk_q_new() { return new mk::fm::Queue(); }
+void mk_q_free(void* q) { delete static_cast<mk::fm::Queue*>(q); }
+void mk_q_push(void* q, int n, const double* v, const int* isint) {
+    std::vector<mk::Key> ks;
+    for (int i = 0; i < n; i++) ks.push_back(mk::Key{v[i], isint[i] != 0});
+    static_cast<mk::fm::Queue*>(q)->push(ks);
+}
+int mk_q_pop(void* q, double* v, int* isint) {
+    mk::Key g;
+    if (!static_cast<mk::fm::Queue*>(q)->pop(g)) return 0;
+    *v = g.v;
+    *isint = g.isint;
+    return 1;
+}
+int mk_q_after(void* q, double* out, int cap) {
+    auto a = static_cast<mk::fm::Queue*>(q)->after();
+    for (int i = 0; i < int(a.size()) && i < cap; i++) out[i] = a[i];
+    return int(a.size());
+}
+
+// the gauge Lie flow of six fields given as mk_rows_fields takes them; the result in the kernel's output slots (mk_out_info / mk_out_get, deriv 0)
+int mk_lie_flow(void* h, const int* np, const double* keys, const int* isint, const int* nb, const int* has_e, const int* e, const double* top,
+                const double* data, int ncs, const int* ls, const double* cs, double J, const double* TH, int steps) {
+    auto* k = static_cast<mk::Kernel*>(h);
+    try {
+        size_t ip = 0, off = 0, P = k->c.psz();
+        mk::Ser F[6];
+        for (int f = 0; f < 6; f++) {
+            mk::Ser s;
+            for (int i = 0; i < np[f]; i++, ip++) {
+                mk::Piece p{nb[ip], std::vector<cd>(size_t(nb[ip]) * P)};
+                for (size_t q = 0; q < p.a.size(); q++, off++) p.a[q] = cd(data[2 * off], data[2 * off + 1]);
+                s.d.emplace_back(mk::Key{keys[ip], isint[ip] != 0}, std::move(p));
+            }
+            s.has_e = has_e[f] != 0 && !s.d.empty();
+            s.e = e[f];
+            s.top = top[f];
+            F[f] = std::move(s);
+        }
+        std::vector<std::pair<int, double>> c;
+        for (int i = 0; i < ncs; i++) c.emplace_back(ls[i], cs[i]);
+        mk::fm::lie_flow(k->c, F, c, J, std::vector<double>(TH, TH + k->c.NF), steps);
+        for (int f = 0; f < 6; f++) k->out[f] = F[f];
         k->err.clear();
         return 0;
     } catch (const std::exception& ex) {

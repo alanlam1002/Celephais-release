@@ -175,7 +175,11 @@ struct Kernel {
                 break;
             case MUL:
                 v[i] = c.mul(v[A], v[Bq]);
-                if (dC) lin(i, c.add(c.mul(dv[A], v[Bq]), c.mul(v[A], dv[Bq])));
+                if (dC) {                               // dA b + a dB in Python's order (products register centres; C++ argument order is unspecified)
+                    Ser p1 = c.mul(dv[A], v[Bq]);
+                    Ser p2 = c.mul(v[A], dv[Bq]);
+                    lin(i, c.add(p1, p2));
+                }
                 break;
             case SCALE:
                 v[i] = c.scale(v[A], tp.sc[i]);

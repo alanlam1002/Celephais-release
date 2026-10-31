@@ -8,6 +8,7 @@
 // stored_src, with the setup bundle's Gauss tables contracted once per row (W_i = P.I^T P.T[i]).
 #pragma once
 #include "mk_kernel.hpp"
+#include "mk_contour.hpp"
 
 namespace mk {
 
@@ -20,6 +21,9 @@ struct Proj {
     std::vector<int> cfam, cdE;                 // condition row q (Oc['dE'], >= 99: absent)
     std::vector<cd> Wc;                         // nc x NF
     std::vector<int> kofs;                      // column j's offset kE (nb = 1, no --stagger)
+    std::vector<int> gtfam, gtdE;               // M2c: the gate rows (glab, Og['dE']), their weights, live mask (the truncation measure)
+    std::vector<cd> Wg;                         // ng x NF
+    std::vector<char> live;
 };
 
 // n2a_nl.ckey: an int within 1e-9 of an integer, else the registered (canonical) centre -- canon may register it
@@ -127,6 +131,26 @@ inline void meff(Kernel& kr, const Proj& P, const std::vector<Entry>& Cx, double
             for (int q = 0; q < nq; q++) put(colsb[c0 + q].first, Rg, Rc, nq, q, -1, 1.0);
         }
     }
+}
+
+// n2a_nl.with_grade (nb = 1): the series with the aligned-g columns set to X's moments -- replaced in place when the centre is present,
+// else appended (the column's dict order: the kernel reads each column's centres in order, the columns in family order)
+inline std::vector<Entry> with_grade(Ctx& c, const std::vector<Entry>& Cx, const std::vector<cd>& X, double g, const std::vector<int>& kofs,
+                                     const std::vector<cd>& e1, double R) {
+    int nn = int(kofs.size()), K = c.K;
+    auto Mo = ct::moments_of(X, K, nn, e1, R);
+    std::vector<Entry> Cy = Cx;
+    for (int j = 0; j < nn; j++) {
+        Key t = ckey(c, g + kofs[j]);
+        if (!(t.v >= 1)) continue;
+        std::vector<cd> m(K);
+        for (int k = 0; k < K; k++) m[k] = Mo[size_t(k) * nn + j];
+        bool found = false;
+        for (auto& en : Cy)
+            if (en.j == j && keq(en.t, t)) { en.nb = 1; en.m = m; found = true; break; }
+        if (!found) Cy.push_back(Entry{j, t, 1, std::move(m)});
+    }
+    return Cy;
 }
 
 // an off-integer centre's operator: the last integer centre g0's quadratic re-centred at g (n2a_nl: d = g - g0,

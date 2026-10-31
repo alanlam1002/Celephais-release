@@ -3,6 +3,7 @@
 #include "mk_operator.hpp"
 #include "mk_la.hpp"
 #include "mk_bundle.hpp"
+#include "mk_data.hpp"
 
 #include <climits>
 #include <cstring>
@@ -247,6 +248,197 @@ void mk_out_get(void* h, int f, int deriv, double* keys, int* isint, int* nb, do
         isint[i] = s.d[i].first.isint;
         nb[i] = s.d[i].second.B;
         for (auto& z : s.d[i].second.a) { data[off++] = z.real(); data[off++] = z.imag(); }
+    }
+}
+
+}  // extern "C"
+
+// ---- M2c: the data rule and the conditions (mk_data.hpp); the kernel-backed evaluators are built here (the kernel's translation unit) ----
+namespace {
+void putv(const std::vector<cd>& v, double* p) {
+    for (size_t i = 0; i < v.size(); i++) { p[2 * i] = v[i].real(); p[2 * i + 1] = v[i].imag(); }
+}
+// the conditions [S0 (nc), G0 (xrows), S1, G1] and the gate rows' largest live residual, about the series `base` at aligned g
+mk::dt::Eval make_eval(mk::Kernel& k, const mk::Proj& P, const std::vector<mk::Entry>& base, double g, double top,
+                       const std::vector<int>& xrows, const std::vector<cd>& e1, double R) {
+    mk::dt::Eval ev;
+    ev.cond = [&k, &P, base, g, top, xrows, e1, R](const std::vector<cd>& X) {
+        auto Cy = mk::with_grade(k.c, base, X, g, P.kofs, e1, R);
+        k.run(Cy, nullptr, top);
+        int K = k.c.K, nc = P.nc, nn = P.nn;
+        auto S = mk::project(k.c, k.out, g, 1, P.cfam, P.cdE, P.Wc, true);
+        std::vector<cd> G;
+        if (!xrows.empty()) G = mk::project(k.c, k.out, g, 1, P.gfam, P.dE, P.W, false);
+        std::vector<cd> r;
+        for (int m = 0; m < 2 && m < K; m++) {
+            for (int i = 0; i < nc; i++) r.push_back(S[size_t(m) * nc + i]);
+            for (int x : xrows) r.push_back(G[size_t(m) * nn + x]);
+        }
+        return r;
+    };
+    ev.gate = [&k, &P, base, g, top, e1, R](const std::vector<cd>* X, double gg) {
+        if (P.gtfam.empty()) throw std::runtime_error("mk: the gate rows are not set (mk_set_gate)");
+        if (X) k.run(mk::with_grade(k.c, base, *X, g, P.kofs, e1, R), nullptr, top);
+        else k.run(base, nullptr, top);
+        auto Sg = mk::project(k.c, k.out, gg, 1, P.gtfam, P.gtdE, P.Wg, true);
+        double m = 0.0;
+        for (size_t q = 0; q < P.gtfam.size(); q++)
+            if (P.live[q]) m = std::max(m, std::abs(Sg[q]));
+        return m;
+    };
+    return ev;
+}
+}  // namespace
+
+extern "C" {
+
+void mk_set_gate(void* h, int ng, const int* gtfam, const int* gtdE, const double* Wg, const int* live) {
+    auto* k = static_cast<mk::Kernel*>(h);
+    mk::Proj& P = g_proj[h];
+    P.gtfam.assign(gtfam, gtfam + ng);
+    P.gtdE.assign(gtdE, gtdE + ng);
+    P.Wg = cvec(Wg, size_t(ng) * k->c.NF);
+    P.live.assign(live, live + ng);
+}
+
+// the targets and the data rule at integer centre g.  base: the series (entries); X0 (N x nn), Wq (rk x N x nn) from the contour step;
+// targets: the target series (cbb_*), the column labels ('\n'-separated), the --tgt items ('LAB=V;...'), lc.  Outputs: tgtv / wt / tg0 (2 nn),
+// nhit; c (rk), At (2nn x rk), F_start / F_final (nF), cond_sv (<= rk), cond_rank, lin_err, tol (tau, size, condtol); hist (5 per entry:
+// kind, res, mu, rank, polish; cap 200); fitted (8 per entry: amp re, im, cols 3, l0_share, l2_content, -); Xg (N x nn); Wqn (rk x N x nn)
+int mk_data_rule(void* h, double g, double top, int nent, const int* col, const double* key, const int* isint, const int* nbs, const double* mom,
+                 int N, double R, const double* e1, int rk, const double* X0, const double* Wq, int nx, const int* xrows, int ncbb,
+                 const int* cbb_col, const double* cbb_t, const double* cbb_m0, const char* collab, const char* tgt, const int* lc, int notgt,
+                 int cond_fit, int cond_full, double condtol_fixed, int warm, const double* cwarm, double* tgtv_o, double* wt_o, double* tg0_o,
+                 int* nhit, double* c_o, double* At_o, int* nF, double* Fs_o, double* Ff_o, double* sv_o, int* cond_rank, double* lin_err,
+                 double* tol_o, int* nhist, double* hist_o, int* nfit, double* fit_o, double* Xg_o, double* Wqn_o) {
+    auto* k = static_cast<mk::Kernel*>(h);
+    try {
+        const mk::Proj& P = g_proj.at(h);
+        int nn = P.nn;
+        auto base = entries(nent, col, key, isint, nbs, mom, k->c.K);
+        mk::dt::TgtIn ti;
+        ti.nn = nn; ti.rk = rk; ti.g = g; ti.kofs = P.kofs; ti.lc.assign(lc, lc + nn); ti.notgt = notgt != 0;
+        {
+            std::string s(collab), tok;
+            size_t a = 0;
+            while (a <= s.size()) {
+                size_t b = s.find('\n', a);
+                if (b == std::string::npos) b = s.size();
+                ti.collab.push_back(s.substr(a, b - a));
+                a = b + 1;
+            }
+            std::string t(tgt);
+            a = 0;
+            while (a < t.size()) {
+                size_t b = t.find(';', a);
+                if (b == std::string::npos) b = t.size();
+                std::string it = t.substr(a, b - a);
+                size_t e = it.find('=');
+                if (e != std::string::npos) {
+                    std::string kk = it.substr(0, e), vv = it.substr(e + 1);
+                    kk.erase(0, kk.find_first_not_of(' '));
+                    kk.erase(kk.find_last_not_of(' ') + 1);
+                    ti.tgt.emplace_back(kk, std::stod(vv));
+                }
+                a = b + 1;
+            }
+        }
+        ti.cbb_col.assign(cbb_col, cbb_col + ncbb);
+        ti.cbb_t.assign(cbb_t, cbb_t + ncbb);
+        ti.cbb_m0 = cvec(cbb_m0, ncbb);
+        mk::dt::DataIn in;
+        std::vector<std::pair<int, double>> hit;
+        *nhit = mk::dt::targets(ti, in.tgtv, in.prevv, in.wt, in.tg0, hit);
+        in.nn = nn; in.NB = nn; in.rk = rk; in.R = R; in.g = g;
+        in.e1 = cvec(e1, N);
+        in.X0 = cvec(X0, size_t(N) * nn);
+        for (int q = 0; q < rk; q++) in.Wq.push_back(cvec(Wq + size_t(q) * 2 * N * nn, size_t(N) * nn));
+        in.notgt = notgt != 0; in.cond_fit = cond_fit != 0; in.cond_full = cond_full != 0; in.condtol_fixed = condtol_fixed;
+        in.warm = warm != 0;
+        if (warm) in.cwarm = cvec(cwarm, rk);
+        in.lc.assign(lc, lc + nn);
+        auto ev = make_eval(*k, P, base, g, top, std::vector<int>(xrows, xrows + nx), in.e1, R);
+        mk::dt::DataOut o;
+        mk::dt::data_rule(in, ev, o);
+        putv(in.tgtv, tgtv_o);
+        for (int i = 0; i < 2 * nn; i++) wt_o[i] = in.wt[i];
+        putv(in.tg0, tg0_o);
+        putv(o.c, c_o);
+        putv(o.At, At_o);
+        *nF = int(o.F_start.size());
+        putv(o.F_start, Fs_o);
+        putv(o.F_final, Ff_o);
+        for (size_t i = 0; i < o.cond_sv.size(); i++) sv_o[i] = o.cond_sv[i];
+        *cond_rank = o.cond_rank;
+        *lin_err = o.lin_err;
+        tol_o[0] = o.tau; tol_o[1] = o.size; tol_o[2] = o.condtol;
+        *nhist = int(std::min<size_t>(o.hist.size(), 200));
+        for (int i = 0; i < *nhist; i++) {
+            auto& hh = o.hist[i];
+            double* p = hist_o + 5 * i;
+            p[0] = hh.kind; p[1] = hh.res; p[2] = hh.mu; p[3] = hh.rank; p[4] = hh.polish;
+        }
+        *nfit = int(o.fitted.size());
+        for (int i = 0; i < *nfit; i++) {
+            auto& f = o.fitted[i];
+            double* p = fit_o + 8 * i;
+            p[0] = f.amp.real(); p[1] = f.amp.imag(); p[2] = f.cols[0]; p[3] = f.cols[1]; p[4] = f.cols[2]; p[5] = f.l0_share; p[6] = f.l2_content;
+            p[7] = 0.0;
+        }
+        putv(o.Xg, Xg_o);
+        for (int q = 0; q < rk; q++) putv(o.Wq[q], Wqn_o + size_t(q) * 2 * N * nn);
+        k->err.clear();
+        return 0;
+    } catch (const std::exception& ex) {
+        k->err = ex.what();
+        return 1;
+    }
+}
+
+// --cond-fit's data fix on X (N x nn): the data rule's At, normalised Wq, weights and tg0 given
+int mk_data_fix(int N, int nn, int rk, double R, const double* e1, const double* X, const double* At, const double* Wqn, const double* wt,
+                const double* tg0, double* out) {
+    try {
+        mk::dt::DataIn in;
+        in.nn = nn; in.NB = nn; in.rk = rk; in.R = R;
+        in.e1 = cvec(e1, N);
+        in.wt.assign(wt, wt + 2 * nn);
+        in.tg0 = cvec(tg0, 2 * nn);
+        mk::dt::DataOut d;
+        d.At = cvec(At, size_t(2) * nn * rk);
+        for (int q = 0; q < rk; q++) d.Wq.push_back(cvec(Wqn + size_t(q) * 2 * N * nn, size_t(N) * nn));
+        putv(mk::dt::data_fix(cvec(X, size_t(N) * nn), in, d), out);
+        return 0;
+    } catch (...) { return 1; }
+}
+
+// the off-integer start: base (the series STRIPPED at g), X0, Wq (raw); labelled / datum; cond_fit.  Outputs Wqn (rk x N x nn), Xg, fixed, amp
+int mk_offl_start(void* h, double g, double top, int nent, const int* col, const double* key, const int* isint, const int* nbs, const double* mom,
+                  int N, double R, const double* e1, int rk, const double* X0, const double* Wq, int nx, const int* xrows, int labelled, double datum,
+                  int cond_fit, double* Wqn_o, double* Xg_o, int* fixed, double* amp_o) {
+    auto* k = static_cast<mk::Kernel*>(h);
+    try {
+        const mk::Proj& P = g_proj.at(h);
+        int nn = P.nn;
+        auto base = entries(nent, col, key, isint, nbs, mom, k->c.K);
+        auto e = cvec(e1, N);
+        std::vector<std::vector<cd>> W;
+        for (int q = 0; q < rk; q++) W.push_back(cvec(Wq + size_t(q) * 2 * N * nn, size_t(N) * nn));
+        auto ev = make_eval(*k, P, base, g, top, std::vector<int>(xrows, xrows + nx), e, R);
+        std::vector<std::vector<cd>> Wn;
+        std::vector<cd> Xg;
+        bool hf = false;
+        cd amp(0.0, 0.0);
+        mk::dt::offl_start(cvec(X0, size_t(N) * nn), W, nn, nn, e, R, labelled != 0, datum, cond_fit != 0, ev, Wn, Xg, hf, amp);
+        for (int q = 0; q < rk; q++) putv(Wn[q], Wqn_o + size_t(q) * 2 * N * nn);
+        putv(Xg, Xg_o);
+        *fixed = hf;
+        amp_o[0] = amp.real(); amp_o[1] = amp.imag();
+        k->err.clear();
+        return 0;
+    } catch (const std::exception& ex) {
+        k->err = ex.what();
+        return 1;
     }
 }
 

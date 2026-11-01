@@ -78,7 +78,9 @@ struct Ctx {
     // the native self-spread (research round 1027; design section 7.3, the counterpart of the oracle's N2A_ORDER=rev): MK_ORDER=rev sums the
     // moment convolution over j in reverse and each product's pair contributions into their targets in reverse pair order; the pair loop
     // (hence the registry's fill order and every merge decision) unchanged.  Mathematically the same series.
-    bool order_rev = [] { const char* e = std::getenv("MK_ORDER"); return e && std::string(e) == "rev"; }();
+    // (round 1028: more samples -- MK_ORDER=revj the moment convolution only, revp the pair order only)
+    bool order_rev_j = [] { const char* e = std::getenv("MK_ORDER"); return e && (std::string(e) == "rev" || std::string(e) == "revj"); }();
+    bool order_rev = [] { const char* e = std::getenv("MK_ORDER"); return e && (std::string(e) == "rev" || std::string(e) == "revp"); }();
     double trace_above = 0.0;                                   // diagnostic (MK_TRACE_CANON): new registrations above this value reported
     std::string trace_tag;
     std::pair<Key, double> canon(double g) {
@@ -181,7 +183,7 @@ struct Ctx {
             const cd* ya = &fb.a[(fb.B == 1 ? 0 : b) * P];
             cd* w = &o.a[b * P];
             for (int jj = 0; jj < K; jj++) {
-                int j = order_rev ? K - 1 - jj : jj;
+                int j = order_rev_j ? K - 1 - jj : jj;
                 if (!nz[j]) continue;
                 for (int m = j; m < K; m++) {
                     const cd* x = xa + j * NF;
@@ -216,7 +218,7 @@ struct Ctx {
                 }
             cd* w = &o.a[b * P];
             for (int jj = 0; jj < K; jj++) {
-                int j = order_rev ? K - 1 - jj : jj;
+                int j = order_rev_j ? K - 1 - jj : jj;
                 if (!nz[j]) continue;
                 for (int m = j; m < K; m++)
                     for (int q = 0; q < NF; q++) w[m * NF + q] += fa[j * NF + q] * fb[(m - j) * NF + q];

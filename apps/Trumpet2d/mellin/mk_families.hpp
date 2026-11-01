@@ -11,6 +11,8 @@
 //   gauge flow   the gauge families as the exact Lie flow of the converged series (RK4 in the flow parameter, --gauge-steps)
 // Header-only, compiled in the kernel's translation unit (it is series arithmetic: the kernel's operations, its flags).
 #pragma once
+#include <cstdlib>
+#include <string>
 #include "mk_contour.hpp"
 #include "mk_operator.hpp"
 
@@ -113,6 +115,11 @@ inline void lapse_roots(Ctx& c, const std::vector<cd>& Ms, int NB, const std::ve
             if (std::abs(o.evr[i] - guess) < std::abs(o.evr[im] - guess)) im = i;
         double sgm = o.evr[im];
         if (std::abs(sgm - guess) > ROOT_FAR || sgm > gmax) continue;
+        if (const char* ff = std::getenv("MK_FAM_FORCE")) {       // diagnostic (round 1028): a family's centre forced ('L:value;...')
+            std::string fs = std::string(";") + ff + ";", k = ";" + std::to_string(L) + ":";
+            size_t at = fs.find(k);
+            if (at != std::string::npos) sgm = std::stod(fs.substr(at + k.size()));
+        }
         o.lapse.emplace_back(L, ckey(c, sgm));
     }
 }

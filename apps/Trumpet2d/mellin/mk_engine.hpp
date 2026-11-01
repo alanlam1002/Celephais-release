@@ -103,6 +103,7 @@ struct Setup {
     std::string set_data;             // --set-data (the data directions' order; absent in older bundles: C0's order)
     // M3: the fit's output map (bundles from round 1027 on): the condition rows' scale, the matching data (--match-data), the flags
     std::vector<double> rw_out, rwc;
+    std::vector<std::string> condlab;         // the condition rows' labels (bundles from round 1028 on: the fit outputs' labels)
     bool has_md = false, g0rows = false;
     std::string eval_r;
     double md_rm = 0.0, tan_h = 1e-3;
@@ -156,6 +157,12 @@ inline void load_engine(const std::string& dir, Kernel& k, Proj& P, Setup& S, Cf
     auto exists = [&](const std::string& n) { return bool(std::ifstream(dir + "/" + n + ".npy")); };
     S.rw_out = npy_as<double>(A("rw_out"));
     if (exists("rwc")) S.rwc = npy_as<double>(A("rwc"));
+    {
+        std::ifstream f(dir + "/condlab.txt");
+        std::string l;
+        while (std::getline(f, l))
+            if (!l.empty()) S.condlab.push_back(l);
+    }
     S.g0rows = B.geti("g0rows", 0);
     S.eval_r = gs("eval_r");
     S.tan_h = B.getd("tan_h", 1e-3);
@@ -1042,6 +1049,44 @@ inline void Engine::tangents(const TanOpt& T) {
     J.kv("centres", Json::nums(cents));
     J.kv("base_imag", Json::num(base_imag));
     if (outputs) npy_write(out_ + "/fit_base.npy", base.data(), "<f8", {long(base.size())}, 8);
+    if (outputs && !S_.condlab.empty()) {
+        // fit.json: the outputs' labels and values as n2a_nl fit_out writes them (labels, base) -- n3b_linthroat reads the grade-0 columns'
+        // runs from it (the hybrid route, research round 1028)
+        auto fmt = [](const char* f, double x) { char b[64]; std::snprintf(b, sizeof b, f, x); return std::string(b); };
+        std::vector<std::string> lab;
+        for (int gg = 1; gg <= c_.gdata; gg++)
+            for (int m = 0; m < 2; m++)
+                for (int q = 0; q < P_.nn; q++) lab.push_back("eq row g" + std::to_string(gg) + " m" + std::to_string(m) + " " + S_.collab[q]);
+        for (double gc : cents) {
+            bool eq = std::abs(gc - std::nearbyint(gc)) < 1e-9 && gc >= 1 - 1e-9 && gc <= 2 + 1e-9;
+            for (auto& f : fams_)
+                if (std::abs(f.second.v - gc) < 1e-9) eq = true;
+            for (int m = 0; m < 2; m++)
+                for (int q = 0; q < P_.nc; q++) lab.push_back(std::string(eq ? "eq" : "mon") + " cond " + fmt("%.6f", gc) + " m" + std::to_string(m) + " " + S_.condlab[q]);
+        }
+        for (size_t i = size_t(c_.gdata); i < cents.size(); i++)
+            for (int m = 0; m < 2; m++)
+                for (int q = 0; q < P_.nn; q++) lab.push_back("monrow " + fmt("%.6f", cents[i]) + " m" + std::to_string(m) + " " + S_.collab[q]);
+        if (S_.g0rows)
+            for (int gg = -1; gg <= 0; gg++)
+                for (int m = 0; m < 2; m++)
+                    for (int q = 0; q < P_.nn; q++) lab.push_back("eq row g" + std::to_string(gg) + " m" + std::to_string(m) + " " + S_.collab[q]);
+        for (size_t q = 0; q < S_.md_key.size() / 3; q++)
+            lab.push_back("mk " + std::to_string(q) + " " + std::to_string(S_.md_key[3 * q]) + " " + std::to_string(S_.md_key[3 * q + 1]) + " " +
+                          std::to_string(S_.md_key[3 * q + 2]));
+        if (lab.size() != base.size()) throw std::runtime_error("mk: fit labels " + std::to_string(lab.size()) + " vs outputs " + std::to_string(base.size()));
+        Json F;
+        F.open('{');
+        std::string ls = "[";
+        for (size_t i = 0; i < lab.size(); i++) ls += (i ? "," : "") + Json::str(lab[i]);
+        F.kv("labels", ls + "]");
+        F.kv("base", Json::nums(base));
+        F.kv("base_imag", Json::num(base_imag));
+        F.kv("centres", Json::nums(cents));
+        F.kv("native", "true");
+        F.close('}');
+        std::ofstream(out_ + "/fit.json") << F.s.str();
+    }
     J.okey("directions");
     J.open('[');
     for (size_t i = 0; i < dirs.size(); i++) {

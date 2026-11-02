@@ -25,8 +25,40 @@ static Vec add_dirs(const Vec& dX, const Vec& dl, const std::vector<Vec>& Wq) {
     return out;
 }
 
+void fam_matrix(const StepState& st, int K, int NB, int nn, const Vec& e1, double R, double h, int chunk,
+                const std::function<Vec(const std::vector<std::pair<int, int>>&)>& rows4, FamMap& o) {
+    (void)nn;
+    int Kn = K * NB;
+    o.L.assign(size_t(Kn) * Kn, cd(0.0, 0.0));
+    o.rk = st.rk;
+    for (int c0 = 0; c0 < Kn; c0 += chunk) {
+        std::vector<std::pair<int, int>> cols;
+        for (int i = c0; i < std::min(Kn, c0 + chunk); i++) cols.emplace_back(i % NB, i / NB);
+        Vec R4 = rows4(cols);
+        size_t P = size_t(K) * NB;
+        for (size_t qi = 0; qi < cols.size(); qi++) {
+            const cd* v = &R4[4 * qi * P];
+            Vec D(P);
+            for (size_t q = 0; q < P; q++) {               // (8 (R0 - R1) - (R2 - R3)) / (12 h) * act
+                cd d = ct::div(ct::mul(cd(8.0, 0.0), v[q] - v[P + q]) - (v[2 * P + q] - v[3 * P + q]), cd(12 * h, 0.0));
+                D[q] = st.act[q % NB] ? d : cd(0.0, 0.0);
+            }
+            Vec upd = st::correction(D, st.Minv, K, NB, e1, R);
+            if (st.rk) st::hold(upd, st.Wq, st.kept_only ? nn : NB, NB, e1, R);
+            Vec mo = ct::moments_of(upd, K, NB, e1, R);
+            int i = cols[qi].second * NB + cols[qi].first;
+            for (int r = 0; r < Kn; r++) o.L[size_t(r) * Kn + i] = mo[r];
+        }
+    }
+    o.C.assign(size_t(st.rk) * Kn, cd(0.0, 0.0));
+    for (int q = 0; q < st.rk; q++) {
+        Vec t = st::tg_dc(st.Wq[q], NB, e1, R);
+        for (int j = 0; j < NB; j++) o.C[size_t(q) * Kn + j] = std::conj(t[j]);
+    }
+}
+
 void tan_step(const StepState& st, const Seed& seed, double sc, double ctol, int iters, int K, int NB, int nn, const Vec& e1, double R,
-              const std::function<Vec(const Vec*)>& drows, StepOut& o) {
+              const std::function<Vec(const Vec*)>& drows, StepOut& o, const FamMap* fm) {
     o = StepOut();
     int rk = st.rk;
     bool amp_done = false;
@@ -61,6 +93,44 @@ void tan_step(const StepState& st, const Seed& seed, double sc, double ctol, int
     // the forward's step, linearised: X0 = -M^-1 S(strip(C)), the amplitudes from the data rule, then the kept grade's rows corrected
     // against the full rows (amplitudes held)
     Vec dX = st::correction(drows(nullptr), st.Minv, K, NB, e1, R);
+    if (fm && !st.isint && st.has_label) {
+        // the direct solve (n2a_nl tan_step's direct branch)
+        int Kn = K * NB, rkc = int(fm->C.size() / size_t(Kn));
+        dX = amp(dX);
+        auto upd = [&](const Vec& X) {
+            Vec u = st::correction(drows(&X), st.Minv, K, NB, e1, R);
+            if (rk) st::hold(u, st.Wq, st.kept_only ? nn : NB, NB, e1, R);
+            return u;
+        };
+        Vec mu_a = ct::moments_of(dX, K, NB, e1, R);
+        Vec f0 = ct::moments_of(upd(dX), K, NB, e1, R);
+        std::vector<double> Dsc(Kn);
+        for (int m = 0; m < K; m++)
+            for (int j = 0; j < NB; j++) Dsc[size_t(m) * NB + j] = std::pow(R, double(m));
+        Vec A(size_t(Kn + rkc) * Kn), b(size_t(Kn + rkc), cd(0.0, 0.0));
+        double w = 0.0;
+        for (int r = 0; r < Kn; r++)
+            for (int i = 0; i < Kn; i++) {
+                cd z = ct::div(ct::mul(fm->L[size_t(r) * Kn + i], cd(Dsc[i], 0.0)), cd(Dsc[r], 0.0));
+                A[size_t(r) * Kn + i] = z;
+                w = std::max(w, cabs_(z));
+            }
+        w = std::max(w, 1e-300);
+        for (int q = 0; q < rkc; q++)
+            for (int i = 0; i < Kn; i++) A[size_t(Kn + q) * Kn + i] = ct::mul(cd(w, 0.0), ct::mul(fm->C[size_t(q) * Kn + i], cd(Dsc[i], 0.0)));
+        for (int r = 0; r < Kn; r++) b[r] = ct::div(-f0[r], cd(Dsc[r], 0.0));
+        Vec ys = la::lstsq(A, Kn + rkc, Kn, b, 1);
+        Vec mu(Kn);
+        for (int i = 0; i < Kn; i++) mu[i] = mu_a[i] + ct::mul(ys[i], cd(Dsc[i], 0.0));
+        dX = ct::nodes_of(mu, K, NB, e1, R);
+        double r_ = absmax(ct::moments_of(upd(dX), K, NB, e1, R));
+        double sx = std::max(absmax(ct::moments_of(dX, K, NB, e1, R)), sc);
+        double f0m = absmax(f0);
+        o.hh = {f0m / std::max(sx, 1e-300), r_ / std::max(sx, 1e-300)};
+        o.hha = {f0m, r_};
+        o.dX = amp(dX);
+        return;
+    }
     for (int it = 0; it < iters; it++) {
         dX = amp(dX);
         Vec r = drows(&dX);

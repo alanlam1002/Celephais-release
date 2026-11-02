@@ -144,6 +144,11 @@ inline void load_engine(const std::string& dir, Kernel& k, Proj& P, Setup& S, Cf
     }
     auto cent0 = npy_as<double>(A("cent0"));
     k.c.cent = cent0;
+    if (k.c.exact) {                                    // research round 1031: the interned exponents at the recursion's start (n2a_nl CF.xk)
+        std::ifstream xf(dir + "/xk0.npy");
+        if (!xf) throw std::runtime_error("mk: an exact-merge bundle without xk0.npy");
+        k.c.xk = npy_as<double>(A("xk0"));
+    }
     auto gs = [&](const std::string& key) { auto i = B.cfg.find(key); return i == B.cfg.end() ? std::string() : i->second; };
     c.R = B.getd("R", 0.015); c.N = B.geti("N", 96); c.gmax = B.geti("gmax", 8); c.gdata = B.geti("gdata", 1); c.top = B.getd("TOP", 10);
     c.passes = B.geti("passes", 1); c.pass_tol = B.getd("pass_tol", 1e-10); c.newton = B.geti("newton", 6); c.defect = B.geti("defect", 8);
@@ -203,6 +208,9 @@ struct TanOpt {
     std::string which = "all";
     double tol = 1e-10, ctol = tn::TAN_CTOL, h = 1e-3;
     int passes = 20, iters = tn::TAN_ITERS, margin = 2, threads = 1;
+    // research rounds 1030-1031: the direct solve at the family centres (n2a_nl's default; --tan-richardson there = direct=0 here); -1: on
+    // for an exact-merge bundle (the oracle_v2 configuration), off otherwise
+    int direct = -1, direct_chunk = 34;
 };
 
 // n2a_nl's strip: the series without the aligned-g columns (data grades, t < 1, never stripped)
@@ -860,6 +868,45 @@ inline void Engine::tangents(const TanOpt& T) {
             for (auto& z : en.m) m = std::max(m, std::abs(z));
         return m;
     };
+    // the family centres' linear maps (n2a_nl fam_matrix), built once before the directions (the oracle: before its workers fork)
+    std::map<double, tn::FamMap> famL;
+    if (T.direct > 0 || (T.direct < 0 && k_.c.exact)) {
+        for (double g : order_last_) {
+            const tn::StepState& st = steps_.at(kf(g));
+            if (st.isint || !st.has_label) continue;
+            auto t0 = std::chrono::steady_clock::now();
+            double top_g = T.top_local ? std::min(c_.top, std::ceil(g - 1e-9) + T.margin) : c_.top;
+            std::vector<Entry> Cpt = with_grade(k_.c, C_final_, st.X, g, kofs, S_.e1, c_.R);
+            const double es[4] = {T.h, -T.h, 2 * T.h, -2 * T.h};
+            auto rows4 = [&](const std::vector<std::pair<int, int>>& cols) -> Vec {
+                std::vector<Entry> Cq = Cpt;
+                int Bq = 4 * int(cols.size());
+                for (int j = 0; j < NB; j++) {
+                    std::vector<std::pair<int, int>> mine;
+                    for (size_t qi = 0; qi < cols.size(); qi++)
+                        if (cols[qi].first == j) mine.emplace_back(int(qi), cols[qi].second);
+                    if (mine.empty()) continue;
+                    Key t = ckey(k_.c, g + kofs[j]);
+                    int at = -1;
+                    for (size_t e = 0; e < Cq.size(); e++)
+                        if (Cq[e].j == j && keq(Cq[e].t, t)) { at = int(e); break; }
+                    std::vector<cd> base = at >= 0 ? Cq[at].m : std::vector<cd>(K, cd(0.0, 0.0));
+                    std::vector<cd> m(size_t(Bq) * K);
+                    for (int b = 0; b < Bq; b++)
+                        for (int k = 0; k < K; k++) m[size_t(b) * K + k] = base[k];
+                    for (auto& qk : mine)
+                        for (int b = 0; b < 4; b++) m[size_t(4 * qk.first + b) * K + qk.second] += cd(es[b], 0.0);
+                    if (at >= 0) { Cq[at].m = std::move(m); Cq[at].nb = Bq; }
+                    else Cq.push_back(Entry{j, t, Bq, std::move(m)});
+                }
+                k_.run(Cq, nullptr, top_g);
+                return project(k_.c, k_.out, g, Bq, P_.gfam, P_.dE, P_.W, false);
+            };
+            tn::fam_matrix(st, K, NB, nn, S_.e1, c_.R, T.h, T.direct_chunk, rows4, famL[kf(g)]);
+            std::fprintf(stderr, "mk: the family map at %.6f (%s) built in %.0f s\n", g, st.label.c_str(),
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        }
+    }
     auto one = [&](size_t i, Kernel& kc) {
         auto t0 = std::chrono::steady_clock::now();
         const tn::Seed& seed = dirs[i].second;
@@ -957,7 +1004,8 @@ inline void Engine::tangents(const TanOpt& T) {
                         return out;
                     };
                     tn::StepOut so;
-                    tn::tan_step(st, seed, sc, T.ctol, T.iters, K, NB, nn, S_.e1, c_.R, drows, so);
+                    auto fmi = famL.find(kf(g));
+                    tn::tan_step(st, seed, sc, T.ctol, T.iters, K, NB, nn, S_.e1, c_.R, drows, so, fmi == famL.end() ? nullptr : &fmi->second);
                     if (std::getenv("MK_TAN_TRACE")) {                  // diagnostic: per step |dX| (moments) and the update history
                         auto mo = ct::moments_of(so.dX, K, NB, S_.e1, c_.R);
                         double m = 0.0;

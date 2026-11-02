@@ -63,6 +63,11 @@ struct Ctx {
     int K = 6, NF = 64;
     double n = std::sqrt(2.0), Rm = 0.0;
     std::vector<double> cent;                   // the registered off-integer centres (sorted)
+    // research rounds 1029-1031 (spec section 23, stage (i)): the EXACT merge -- every piece keeps its exact exponent (interned within 1e-9 in
+    // xk: a table of exponents, not centres); the algebra never merges, re-expands or registers; reg() is the recursion's registration (the
+    // families, their towers, the announced centres); the merge at readout (mk_operator.hpp piece_at).  Off: the round-1028 merge (canon).
+    bool exact = false;
+    std::vector<double> xk;                     // the interned exact exponents (sorted)
     std::vector<cd> D;                          // d/dtheta on the grid (NF x NF): Dth(v) = v @ D^T
     std::vector<double> fact;
 
@@ -83,9 +88,38 @@ struct Ctx {
     bool order_rev = [] { const char* e = std::getenv("MK_ORDER"); return e && (std::string(e) == "rev" || std::string(e) == "revp"); }();
     double trace_above = 0.0;                                   // diagnostic (MK_TRACE_CANON): new registrations above this value reported
     std::string trace_tag;
+    // n2a_nl.xkey: an int within 1e-9 of an integer, else the interned exponent within 1e-9 (bisect_left on xk at g - 1e-9)
+    Key xkey(double g) {
+        double gi = pyround(g);
+        if (std::abs(g - gi) < 1e-9) return Key{gi, true};
+        auto it = std::lower_bound(xk.begin(), xk.end(), g - 1e-9);
+        if (it != xk.end() && std::abs(*it - g) < 1e-9) return Key{*it, false};
+        xk.insert(it, g);
+        return Key{g, false};
+    }
+    // n2a_nl.register: the recursion's registration (exact mode); otherwise ckey (canon may register)
+    Key reg(double x) {
+        double gi = pyround(x);
+        if (!exact) {
+            if (std::abs(x - gi) < 1e-9) return Key{gi, true};
+            return canon(x).first;
+        }
+        if (std::abs(x - gi) < std::max(Rm, 1e-9)) return Key{gi, true};
+        if (!cent.empty()) {
+            double c = cent[0];
+            for (double c_ : cent)
+                if (std::abs(c_ - x) < std::abs(c - x)) c = c_;
+            if (std::abs(c - x) < std::max(Rm, 1e-9)) return Key{c, false};
+        }
+        Key k = xkey(x);
+        cent.push_back(k.v);
+        std::sort(cent.begin(), cent.end());
+        return k;
+    }
     std::pair<Key, double> canon(double g) {
         double gi = pyround(g);
-        if (std::abs(g - gi) < 1e-9 || (Rm > 0 && std::abs(g - gi) < Rm)) return {Key{gi, true}, g - gi};
+        if (std::abs(g - gi) < 1e-9 || (Rm > 0 && std::abs(g - gi) < Rm && !exact)) return {Key{gi, true}, g - gi};
+        if (exact) return {xkey(g), 0.0};               // stage (i): the algebra keeps the exact exponent, never registers
         if (!cent.empty()) {
             double c = cent[0];
             for (double c_ : cent)
@@ -233,7 +267,7 @@ struct Ctx {
     Ser make(std::vector<std::pair<Key, Piece>>&& d, bool has_e, int e, double top) {
         Ser s;
         s.top = top;
-        if (!cent.empty() || Rm > 0) {                          // n2a_nl.canon_dict
+        if (!cent.empty() || Rm > 0 || exact) {                 // n2a_nl.canon_dict
             std::vector<std::pair<Key, Piece>> out;
             for (auto& kv : d) {
                 Key c;

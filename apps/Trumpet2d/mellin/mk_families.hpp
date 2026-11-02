@@ -56,7 +56,7 @@ inline void announce_register(Ctx& c, const std::vector<std::pair<double, double
     for (auto& cm : cand) {
         double r = std::nearbyint(cm.first * 1e9) / 1e9;
         a[r] = std::max(a.count(r) ? a[r] : 0.0, cm.second);
-        if (cm.second > ANNOUNCE_MIN) add.push_back(ckey(c, cm.first));
+        if (cm.second > ANNOUNCE_MIN) add.push_back(c.reg(cm.first));      // n2a_nl: register(sc_)
     }
     for (auto& kv : a) ann.push_back(Ann{kv.first, kv.second});
 }
@@ -120,7 +120,7 @@ inline void lapse_roots(Ctx& c, const std::vector<cd>& Ms, int NB, const std::ve
             size_t at = fs.find(k);
             if (at != std::string::npos) sgm = std::stod(fs.substr(at + k.size()));
         }
-        o.lapse.emplace_back(L, ckey(c, sgm));
+        o.lapse.emplace_back(L, c.reg(sgm));                    // n2a_nl: register(sgm)
     }
 }
 
@@ -129,7 +129,7 @@ inline std::vector<Key> towers(Ctx& c, const std::vector<Key>& fams, double gmax
     std::vector<Key> t;
     for (auto& sf : fams)
         for (int k = 0; k <= int(gmax); k++)
-            if (sf.v + k <= gmax + 1e-9) t.push_back(ckey(c, sf.v + k));
+            if (sf.v + k <= gmax + 1e-9) t.push_back(c.reg(sf.v + k));      // n2a_nl: register(sf + k)
     return t;
 }
 

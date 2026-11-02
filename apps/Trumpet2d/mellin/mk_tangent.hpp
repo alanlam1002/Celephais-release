@@ -46,13 +46,26 @@ struct StepOut {
     std::vector<double> hh, hha;               // the Richardson updates: relative to the tangent's scale / absolute
 };
 
+// research rounds 1028-1031: the DIRECT solve at a family's own centre (n2a_nl fam_matrix / tan_step's direct branch, the oracle's default):
+// the Richardson update is affine in the block's moments, upd(mu) = f0 + L (mu - mu_a); L (Kn x Kn, Kn = K NB; column k NB + j: moment k of
+// column j) built once per family centre from the rows' four-point stencil about the step's evaluation point (es = h, -h, 2h, -2h on that
+// moment), then -M^-1 and the hold; C (rk x Kn) the hold's constraint (moment 0 orthogonal to the residue directions' tg_dc, conjugated).
+// Each step solves f0 + L delta = 0 with C delta = 0 by least squares in SCALED moments (moment m x R^m: the similarity D^-1 L D).
+struct FamMap {
+    Vec L, C;
+    int rk = 0;
+};
+// rows4(cols): the rows projected at g (4 len(cols), K, NB) at the evaluation point with moment k of column j moved by es[b] (copy 4 qi + b)
+void fam_matrix(const StepState& st, int K, int NB, int nn, const Vec& e1, double R, double h, int chunk,
+                const std::function<Vec(const std::vector<std::pair<int, int>>&)>& rows4, FamMap& o);
+
 constexpr int TAN_ITERS = 12;                  // opt('--tan-iters', 12)
 constexpr double TAN_CTOL = 1e-11;             // opt('--tan-ctol', 1e-11)
 
 // drows(dX): the rows' directional derivative at aligned g (K x NB, the active columns kept): dX given -- the tangent with the block set to
 // dX about the step's evaluation point; dX null -- the base: the stripped tangent about the stripped series
 void tan_step(const StepState& st, const Seed& seed, double sc, double ctol, int iters, int K, int NB, int nn, const Vec& e1, double R,
-              const std::function<Vec(const Vec*)>& drows, StepOut& o);
+              const std::function<Vec(const Vec*)>& drows, StepOut& o, const FamMap* fm = nullptr);
 
 }  // namespace tn
 }  // namespace mk

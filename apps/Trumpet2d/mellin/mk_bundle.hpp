@@ -88,6 +88,12 @@ inline void load_bundle(const std::string& dir, Kernel& k, Proj& P, Bundle& B) {
     auto A = [&](const std::string& n) { return npy_read(dir + "/" + n + ".npy"); };
     int K = B.geti("K", 6), NF = B.geti("NF", 64);
     k.c.init(K, NF, B.getd("n", 0.0), B.getd("Rm", 0.0), npy_cplx(A("D")));
+    {                                                   // research round 1031: the merge (n2a_nl N2A_MERGE): 'exact' (stage (i)) or 'k'
+        auto it = B.cfg.find("merge");
+        std::string m = it == B.cfg.end() ? "k" : it->second;
+        if (m != "exact" && m != "k") throw std::runtime_error("mk: bundle merge '" + m + "' (exact | k)");
+        k.c.exact = m == "exact";
+    }
     // the tape
     auto ops = npy_as<int>(A("tape_ops"));
     auto io = npy_as<int>(A("tape_io"));

@@ -35,6 +35,9 @@ void* mk_new(int K, int NF, double n, double Rm, const double* D) {
 void mk_free(void* h) { delete static_cast<mk::Kernel*>(h); }
 const char* mk_error(void* h) { return static_cast<mk::Kernel*>(h)->err.c_str(); }
 
+void mk_set_exact(void* h, int on) {                    // research round 1031: the exact merge (stage (i)) on / off
+    static_cast<mk::Kernel*>(h)->c.exact = on != 0;
+}
 void mk_set_cent(void* h, const double* c, int nc) {
     auto* k = static_cast<mk::Kernel*>(h);
     k->c.cent.assign(c, c + nc);
@@ -699,6 +702,8 @@ int mk_run_bundle_tan(const char* dir, const char* out, const char* opts, char* 
                 else if (kk == "top_local") T.top_local = v == "1";
                 else if (kk == "no_stall") T.no_stall = v == "1";
                 else if (kk == "mode") T.jvp = v == "jvp";
+                else if (kk == "direct") T.direct = std::stoi(v);
+                else if (kk == "direct_chunk") T.direct_chunk = std::stoi(v);
                 else throw std::runtime_error("mk: unknown tangent option " + kk);
             }
             a = b + 1;

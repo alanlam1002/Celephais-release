@@ -33,12 +33,31 @@ inline Key ckey(Ctx& c, double x) {
     return c.canon(x).first;
 }
 
-// the piece of a row family at grade Gr (n2a_nl.piece_at): nullptr when absent (zeros); beyond the family's validity an error
-inline const Piece* piece_at(Ctx& c, const Ser& s, double Gr) {
+// the piece of a row family at grade Gr (n2a_nl.piece_at): nullptr when absent (zeros); beyond the family's validity an error.  Exact merge
+// (stage (i)): the pieces within Rm of Gr and nearer to it than to any integer or registered centre, each re-expanded once from its exact
+// exponent, summed in the series' order (into buf)
+inline const Piece* piece_at(Ctx& c, const Ser& s, double Gr, Piece& buf) {
     if (Gr > s.top) throw std::runtime_error("mk: grade beyond validity");
-    Key k = ckey(c, Gr);
-    int i = s.find(k);
-    return i < 0 ? nullptr : &s.d[i].second;
+    if (!c.exact) {
+        Key k = ckey(c, Gr);
+        int i = s.find(k);
+        return i < 0 ? nullptr : &s.d[i].second;
+    }
+    double rm = std::max(c.Rm, 1e-9);
+    bool any = false;
+    for (auto& kv : s.d) {
+        double e = kv.first.v, de = e - Gr;
+        if (std::abs(de) >= rm) continue;
+        bool near = false;
+        for (double c_ : c.cent)
+            if (std::abs(c_ - e) < std::abs(de) - 1e-12) { near = true; break; }
+        double gi = Ctx::pyround(e);
+        if (std::abs(e - gi) < std::abs(de) - 1e-12) near = true;
+        if (near) continue;
+        if (!any) { buf = std::abs(de) < 1e-14 ? kv.second : c.shift(kv.second, de); any = true; }
+        else buf = c.padd(buf, std::abs(de) < 1e-14 ? kv.second : c.shift(kv.second, de));
+    }
+    return any ? &buf : nullptr;
 }
 
 // rows projected at aligned g: (B, K, nrows), rows' weights W (nrows x NF); the family / level per row; B the batch of the result
@@ -48,7 +67,8 @@ inline std::vector<cd> project(Ctx& c, const Ser rows[6], double g, int B, const
     std::vector<cd> out(size_t(B) * K * nr, 0.0);
     for (int i = 0; i < nr; i++) {
         if (absent99 && lev[i] >= 99) continue;
-        const Piece* p = piece_at(c, rows[fam[i]], ROWOFF1[fam[i]] + lev[i] + g);
+        Piece buf_;
+        const Piece* p = piece_at(c, rows[fam[i]], ROWOFF1[fam[i]] + lev[i] + g, buf_);
         if (!p) continue;
         const cd* w = &W[size_t(i) * NF];
         for (int b = 0; b < B; b++)

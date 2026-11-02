@@ -718,3 +718,217 @@ int mk_run_bundle_tan(const char* dir, const char* out, const char* opts, char* 
     }
 }
 }  // extern "C"
+
+// ---- M3.5: the operator about the cylinder from the kernel's linearisation (mk_opbuild.hpp) ----
+#include "mk_opbuild.hpp"
+extern "C" {
+// opts 'key=value;...': e0 (1.3137), rows (a file of tall row labels fam@P_D; default: every degree of the family's parity up to the largest
+// column l + 14, kept above rowtol (1e-10) of the family's largest entry; H_c, L_K on E_sigma's degrees), lkdiv (exact | rowwise), edge (12), chunk (34), ng (200)
+int mk_op_build(const char* dir, const char* out, const char* opts, char* err, int errcap) {
+    try {
+        using namespace mk;
+        Kernel k;
+        Proj P;
+        en::Setup S;
+        en::Cfg cf;
+        en::load_engine(dir, k, P, S, cf);
+        Bundle Bd;
+        {
+            std::ifstream f(std::string(dir) + "/config.txt");
+            std::string line;
+            while (std::getline(f, line)) {
+                size_t sp = line.find(' ');
+                if (sp != std::string::npos) Bd.cfg[line.substr(0, sp)] = line.substr(sp + 1);
+            }
+        }
+        double e0 = 1.3137;
+        std::string rowsf, lkdiv = "exact";
+        int edge = 12, chunk = 34, ng = 200;
+        double rowtol = 1e-10;
+        std::string o(opts ? opts : "");
+        size_t a = 0;
+        while (a < o.size()) {
+            size_t b = o.find(';', a);
+            if (b == std::string::npos) b = o.size();
+            std::string it = o.substr(a, b - a);
+            size_t e = it.find('=');
+            if (e != std::string::npos) {
+                std::string kk = it.substr(0, e), v = it.substr(e + 1);
+                if (kk == "e0") e0 = std::stod(v);
+                else if (kk == "rows") rowsf = v;
+                else if (kk == "lkdiv") lkdiv = v;
+                else if (kk == "edge") edge = std::stoi(v);
+                else if (kk == "chunk") chunk = std::stoi(v);
+                else if (kk == "ng") ng = std::stoi(v);
+                else if (kk == "rowtol") rowtol = std::stod(v);
+                else throw std::runtime_error("mk: unknown op-build option " + kk);
+            }
+            a = b + 1;
+        }
+        if (lkdiv != "exact" && lkdiv != "rowwise") throw std::runtime_error("mk: lkdiv exact | rowwise");
+        int nn = int(S.collab.size());
+        std::vector<std::string> cl(nn);
+        std::vector<int> lc(nn);
+        for (int j = 0; j < nn; j++) {
+            size_t p = S.collab[j].find_first_of("0123456789");
+            cl[j] = S.collab[j].substr(0, p);
+            lc[j] = std::stoi(S.collab[j].substr(p));
+        }
+        int lmaxc = *std::max_element(lc.begin(), lc.end());
+        ob::Quad Q;
+        Q.init(k.c.NF, ng);
+        std::vector<int> PL = {-2, -1, 0, 1, 2};
+        double top = Bd.getd("TOP", 9.0);
+        std::vector<int> rf, rD;
+        bool rule = rowsf.empty();
+        if (!rule) {
+            std::ifstream f(rowsf);
+            std::string l;
+            while (std::getline(f, l)) {
+                if (l.empty()) continue;
+                size_t at = l.find("@P");
+                int fi = ob::rowfam(l.substr(0, at));
+                if (fi < 0) continue;                          // M (maximality) has no kernel row
+                rf.push_back(fi);
+                rD.push_back(std::stoi(l.substr(at + 2)));
+            }
+        } else {
+            for (int fi = 0; fi < 6; fi++)
+                for (int D = (fi >= 4 ? 1 : 0); D <= lmaxc + 14; D += 2) { rf.push_back(fi); rD.push_back(D); }
+        }
+        auto op = ob::build(k, nn, rf, rD, PL, e0, top, chunk, lkdiv == "rowwise", Q);
+        if (rule) {
+            // the builder's rule: degrees above rowtol (1e-10) of the family's largest entry; H_c and L_K on E_sigma's degrees (n2a_lk forms
+            // them on every degree of E_q, E_sigma, E_Phi -- not by their own magnitudes)
+            std::vector<double> fmax(6, 0.0), rmax(rf.size(), 0.0);
+            for (size_t r = 0; r < rf.size(); r++)
+                for (size_t ip = 0; ip < PL.size(); ip++)
+                    for (int j = 0; j < nn; j++) {
+                        size_t q = op.at(int(ip), int(r), j);
+                        rmax[r] = std::max({rmax[r], std::abs(op.A[q]), std::abs(op.B[q]), std::abs(op.C[q])});
+                    }
+            for (size_t r = 0; r < rf.size(); r++) fmax[rf[r]] = std::max(fmax[rf[r]], rmax[r]);
+            ob::Op o2;
+            o2.PL = PL; o2.nn = nn; o2.imag = op.imag; o2.bg_ephi = op.bg_ephi;
+            std::vector<size_t> keep;
+            std::vector<char> sig(rf.size(), 0);
+            for (size_t r = 0; r < rf.size(); r++) sig[r] = rmax[r] > rowtol * fmax[rf[r]];
+            for (size_t r = 0; r < rf.size(); r++) {
+                bool k_ = sig[r];
+                if (rf[r] == 0 || rf[r] == 2)
+                    for (size_t r2 = 0; r2 < rf.size(); r2++)
+                        if (rf[r2] == 1 && rD[r2] == rD[r]) k_ = sig[r2];
+                if (k_) { keep.push_back(r); o2.rf.push_back(rf[r]); o2.rD.push_back(rD[r]); }
+            }
+            size_t sz = PL.size() * keep.size() * size_t(nn);
+            o2.A.assign(sz, 0.0); o2.B = o2.A; o2.C = o2.A;
+            for (size_t ip = 0; ip < PL.size(); ip++)
+                for (size_t r = 0; r < keep.size(); r++)
+                    for (int j = 0; j < nn; j++) {
+                        o2.A[o2.at(int(ip), int(r), j)] = op.A[op.at(int(ip), int(keep[r]), j)];
+                        o2.B[o2.at(int(ip), int(r), j)] = op.B[op.at(int(ip), int(keep[r]), j)];
+                        o2.C[o2.at(int(ip), int(r), j)] = op.C[op.at(int(ip), int(keep[r]), j)];
+                    }
+            op = std::move(o2);
+        }
+        int nr = int(op.rf.size());
+        auto rowidx = [&](int fi, int D) {
+            for (int r = 0; r < nr; r++)
+                if (op.rf[r] == fi && op.rD[r] == D) return r;
+            return -1;
+        };
+        // the square rows: n2a_rec.build_ops 'tri' -- column (cl, l) paired with its family's rows (PS E_sigma, PH L_K, BR E_sh^r, QF H_c,
+        // BT E_sh^th, QB E_Q), test function P_l (QF: P_l, BT: P_(l+1), QB: (1 - z^2)^2 P_l), int P_D T on 200 Gauss nodes
+        std::vector<double> gx, gw;
+        ob::gauss_legendre(200, gx, gw);
+        int Dmx = 0;
+        for (int r = 0; r < nr; r++) Dmx = std::max(Dmx, op.rD[r]);
+        Dmx = std::max(Dmx, lmaxc + 1);
+        std::vector<std::vector<double>> PLg(200);
+        for (int g = 0; g < 200; g++) ob::legendre_upto(Dmx, gx[g], PLg[g]);
+        auto pairfam = [](const std::string& c) {
+            static const char* cf[6] = {"QF", "PS", "PH", "BR", "BT", "QB"};
+            static const int rf[6] = {0, 1, 2, 3, 4, 5};             // QF H_c, PS E_sigma, PH L_K, BR E_sh^r, BT E_sh^th, QB E_Q
+            for (int i = 0; i < 6; i++)
+                if (c == cf[i]) return rf[i];
+            return -1;
+        };
+        std::vector<std::vector<double>> Psq(nn, std::vector<double>(nr, 0.0));
+        std::vector<int> kE(nn);
+        for (int j = 0; j < nn; j++) {
+            int fi = pairfam(cl[j]);
+            int lt = cl[j] == "BT" ? lc[j] + 1 : lc[j];
+            for (int r = 0; r < nr; r++) {
+                if (op.rf[r] != fi) continue;
+                double s = 0.0;
+                for (int g = 0; g < 200; g++) {
+                    double T = PLg[g][lt];
+                    if (cl[j] == "QB") T *= (1 - gx[g] * gx[g]) * (1 - gx[g] * gx[g]);
+                    s += gw[g] * PLg[g][op.rD[r]] * T;
+                }
+                Psq[j][r] = s;
+            }
+            kE[j] = (cl[j] == "QF" || cl[j] == "PH" || (cl[j] == "BR" && lc[j] == 0)) ? -1 : 0;
+        }
+        auto sq = ob::select(op, Psq);
+        auto d0 = ob::derive(sq, PL, kE, k.c.n, nullptr);
+        std::vector<int> dEu = d0.dE;
+        bool dEbt0 = Bd.cfg.count("dEbt0") && (Bd.cfg["dEbt0"] == "True" || Bd.cfg["dEbt0"] == "1" || Bd.cfg["dEbt0"] == "true");
+        if (dEbt0)
+            for (int j = 0; j < nn; j++)
+                if (cl[j] == "BT") dEu[j] = 0;
+        auto dsq = ob::derive(sq, PL, kE, k.c.n, &dEu);
+        // the condition rows H_c@P0, E_sh^th@P1; the gate rows (the engine's families, degree <= edge, E_sh^th <= edge + 1)
+        auto unit = [&](const std::vector<int>& rs) {
+            std::vector<std::vector<double>> U(rs.size(), std::vector<double>(nr, 0.0));
+            for (size_t i = 0; i < rs.size(); i++) U[i][rs[i]] = 1.0;
+            return U;
+        };
+        std::vector<int> crow = {rowidx(0, 0), rowidx(4, 1)};
+        if (crow[0] < 0 || crow[1] < 0) throw std::runtime_error("mk: op-build without the condition rows");
+        auto dc = ob::derive(ob::select(op, unit(crow)), PL, kE, k.c.n, nullptr);
+        std::vector<int> grow;
+        for (int r = 0; r < nr; r++)
+            if (op.rD[r] <= (op.rf[r] == 4 ? edge + 1 : edge)) grow.push_back(r);
+        auto gs = ob::select(op, unit(grow));
+        auto dg = ob::derive(gs, PL, kE, k.c.n, nullptr);
+        std::vector<int> live(grow.size(), 0);
+        {
+            std::vector<double> rmx(grow.size(), 0.0), fm(6, 0.0);
+            for (size_t i = 0; i < grow.size(); i++) {
+                for (size_t ip = 0; ip < PL.size(); ip++)
+                    for (int j = 0; j < nn; j++) {
+                        size_t q = (ip * grow.size() + i) * nn + j;
+                        rmx[i] = std::max({rmx[i], std::abs(gs.A[q]), std::abs(gs.B[q]), std::abs(gs.C[q])});
+                    }
+                fm[op.rf[grow[i]]] = std::max(fm[op.rf[grow[i]]], rmx[i]);
+            }
+            for (size_t i = 0; i < grow.size(); i++) live[i] = rmx[i] > 1e-8 * fm[op.rf[grow[i]]] && dg.dE[i] < 99;
+        }
+        // output
+        std::string od(out);
+        mkdir(od.c_str(), 0755);
+        long np_ = long(PL.size());
+        en::npy_write(od + "/A.npy", op.A.data(), "<f8", {np_, long(nr), long(nn)}, 8);
+        en::npy_write(od + "/B.npy", op.B.data(), "<f8", {np_, long(nr), long(nn)}, 8);
+        en::npy_write(od + "/C.npy", op.C.data(), "<f8", {np_, long(nr), long(nn)}, 8);
+        en::npy_write(od + "/PL.npy", PL.data(), "<i4", {np_}, 4);
+        auto wi = [&](const std::string& nm, const std::vector<int>& v) { en::npy_write(od + "/" + nm + ".npy", v.data(), "<i4", {long(v.size())}, 4); };
+        auto wd = [&](const std::string& nm, const std::vector<double>& v) { en::npy_write(od + "/" + nm + ".npy", v.data(), "<f8", {long(v.size())}, 8); };
+        wi("dE", dEu); wd("rw", dsq.rw); wd("cw", dsq.cw); wd("rw_out", dsq.rw_out); wi("kE", kE);
+        wi("cdE", dc.dE); wd("rwc", dc.rw); wi("gt_dE", dg.dE); wi("live", live);
+        std::ofstream rl(od + "/rlab.txt");
+        for (int r = 0; r < nr; r++) rl << ob::ROWS[op.rf[r]] << "@P" << op.rD[r] << "\n";
+        std::ofstream gl(od + "/glab.txt");
+        for (int r : grow) gl << ob::ROWS[op.rf[r]] << "@P" << op.rD[r] << "\n";
+        std::ofstream inf(od + "/info.txt");
+        inf.precision(17);
+        inf << "e0 " << e0 << "\nn " << k.c.n << "\nlkdiv " << lkdiv << "\nimag " << op.imag << "\nrows " << nr << "\ncols " << nn
+            << "\nbg_ephi " << op.bg_ephi[0] << " " << op.bg_ephi[1] << " " << op.bg_ephi[2] << "\n";
+        return 0;
+    } catch (const std::exception& ex) {
+        std::snprintf(err, size_t(errcap), "%s", ex.what());
+        return 1;
+    }
+}
+}  // extern "C"

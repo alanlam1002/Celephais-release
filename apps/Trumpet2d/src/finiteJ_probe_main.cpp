@@ -20,6 +20,7 @@
  */
 
 #include <algorithm>
+#include <functional>
 
 #include <mpi.h>
 
@@ -183,6 +184,10 @@ struct EqIntAdd : Kadath::System_of_eqs {
 // code round 463 part 20 (research round 1005, N3b): the linearised external (Mellin) throat in place of the generated one -- its own target
 #include "stageB_lin.hpp"
 #define SBE_EVAL sbe::LinEval
+#elif defined(TRUMPET_STAGEB_MELLIN)
+// code round 463 M4d (research rounds 1034, 1040): the Mellin throat as native stage-B unknowns -- its own target
+#include "stageB_mellin.hpp"
+#define SBE_EVAL sbe::MellinEval
 #else
 #define SBE_EVAL sbe::Eval
 #endif
@@ -713,8 +718,13 @@ static double g_lsq_rm = 0.0;              // r_m (the stage-B export's RM)
 static double g_lsq_lm_mu = -1.0;          // < 0: off
 static double g_lsq_lm_min = 1e-16;        // --stageB-lsq-lm-min MUMIN: the adaptation's floor (round 461: the drift resumes when mu falls back)
 #endif
+// code round 463 M4d (research round 1040): the throat's COLLECTIVE evaluation points -- g_sb_pre (the values at the current unknowns, every
+// rank: rank 0 runs the native forward and broadcasts) before each residual of the least-squares step, g_sb_prejac (the Jacobian, its columns
+// split across the ranks) before Kadath's column loop; the evaluator's lazy calls then read the caches.  Empty without TRUMPET_STAGEB_MELLIN.
+static std::function<void()> g_sb_pre, g_sb_prejac;
 static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int it, int rank)
 {
+    if (g_sb_pre) g_sb_pre();
 #ifdef TRUMPET_STAGEB_TSPLIT
     struct TsplitOn { TsplitOn() { sbe::tsplit_flag() = true; } ~TsplitOn() { sbe::tsplit_flag() = false; } } tsplit_on;   // round 419
 #endif
@@ -732,6 +742,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
     const bool reuse = g_lsq_jac_reuse && floor_run >= 1 && (rank != 0 || !A_keep.empty());
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<double> mine;
+    if (!reuse && g_sb_prejac) g_sb_prejac();
     if (!reuse) {
     syst.reset_do_col_J_cache();
     for (int c = rank; c < n; c += nproc) {
@@ -784,7 +795,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
                     ism[rw.row] = 1;
                     const std::string& lb = std::get<0>(EI[rw.eq_index]);
                     if (g_lsq_wd1 != 1.0 && lb.rfind("SBM ", 0) == 0 && lb.find(" d1 ") != std::string::npos) ism[rw.row] = 2;
-#ifdef TRUMPET_STAGEB_LIN
+#if defined(TRUMPET_STAGEB_LIN) || defined(TRUMPET_STAGEB_MELLIN)
                     // code round 463 part 22 (research round 1008, N3b): the linear throat's TIKHONOV rows ("SBT TIK g<k> ...", in the least-
                     // squares set through --stageB-lsq-grades) keep W = 1: their weight is the file's (sqrt(w) p / s), not row-max equilibrated
                     if (lb.rfind("SBT TIK ", 0) == 0) ism[rw.row] = 4;
@@ -832,7 +843,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
             if (it == 0) std::cout << "#  lsq: matching-row W scale-free [C0; r_m C1], r_m " << std::setprecision(12) << g_lsq_rm << ", common factor " << cf << "\n";
         }
         if (g_eq_axis_swap) for (int r = 0; r < m; r++) if (ism[r] == 3) R0[r] = 0.0;   // round 440: the dropped rows, weight 0
-#ifdef TRUMPET_STAGEB_LIN
+#if defined(TRUMPET_STAGEB_LIN) || defined(TRUMPET_STAGEB_MELLIN)
         {                                                              // code round 463 part 22: the Tikhonov rows unweighted (W = 1)
             int ntik = 0;
             for (int r = 0; r < m; r++) if (ism[r] == 4) { R0[r] = 1.0; ntik++; }
@@ -933,6 +944,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         syst.xx_to_vars_delta(Y, conte);
     };
     auto phi = [&]() {
+        if (g_sb_pre) g_sb_pre();
         const Kadath::Array<double> F(syst.sec_member());
         double s = 0;
         for (int r = 0; r < m; r++) s += (R0[r] * F(r)) * (R0[r] * F(r));
@@ -1984,6 +1996,9 @@ int main(int argc, char** argv)
             std::vector<double> rv, mv, Jr, Jm;
             ev.values(u, Jv, rv, mv);
             const double tv = ev.tval, tm = ev.tmatch;
+#ifdef TRUMPET_STAGEB_MELLIN
+            ev.precompute_jacobian(u);                          // M4d: collective (every rank runs this test)
+#endif
             ev.jacobian(u, Jv, Jr, Jm);
             fo << "STATE " << ns << " " << ev.NROW << " " << ev.NMK << " " << ev.NU << " " << tv << " " << tm << " " << ev.tjac << "\n";
             for (double v : rv) fo << v << "\n";
@@ -4068,6 +4083,10 @@ int main(int argc, char** argv)
                           << " s, throat Jacobian " << h->njac << " calls " << h->tj << " s\n";
             };
             g_lsq_rm = sbshared->ev.RM;                     // round 403: r_m for --stageB-lsq-w scalefree
+#ifdef TRUMPET_STAGEB_MELLIN
+            g_sb_pre = []() { sbshared->sync(); };          // M4d: the values at the Kadath scalars' current point (collective)
+            g_sb_prejac = []() { sbshared->sync(); sbshared->ev.precompute_jacobian(sbshared->u); };
+#endif
             static std::vector<double> sbu;
             sbu.resize(sbshared->ev.NU);
             char nm[16];

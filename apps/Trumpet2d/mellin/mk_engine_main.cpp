@@ -2,15 +2,23 @@
 //   usage: mk_engine BUNDLE_DIR OUT_DIR [TANGENT_OPTIONS]      (TANGENT_OPTIONS: 'key=value;...', mk_run_bundle_tan's; the forward run then
 //          the tangents, e.g. 'which=all;tol=1e-13;passes=30;no_stall=1;top_local=1;threads=40')
 //          mk_engine --opbuild BUNDLE_DIR OUT_DIR [OPTIONS]   (M3.5: the operator about the bundle's cylinder, mk_op_build's options)
+//          mk_engine --bundle-at BASE_BUNDLE CYL.json K OUT_DIR [OPTIONS]   (M4a: the bundle at a cylinder, the operator rebuilt about it)
 #include <cstdio>
 #include <string>
 extern "C" int mk_run_bundle(const char* dir, const char* out, char* err, int errcap);
 extern "C" int mk_run_bundle_tan(const char* dir, const char* out, const char* opts, char* err, int errcap);
 extern "C" int mk_op_build(const char* dir, const char* out, const char* opts, char* err, int errcap);
+extern "C" int mk_bundle_at(const char* base, const char* cyl, double K, const char* out, const char* opts, char* err, int errcap);
 int main(int argc, char** argv) {
     if (argc >= 4 && std::string(argv[1]) == "--opbuild") {        // M3.5: mk_engine --opbuild BUNDLE_DIR OUT_DIR ['e0=..;rows=..;lkdiv=..']
         char err[1024] = {0};
         int rc = mk_op_build(argv[2], argv[3], argc > 4 ? argv[4] : "", err, sizeof err);
+        if (rc) std::fprintf(stderr, "mk_engine: %s\n", err);
+        return rc;
+    }
+    if (argc >= 6 && std::string(argv[1]) == "--bundle-at") {      // M4a: mk_engine --bundle-at BASE CYL.json K OUT ['opbuild options']
+        char err[1024] = {0};
+        int rc = mk_bundle_at(argv[2], argv[3], std::stod(argv[4]), argv[5], argc > 6 ? argv[6] : "", err, sizeof err);
         if (rc) std::fprintf(stderr, "mk_engine: %s\n", err);
         return rc;
     }

@@ -932,3 +932,89 @@ int mk_op_build(const char* dir, const char* out, const char* opts, char* err, i
     }
 }
 }  // extern "C"
+
+// ---- M4a: the setup bundle at a cylinder (mk_cylinder.hpp) ----
+#include "mk_cylinder.hpp"
+
+#include <algorithm>
+#include <charconv>
+#include <filesystem>
+extern "C" {
+// base: a setup bundle of the same set-up (any cylinder); cyl: an n2a_nl cylinder file; K: the lapse normalisation; out: the new bundle;
+// opts: mk_op_build's (lkdiv defaults to exact -- the method's convention, research round 1036).  The cylinder's arrays and scalars replaced,
+// the operator built natively about the new cylinder (out/opbuild) and its derived quantities copied into the bundle.
+int mk_bundle_at(const char* base, const char* cyl, double K, const char* out, const char* opts, char* err, int errcap) {
+    try {
+        namespace fs = std::filesystem;
+        using namespace mk;
+        std::string od(out), bd(base);
+        fs::create_directories(od);
+        for (const auto& e : fs::directory_iterator(bd))
+            if (e.is_regular_file()) fs::copy_file(e.path(), fs::path(od) / e.path().filename(), fs::copy_options::overwrite_existing);
+        auto C = cy::cylinder_from(cy::read_json_numbers(cyl));
+        auto th = npy_as<double>(npy_read(bd + "/TH.npy"));
+        long NF = long(th.size());
+        auto vals = cy::cyl_vals(C, th);
+        en::npy_write(od + "/cyl_vals.npy", vals.data(), "<f8", {6, NF}, 8);
+        // (3, NF): 1 / r, Ph / r, r -- Ph / r's constant piece is K, as the oracle forms it: n2a_nl.C0 passes K through sympy at 15 significant
+        // digits (J = 0.10: 1.11164503925951 for K = 1.1116450392595139, 3.4e-15 relative) -- mirrored, so the forward can be gated bitwise
+        char k15[40];
+        std::snprintf(k15, sizeof k15, "%.15g", K);
+        auto c0 = npy_cplx(npy_read(bd + "/cyl_c0.npy"));
+        for (long g = 0; g < NF; g++) c0[size_t(NF + g)] = std::complex<double>(std::stod(k15), 0.0);
+        en::npy_write(od + "/cyl_c0.npy", c0.data(), "<c16", {3, NF}, 16);
+        {                                                               // config.txt: n, bnorm (= c), Ph (= K)
+            std::ifstream f(bd + "/config.txt");
+            std::ostringstream o;
+            o.precision(17);
+            std::string line;
+            while (std::getline(f, line)) {
+                std::string k_ = line.substr(0, line.find(' '));
+                auto rp = [](double v) { char b_[32]; auto r_ = std::to_chars(b_, b_ + 32, v); return std::string(b_, r_.ptr); };   // repr's digits
+                if (k_ == "n") o << "n " << rp(C.n) << "\n";
+                else if (k_ == "bnorm") o << "bnorm " << rp(C.c) << "\n";
+                else if (k_ == "Ph") o << "Ph " << rp(K) << "\n";
+                else o << line << "\n";
+            }
+            std::ofstream(od + "/config.txt") << o.str();
+        }
+        std::string oo(opts ? opts : "");
+        if (oo.find("lkdiv=") == std::string::npos) oo += (oo.empty() ? "" : ";") + std::string("lkdiv=exact");
+        char e2[1024] = {0};
+        std::string ob = od + "/opbuild";
+        if (mk_op_build(od.c_str(), ob.c_str(), oo.c_str(), e2, sizeof e2)) throw std::runtime_error(std::string("op-build: ") + e2);
+        for (const char* nm : {"dE", "rw", "cw", "rw_out", "kE", "cdE", "rwc"})
+            fs::copy_file(fs::path(ob) / (std::string(nm) + ".npy"), fs::path(od) / (std::string(nm) + ".npy"), fs::copy_options::overwrite_existing);
+        // the gate rows in the bundle's order -- the operator file's row order (n3b_linthroat's packing: E_sigma, E_sh^r, E_sh^th, E_Q, L_K, H_c, each
+        // by degree), the build's own is the kernel's family order; the families checked against the base bundle's gt_fam
+        {
+            std::vector<std::pair<int, int>> gl;
+            std::ifstream f(ob + "/glab.txt");
+            std::string l;
+            while (std::getline(f, l))
+                if (!l.empty()) gl.emplace_back(ob::rowfam(l.substr(0, l.find("@P"))), std::stoi(l.substr(l.find("@P") + 2)));
+            static const int forder[6] = {5, 0, 4, 1, 2, 3};          // kernel family (H_c, E_sigma, L_K, E_sh^r, E_sh^th, E_Q) -> its place in the file
+            std::vector<size_t> idx(gl.size());
+            for (size_t i = 0; i < idx.size(); i++) idx[i] = i;
+            std::stable_sort(idx.begin(), idx.end(), [&](size_t x, size_t y) {
+                return std::make_pair(forder[gl[x].first], gl[x].second) < std::make_pair(forder[gl[y].first], gl[y].second);
+            });
+            auto gd = npy_as<int>(npy_read(ob + "/gt_dE.npy")), lv = npy_as<int>(npy_read(ob + "/live.npy"));
+            auto gf = npy_as<int>(npy_read(bd + "/gt_fam.npy"));
+            if (gf.size() != idx.size()) throw std::runtime_error("mk: bundle-at: " + std::to_string(idx.size()) + " gate rows against the base's " + std::to_string(gf.size()));
+            std::vector<int> gd2(idx.size()), lv2(idx.size());
+            for (size_t i = 0; i < idx.size(); i++) {
+                if (gl[idx[i]].first != gf[i]) throw std::runtime_error("mk: bundle-at: gate row " + std::to_string(i) + "'s family differs from the base's");
+                gd2[i] = gd[idx[i]];
+                lv2[i] = lv[idx[i]];
+            }
+            en::npy_write(od + "/gt_dE.npy", gd2.data(), "<i4", {long(gd2.size())}, 4);
+            en::npy_write(od + "/live.npy", lv2.data(), "<i4", {long(lv2.size())}, 4);
+        }
+        return 0;
+    } catch (const std::exception& ex) {
+        std::snprintf(err, size_t(errcap), "%s", ex.what());
+        return 1;
+    }
+}
+}  // extern "C"

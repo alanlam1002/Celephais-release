@@ -952,6 +952,36 @@ int mk_bundle_at(const char* base, const char* cyl, double K, const char* out, c
         for (const auto& e : fs::directory_iterator(bd))
             if (e.is_regular_file()) fs::copy_file(e.path(), fs::path(od) / e.path().filename(), fs::copy_options::overwrite_existing);
         auto C = cy::cylinder_from(cy::read_json_numbers(cyl));
+        // M4c: 'perturb=KEY:DELTA' in opts -- one grade-0 parameter moved (n3b_linthroat's names without 'cyl ': uJ, P_shapeJ, qJ, QJ, bJ, btJ, c, n,
+        // K; cyl_dict's rule: c moves b_0 with it), for the Jacobian's grade-0 columns; the remaining options go to the operator build
+        std::string oo(opts ? opts : "");
+        {
+            size_t at = oo.find("perturb=");
+            if (at != std::string::npos) {
+                size_t e = oo.find(';', at);
+                std::string it = oo.substr(at + 8, (e == std::string::npos ? oo.size() : e) - at - 8);
+                oo.erase(at, (e == std::string::npos ? oo.size() : e + 1) - at);
+                std::string key = it.substr(0, it.find(':'));
+                double dv = std::stod(it.substr(it.find(':') + 1));
+                size_t dg = key.find_first_of("0123456789");
+                std::string fam = key.substr(0, dg);
+                auto bump = [&](std::vector<double>& v, int j) { if (int(v.size()) <= j) v.resize(size_t(j) + 1, 0.0); v[size_t(j)] += dv; };
+                if (key == "c") { C.c += dv; if (!C.b.empty()) C.b[0] = C.c; }
+                else if (key == "n") C.n += dv;
+                else if (key == "K") K += dv;
+                else if (dg == std::string::npos) throw std::runtime_error("mk: bundle-at: perturb " + key);
+                else {
+                    int j = std::stoi(key.substr(dg));
+                    if (fam == "u") bump(C.u, j);
+                    else if (fam == "P_shape") bump(C.P, j);
+                    else if (fam == "q") bump(C.q, j);
+                    else if (fam == "Q") bump(C.Q, j);
+                    else if (fam == "b") bump(C.b, j);
+                    else if (fam == "bt") bump(C.bt, j);
+                    else throw std::runtime_error("mk: bundle-at: perturb " + key);
+                }
+            }
+        }
         auto th = npy_as<double>(npy_read(bd + "/TH.npy"));
         long NF = long(th.size());
         auto vals = cy::cyl_vals(C, th);
@@ -978,7 +1008,6 @@ int mk_bundle_at(const char* base, const char* cyl, double K, const char* out, c
             }
             std::ofstream(od + "/config.txt") << o.str();
         }
-        std::string oo(opts ? opts : "");
         if (oo.find("lkdiv=") == std::string::npos) oo += (oo.empty() ? "" : ";") + std::string("lkdiv=exact");
         char e2[1024] = {0};
         std::string ob = od + "/opbuild";
@@ -1011,6 +1040,86 @@ int mk_bundle_at(const char* base, const char* cyl, double K, const char* out, c
             en::npy_write(od + "/gt_dE.npy", gd2.data(), "<i4", {long(gd2.size())}, 4);
             en::npy_write(od + "/live.npy", lv2.data(), "<i4", {long(lv2.size())}, 4);
         }
+        return 0;
+    } catch (const std::exception& ex) {
+        std::snprintf(err, size_t(errcap), "%s", ex.what());
+        return 1;
+    }
+}
+}  // extern "C"
+
+// ---- M4b: the Mellin parameters written into a bundle (the stage-B unknowns p; n3a_fit's names) ----
+#include <regex>
+extern "C" {
+// params: a file of lines 'NAME VALUE' (NAME may contain spaces; the value is the last field) -- 'FAML@tT' a grade-T datum (the initial series
+// C0, moment 0, in the file's order; the config's set_data), 'tgt X' a residue target (tgt), 'lapse lL' / 'spurious ...' a family amplitude
+// (set_offl), 'gauge lL' a gauge amplitude (gauge) -- as n3a_fit.Problem.command writes the engine's flags
+int mk_set_params(const char* dir, const char* params, char* err, int errcap) {
+    try {
+        using namespace mk;
+        std::string d(dir);
+        std::vector<std::string> collab;
+        {
+            std::ifstream f(d + "/collab.txt");
+            std::string l;
+            while (std::getline(f, l))
+                if (!l.empty()) collab.push_back(l);
+        }
+        auto rp = [](double v) { char b_[32]; auto r_ = std::to_chars(b_, b_ + 32, v); return std::string(b_, r_.ptr); };
+        std::string setd, tgt, offl, gauge;
+        std::vector<int> col, isint;
+        std::vector<double> key;
+        std::vector<std::complex<double>> mom;
+        int K = 0;
+        {
+            std::ifstream f(d + "/config.txt");
+            std::string l;
+            while (std::getline(f, l))
+                if (l.rfind("K ", 0) == 0) K = std::stoi(l.substr(2));
+        }
+        if (K <= 0) throw std::runtime_error("mk: set-params: no K in the config");
+        std::ifstream f(params);
+        if (!f) throw std::runtime_error(std::string("mk: set-params: cannot read ") + params);
+        std::string l;
+        static const std::regex dat("([A-Z]+)([0-9]+)@t([0-9]+)");
+        while (std::getline(f, l)) {
+            size_t sp = l.find_last_of(" \t");
+            if (l.empty() || sp == std::string::npos) continue;
+            std::string nm = l.substr(0, sp), vs = l.substr(sp + 1);
+            while (!nm.empty() && (nm.back() == ' ' || nm.back() == '\t')) nm.pop_back();
+            double v = std::stod(vs);
+            auto add = [&](std::string& s, const std::string& item, char sep) { s += (s.empty() ? "" : std::string(1, sep)) + item; };
+            std::smatch m;
+            if (nm.rfind("tgt ", 0) == 0) add(tgt, nm.substr(4) + "=" + rp(v), ';');
+            else if (nm.rfind("lapse ", 0) == 0 || nm.rfind("spurious ", 0) == 0) add(offl, nm + "=" + rp(v), ';');
+            else if (nm.rfind("gauge ", 0) == 0) add(gauge, nm.substr(6) + "=" + rp(v), ';');
+            else if (std::regex_match(nm, m, dat)) {
+                std::string cl = m[1].str() + m[2].str();
+                auto it = std::find(collab.begin(), collab.end(), cl);
+                if (it == collab.end()) throw std::runtime_error("mk: set-params: no column " + cl);
+                add(setd, nm + "=" + rp(v), ',');
+                col.push_back(int(it - collab.begin()));
+                key.push_back(std::stod(m[3].str()));
+                isint.push_back(1);
+                for (int q = 0; q < K; q++) mom.emplace_back(q == 0 ? v : 0.0, 0.0);
+            } else throw std::runtime_error("mk: set-params: unknown parameter '" + nm + "'");
+        }
+        en::npy_write(d + "/C0_col.npy", col.data(), "<i4", {long(col.size())}, 4);
+        en::npy_write(d + "/C0_key.npy", key.data(), "<f8", {long(key.size())}, 8);
+        en::npy_write(d + "/C0_isint.npy", isint.data(), "<i4", {long(isint.size())}, 4);
+        en::npy_write(d + "/C0_mom.npy", mom.data(), "<c16", {long(col.size()), long(K)}, 16);
+        std::ifstream cf(d + "/config.txt");
+        std::ostringstream o;
+        while (std::getline(cf, l)) {
+            std::string k_ = l.substr(0, l.find(' '));
+            if (k_ == "set_data") o << "set_data " << setd << "\n";
+            else if (k_ == "tgt") o << "tgt " << tgt << "\n";
+            else if (k_ == "set_offl") o << "set_offl " << offl << "\n";
+            else if (k_ == "gauge") o << "gauge " << gauge << "\n";
+            else o << l << "\n";
+        }
+        cf.close();
+        std::ofstream(d + "/config.txt") << o.str();
         return 0;
     } catch (const std::exception& ex) {
         std::snprintf(err, size_t(errcap), "%s", ex.what());

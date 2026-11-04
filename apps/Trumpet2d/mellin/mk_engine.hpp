@@ -870,7 +870,7 @@ inline void Engine::tangents(const TanOpt& T) {
     };
     // the family centres' linear maps (n2a_nl fam_matrix), built once before the directions (the oracle: before its workers fork)
     std::map<double, tn::FamMap> famL;
-    if (T.direct > 0 || (T.direct < 0 && k_.c.exact)) {
+    if (!dirs.empty() && (T.direct > 0 || (T.direct < 0 && k_.c.exact))) {      // (M4b: no directions, no family maps)
         for (double g : order_last_) {
             const tn::StepState& st = steps_.at(kf(g));
             if (st.isint || !st.has_label) continue;

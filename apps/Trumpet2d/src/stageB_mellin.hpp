@@ -13,7 +13,7 @@
 // and jacobian() then returns the cached matrix (an error if u moved).
 // Config (whitespace-separated, written by scripts/n3b_linthroat.py m4):
 //   MELLIN 1 | BASE dir | CYL template.json | WORK dir | RM r | KCYL index-of-'cyl K' | UNK NU, NU x (kind name-with-underscores u0 h)
-//   | MKEYS NMK, NMK x (F d k kept) | CUT value, or 'rulec EPS_TAN' | RANK r (-1: by the cut at the first Jacobian) | TIK NT sw, NT x (index scale)
+//   | MKEYS NMK, NMK x (F d k kept) | CUT value, or 'rulec EPS_TAN' | RANK r (-1: by the cut at the first Jacobian) | TIK NT sw, NT x (index scale centre)
 //   | TANOPT options | END
 // CUT rulec (research rounds 1008-1009, 1038: n3b_linthroat's 'rulec', eps_J measured once per J step): at the J step's first Jacobian the
 // grade-0 columns also at +-2h (Richardson), eps_J central = ||(J_c(2h) - J_c(h)) / 3||_2 / s_0 in the cut's column-scaled eq space (eps_J
@@ -184,7 +184,7 @@ class MellinEval {
     bool rule = false;                           // CUT rulec: the cut from the measured accuracies at the first Jacobian
     double eps_tan = 0, tau = 0, eps_c = -1, eps_f = -1;
     std::vector<int> tik_i;
-    std::vector<double> tik_s;
+    std::vector<double> tik_s, tik_c;            // (tik_c: the prior's centre -- research round 1043, the J-predicted value; 0 before)
     // the cache
     std::vector<double> uv, uj;                  // the points of the cached values and Jacobian
     std::vector<double> H, M;                    // eq and mk outputs at uv
@@ -229,8 +229,8 @@ class MellinEval {
         }
         need("RANK"); in >> rank_fixed;
         need("TIK"); in >> ntik >> sw;
-        tik_i.resize(ntik); tik_s.resize(ntik);
-        for (int k = 0; k < ntik; k++) in >> tik_i[k] >> tik_s[k];
+        tik_i.resize(ntik); tik_s.resize(ntik); tik_c.assign(ntik, 0.0);
+        for (int k = 0; k < ntik; k++) in >> tik_i[k] >> tik_s[k] >> tik_c[k];
         need("TANOPT"); in >> tanopt;
         need("END");
         if (!in) throw std::runtime_error("mellin: truncated config " + path);
@@ -261,6 +261,12 @@ class MellinEval {
 
     // ---- one engine evaluation (this rank alone): the outputs' labels and values; tangent directions 'which' ('|'-separated) when not
     // empty, their output derivatives returned in dv (per direction, over the same labels) ----
+    std::vector<std::string> last_lab;           // the last forward's outputs (forward(): the engine call guarded, then read here)
+    std::vector<double> last_val;
+    int nfail = 0;                               // failed forwards at trial points (round 1043)
+    static constexpr double FAIL_VALUE = 1e100;  // a failed forward's outputs: an infinite residual to the line search, finite in its norms
+    void engine_last(std::vector<std::string>& lab, std::vector<double>& val) const { lab = last_lab; val = last_val; }
+
     void engine(const std::vector<double>& u, int pert, double dlt, const std::string& which, const std::string& tag,
                 std::vector<std::string>& lab, std::vector<double>& val, std::map<std::string, std::vector<double>>* dv)
     {
@@ -330,6 +336,7 @@ class MellinEval {
         std::string fj = mel::slurp(d + "/run/fit.json");
         lab = mel::json_strings(fj, "labels");
         val = mel::json_numbers(fj, "base");
+        if (tag == "v") { last_lab = lab; last_val = val; }
         if (dv && !which.empty()) {
             std::string tj = mel::slurp(d + "/run/tangent.json");
             // directions: [{"name": ..., "index": ...}, ...]
@@ -372,11 +379,35 @@ class MellinEval {
     void forward(const std::vector<double>& u)
     {
         const double t0 = MPI_Wtime();
-        int nE = 0, nM = 0;
+        int nE = 0, nM = 0, failed = 0;
         if (mpirank == 0) {
             std::vector<std::string> lab;
             std::vector<double> val;
-            engine(u, -1, 0.0, "", "v", lab, val, nullptr);
+            // research round 1043: a failed forward at a trial point (an engine error, or a non-finite output) counts as an INFINITE residual
+            // -- the line search backtracks -- and is logged; at the first evaluation (the start) it is an error
+            try {
+                engine(u, -1, 0.0, "", "v", lab, val, nullptr);
+                for (double v : val) if (!std::isfinite(v)) throw std::runtime_error("a non-finite output");
+            } catch (const std::exception& ex) {
+                if (eqlab.empty()) throw;
+                failed = 1;
+                std::cout << "#  mellin: the forward FAILED at a trial point (" << ex.what() << "): an infinite residual, the line search backtracks\n" << std::flush;
+            }
+        }
+        MPI_Bcast(&failed, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        if (failed) {
+            nfail++;
+            H.assign(eqlab.empty() ? static_cast<size_t>(neq) : eqlab.size(), FAIL_VALUE);
+            M.assign(static_cast<size_t>(NMK), FAIL_VALUE);
+            neq = static_cast<int>(H.size());
+            uv = u;
+            tval += MPI_Wtime() - t0;
+            return;
+        }
+        if (mpirank == 0) {
+            std::vector<std::string> lab;
+            std::vector<double> val;
+            engine_last(lab, val);
             if (eqlab.empty()) {                                  // the label sets from the first evaluation (the base's)
                 std::vector<double> cs;
                 static const std::regex num("[0-9]+\\.[0-9]{6}");
@@ -699,7 +730,7 @@ class MellinEval {
             for (int k = 0; k < neq; k++) acc += Ur[static_cast<size_t>(c) * neq + k] * H[k];
             rv[c] = acc;
         }
-        for (int k = 0; k < ntik; k++) rv[rk + k] = sw * u[tik_i[k]] / tik_s[k];   // (sw: the square-root weight, write_lin_full's tik_sw)
+        for (int k = 0; k < ntik; k++) rv[rk + k] = sw * (u[tik_i[k]] - tik_c[k]) / tik_s[k];   // (sw: the square-root weight, write_lin_full's tik_sw)
         mv = M;
     }
 

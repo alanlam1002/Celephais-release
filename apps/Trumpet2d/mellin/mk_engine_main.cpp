@@ -3,7 +3,7 @@
 //          the tangents, e.g. 'which=all;tol=1e-13;passes=30;no_stall=1;top_local=1;threads=40')
 //          mk_engine --opbuild BUNDLE_DIR OUT_DIR [OPTIONS]   (M3.5: the operator about the bundle's cylinder, mk_op_build's options)
 //          mk_engine --bundle-at BASE_BUNDLE CYL.json K OUT_DIR [OPTIONS]   (M4a: the bundle at a cylinder, the operator rebuilt about it)
-//          mk_engine --values BASE_BUNDLE CYL.json K PARAMS OUT_DIR [TANGENT_OPTIONS]   (M4b: the throat at [theta; p] -- the bundle at the
+//          mk_engine --values BASE_BUNDLE CYL.json K PARAMS OUT_DIR [TANGENT_OPTIONS [OPBUILD_OPTIONS]]   (M4b: the throat at [theta; p] -- the bundle at the
 //                    cylinder, the parameters written in, the forward and the fit's outputs: OUT_DIR/run/fit.json; default 'which=none')
 //          mk_engine --column BASE_BUNDLE CYL.json K PARAMS KEY DELTA OUT_DIR   (M4c: --values with one grade-0 parameter moved by DELTA)
 #include <cstdio>
@@ -20,9 +20,9 @@ int main(int argc, char** argv) {
         if (rc) std::fprintf(stderr, "mk_engine: %s\n", err);
         return rc;
     }
-    if (argc >= 9 && std::string(argv[1]) == "--column") {         // M4c: mk_engine --column BASE CYL.json K PARAMS KEY DELTA OUT
+    if (argc >= 9 && std::string(argv[1]) == "--column") {         // M4c: mk_engine --column BASE CYL.json K PARAMS KEY DELTA OUT ['opbuild options']
         char err[1024] = {0};
-        std::string out(argv[8]), pert = std::string("perturb=") + argv[6] + ":" + argv[7];
+        std::string out(argv[8]), pert = std::string("perturb=") + argv[6] + ":" + argv[7] + (argc > 9 ? std::string(";") + argv[9] : std::string());
         int rc = mk_bundle_at(argv[2], argv[3], std::stod(argv[4]), argv[8], pert.c_str(), err, sizeof err);
         if (!rc) rc = mk_set_params(argv[8], argv[5], err, sizeof err);
         if (!rc) rc = mk_run_bundle_tan(argv[8], (out + "/run").c_str(), "which=none", err, sizeof err);
@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
     if (argc >= 7 && std::string(argv[1]) == "--values") {         // M4b: mk_engine --values BASE CYL.json K PARAMS OUT ['tangent options']
         char err[1024] = {0};
         std::string out(argv[6]);
-        int rc = mk_bundle_at(argv[2], argv[3], std::stod(argv[4]), argv[6], "", err, sizeof err);
+        int rc = mk_bundle_at(argv[2], argv[3], std::stod(argv[4]), argv[6], argc > 8 ? argv[8] : "", err, sizeof err);
         if (!rc) rc = mk_set_params(argv[6], argv[5], err, sizeof err);
         if (!rc) rc = mk_run_bundle_tan(argv[6], (out + "/run").c_str(), argc > 7 ? argv[7] : "which=none", err, sizeof err);
         if (rc) std::fprintf(stderr, "mk_engine: %s\n", err);

@@ -237,11 +237,15 @@ struct Derived {
 };
 
 // build_ops (kE fixed): pm = the first level where |A|, |B|, |C| > 1e-7 x the row's largest; dE = min_j pm + kE_j; rw, cw from the leading
-// operator at sigma 0.37 + 0.11i (levE = dE - kE); rw_out (--rw-out-used) at the levels after the BT rows' change (dEbt0: BT rows -> 0)
-inline Derived derive(const Sel& s, const std::vector<int>& PL, const std::vector<int>& kE, double n, const std::vector<int>* dE_used) {
+// operator at sigma 0.37 + 0.11i (levE = dE - kE); rw_out (--rw-out-used) at the levels after the BT rows' change (dEbt0: BT rows -> 0).
+// dE_fix (M4e, the levels frozen per J step): the rows' levels given, not decided -- the 1e-7 test is a discrete decision, and a non-Kerr
+// b(theta) moves the BR l >= 8 rows' level -2 term across it (J 0.10: b1 ~ 4e-9), a structural jump inside a finite difference
+inline Derived derive(const Sel& s, const std::vector<int>& PL, const std::vector<int>& kE, double n, const std::vector<int>* dE_used,
+                      const std::vector<int>* dE_fix = nullptr) {
     int np_ = int(PL.size()), nr = s.nr, nn = int(kE.size());
     Derived d;
     d.dE.assign(nr, 99);
+    if (dE_fix && int(dE_fix->size()) != nr) throw std::runtime_error("mk: op-build: frozen levels for " + std::to_string(dE_fix->size()) + " rows, the build has " + std::to_string(nr));
     auto mag = [&](int ip, int i, int j) {
         size_t a = (size_t(ip) * nr + i) * nn + j;
         return std::max({std::abs(s.A[a]), std::abs(s.B[a]), std::abs(s.C[a])});
@@ -258,6 +262,7 @@ inline Derived derive(const Sel& s, const std::vector<int>& PL, const std::vecto
             if (pm < 99) d.dE[i] = std::min(d.dE[i], pm + kE[j]);
         }
     }
+    if (dE_fix) d.dE = *dE_fix;
     auto lead = [&](const std::vector<int>& dE_) {
         std::vector<cd> M(size_t(nr) * nn, 0.0);
         cd sig(0.37, 0.11);

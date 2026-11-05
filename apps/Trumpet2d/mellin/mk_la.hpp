@@ -78,6 +78,21 @@ inline std::vector<cd> lstsq(std::vector<cd> A, int m, int n, const std::vector<
     return Bx;
 }
 
+// least squares by the complete orthogonal factorisation (scipy.linalg.lstsq lapack_driver='gelsy', cond None: rcond = eps) -- n2a_nl's
+// fallback where gelsd fails to converge (code round 1036)
+inline std::vector<cd> lstsq_gelsy(std::vector<cd> A, int m, int n, const std::vector<cd>& B, int nrhs) {
+    int ld = std::max(m, n);
+    std::vector<cd> Bx(size_t(ld) * nrhs, 0.0);
+    for (int i = 0; i < m; i++)
+        for (int r = 0; r < nrhs; r++) Bx[size_t(i) * nrhs + r] = B[size_t(i) * nrhs + r];
+    std::vector<lapack_int> jpvt(size_t(n), 0);
+    lapack_int rk = 0;
+    check(LAPACKE_zgelsy(LAPACK_ROW_MAJOR, m, n, nrhs, A.data(), n, Bx.data(), nrhs, jpvt.data(), std::numeric_limits<double>::epsilon(), &rk),
+          "zgelsy");
+    Bx.resize(size_t(n) * nrhs);
+    return Bx;
+}
+
 // least squares with an explicit rcond (np.polyfit: rcond = len(x) * eps)
 inline std::vector<cd> lstsq_rc(std::vector<cd> A, int m, int n, const std::vector<cd>& B, int nrhs, double rcond) {
     int ld = std::max(m, n);

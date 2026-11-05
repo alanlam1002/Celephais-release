@@ -723,7 +723,9 @@ int mk_run_bundle_tan(const char* dir, const char* out, const char* opts, char* 
 #include "mk_opbuild.hpp"
 extern "C" {
 // opts 'key=value;...': e0 (1.3137), rows (a file of tall row labels fam@P_D; default: every degree of the family's parity up to the largest
-// column l + 14, kept above rowtol (1e-10) of the family's largest entry; H_c, L_K on E_sigma's degrees), lkdiv (exact | rowwise), edge (12), chunk (34), ng (200)
+// column l + 14, kept above rowtol (1e-10) of the family's largest entry; H_c, L_K on E_sigma's degrees), lkdiv (exact | rowwise), edge (12), chunk (34), ng (200);
+// levels_out=PATH / levels_in=PATH (M4e: the structure frozen per J step) -- the build's discrete decisions written / reused: the tall rows
+// (PATH.rows, as 'rows'), the square, condition and gate rows' leading levels and the gate rows' liveness (PATH)
 int mk_op_build(const char* dir, const char* out, const char* opts, char* err, int errcap) {
     try {
         using namespace mk;
@@ -742,7 +744,7 @@ int mk_op_build(const char* dir, const char* out, const char* opts, char* err, i
             }
         }
         double e0 = 1.3137;
-        std::string rowsf, lkdiv = "exact";
+        std::string rowsf, lkdiv = "exact", lvin, lvout;
         int edge = 12, chunk = 34, ng = 200;
         double rowtol = 1e-10;
         std::string o(opts ? opts : "");
@@ -761,11 +763,30 @@ int mk_op_build(const char* dir, const char* out, const char* opts, char* err, i
                 else if (kk == "chunk") chunk = std::stoi(v);
                 else if (kk == "ng") ng = std::stoi(v);
                 else if (kk == "rowtol") rowtol = std::stod(v);
+                else if (kk == "levels_in") lvin = v;
+                else if (kk == "levels_out") lvout = v;
                 else throw std::runtime_error("mk: unknown op-build option " + kk);
             }
             a = b + 1;
         }
         if (lkdiv != "exact" && lkdiv != "rowwise") throw std::runtime_error("mk: lkdiv exact | rowwise");
+        // the frozen structure (levels_in): its rows as 'rows', its levels and liveness below
+        std::map<std::string, std::vector<int>> LV;
+        if (!lvin.empty()) {
+            if (rowsf.empty()) rowsf = lvin + ".rows";
+            std::ifstream f(lvin);
+            if (!f) throw std::runtime_error("mk: op-build: cannot read " + lvin);
+            std::string key;
+            size_t cnt;
+            while (f >> key >> cnt) {
+                std::vector<int> v(cnt);
+                for (auto& x : v) f >> x;
+                LV[key] = v;
+            }
+            for (const char* key_ : {"D0", "DC", "DG", "LIVE"})
+                if (!LV.count(key_)) throw std::runtime_error(std::string("mk: op-build: ") + lvin + " without " + key_);
+        }
+        auto fix = [&](const char* key_) { return lvin.empty() ? nullptr : &LV[key_]; };
         int nn = int(S.collab.size());
         std::vector<std::string> cl(nn);
         std::vector<int> lc(nn);
@@ -871,13 +892,13 @@ int mk_op_build(const char* dir, const char* out, const char* opts, char* err, i
             kE[j] = (cl[j] == "QF" || cl[j] == "PH" || (cl[j] == "BR" && lc[j] == 0)) ? -1 : 0;
         }
         auto sq = ob::select(op, Psq);
-        auto d0 = ob::derive(sq, PL, kE, k.c.n, nullptr);
+        auto d0 = ob::derive(sq, PL, kE, k.c.n, nullptr, fix("D0"));
         std::vector<int> dEu = d0.dE;
         bool dEbt0 = Bd.cfg.count("dEbt0") && (Bd.cfg["dEbt0"] == "True" || Bd.cfg["dEbt0"] == "1" || Bd.cfg["dEbt0"] == "true");
         if (dEbt0)
             for (int j = 0; j < nn; j++)
                 if (cl[j] == "BT") dEu[j] = 0;
-        auto dsq = ob::derive(sq, PL, kE, k.c.n, &dEu);
+        auto dsq = ob::derive(sq, PL, kE, k.c.n, &dEu, fix("D0"));
         // the condition rows H_c@P0, E_sh^th@P1; the gate rows (the engine's families, degree <= edge, E_sh^th <= edge + 1)
         auto unit = [&](const std::vector<int>& rs) {
             std::vector<std::vector<double>> U(rs.size(), std::vector<double>(nr, 0.0));
@@ -886,12 +907,12 @@ int mk_op_build(const char* dir, const char* out, const char* opts, char* err, i
         };
         std::vector<int> crow = {rowidx(0, 0), rowidx(4, 1)};
         if (crow[0] < 0 || crow[1] < 0) throw std::runtime_error("mk: op-build without the condition rows");
-        auto dc = ob::derive(ob::select(op, unit(crow)), PL, kE, k.c.n, nullptr);
+        auto dc = ob::derive(ob::select(op, unit(crow)), PL, kE, k.c.n, nullptr, fix("DC"));
         std::vector<int> grow;
         for (int r = 0; r < nr; r++)
             if (op.rD[r] <= (op.rf[r] == 4 ? edge + 1 : edge)) grow.push_back(r);
         auto gs = ob::select(op, unit(grow));
-        auto dg = ob::derive(gs, PL, kE, k.c.n, nullptr);
+        auto dg = ob::derive(gs, PL, kE, k.c.n, nullptr, fix("DG"));
         std::vector<int> live(grow.size(), 0);
         {
             std::vector<double> rmx(grow.size(), 0.0), fm(6, 0.0);
@@ -904,6 +925,10 @@ int mk_op_build(const char* dir, const char* out, const char* opts, char* err, i
                 fm[op.rf[grow[i]]] = std::max(fm[op.rf[grow[i]]], rmx[i]);
             }
             for (size_t i = 0; i < grow.size(); i++) live[i] = rmx[i] > 1e-8 * fm[op.rf[grow[i]]] && dg.dE[i] < 99;
+            if (!lvin.empty()) {
+                if (LV["LIVE"].size() != live.size()) throw std::runtime_error("mk: op-build: frozen liveness for a different gate-row set");
+                live = LV["LIVE"];
+            }
         }
         // output
         std::string od(out);
@@ -921,6 +946,13 @@ int mk_op_build(const char* dir, const char* out, const char* opts, char* err, i
         for (int r = 0; r < nr; r++) rl << ob::ROWS[op.rf[r]] << "@P" << op.rD[r] << "\n";
         std::ofstream gl(od + "/glab.txt");
         for (int r : grow) gl << ob::ROWS[op.rf[r]] << "@P" << op.rD[r] << "\n";
+        if (!lvout.empty()) {                                           // the structure for the J step's later builds
+            std::ofstream lf(lvout);
+            auto wv = [&](const char* key_, const std::vector<int>& v) { lf << key_ << " " << v.size(); for (int x : v) lf << " " << x; lf << "\n"; };
+            wv("D0", d0.dE); wv("DC", dc.dE); wv("DG", dg.dE); wv("LIVE", live);
+            std::ofstream rf(lvout + ".rows");
+            for (int r = 0; r < nr; r++) rf << ob::ROWS[op.rf[r]] << "@P" << op.rD[r] << "\n";
+        }
         std::ofstream inf(od + "/info.txt");
         inf.precision(17);
         inf << "e0 " << e0 << "\nn " << k.c.n << "\nlkdiv " << lkdiv << "\nimag " << op.imag << "\nrows " << nr << "\ncols " << nn

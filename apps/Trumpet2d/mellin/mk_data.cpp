@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <numeric>
 #include <limits>
 #include <stdexcept>
@@ -139,7 +140,11 @@ int targets(const TgtIn& in, Vec& tgtv, Vec& prevv, std::vector<double>& wt, Vec
     for (auto& it : in.tgt)                                       // [(j, v) for k_, v_ in tgt_items.items() for j in range(nn) if label == k_]
         for (int j = 0; j < nn; j++)
             if (in.collab[j] + "@t" + std::to_string(int(in.g + in.kofs[j])) == it.first) hit.emplace_back(j, it.second);
-    if (int(hit.size()) > in.rk) throw std::runtime_error("mk::dt::targets: more targets than residue directions (a genuine root outside the contour?)");
+    if (int(hit.size()) > in.rk) {
+        char b_[160];
+        std::snprintf(b_, sizeof b_, "mk::dt::targets: [g %.9g] %d targets but residue rank %d (a genuine root outside the contour?)", in.g, int(hit.size()), in.rk);
+        throw std::runtime_error(b_);
+    }
     if (!hit.empty()) {
         wt.assign(2 * NB, 0.0);
         tg0 = prevv;

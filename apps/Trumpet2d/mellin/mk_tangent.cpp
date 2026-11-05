@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <stdexcept>
+#include <string>
 
 namespace mk {
 namespace tn {
@@ -119,7 +122,16 @@ void tan_step(const StepState& st, const Seed& seed, double sc, double ctol, int
         for (int q = 0; q < rkc; q++)
             for (int i = 0; i < Kn; i++) A[size_t(Kn + q) * Kn + i] = ct::mul(cd(w, 0.0), ct::mul(fm->C[size_t(q) * Kn + i], cd(Dsc[i], 0.0)));
         for (int r = 0; r < Kn; r++) b[r] = ct::div(-f0[r], cd(Dsc[r], 0.0));
-        Vec ys = la::lstsq(A, Kn + rkc, Kn, b, 1);
+        Vec ys;
+        try {
+            ys = la::lstsq(A, Kn + rkc, Kn, b, 1);
+        } catch (const std::runtime_error& e) {
+            // n2a_nl (code round 1036, oracle_v4 J 0.10): gelsd (SVD) failed to converge on finite input at the family centre -- the complete
+            // orthogonal factorisation instead, only where gelsd fails (bitwise elsewhere).  Seen natively with MKL 2025.2 (J 0.40, lapse l6)
+            if (std::string(e.what()).find("zgelsd") == std::string::npos) throw;
+            ys = la::lstsq_gelsy(A, Kn + rkc, Kn, b, 1);
+            std::fprintf(stderr, "    [tangent] the family-centre solve: gelsd did not converge; gelsy used\n");
+        }
         Vec mu(Kn);
         for (int i = 0; i < Kn; i++) mu[i] = mu_a[i] + ct::mul(ys[i], cd(Dsc[i], 0.0));
         dX = ct::nodes_of(mu, K, NB, e1, R);

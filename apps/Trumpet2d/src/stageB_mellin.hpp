@@ -13,8 +13,16 @@
 // and jacobian() then returns the cached matrix (an error if u moved).
 // Config (whitespace-separated, written by scripts/n3b_linthroat.py m4):
 //   MELLIN 1 | BASE dir | CYL template.json | WORK dir | RM r | KCYL index-of-'cyl K' | UNK NU, NU x (kind name-with-underscores u0 h)
-//   | MKEYS NMK, NMK x (F d k kept) | CUT value | RANK r (-1: by the cut at the first Jacobian) | TIK NT sw, NT x (index scale)
+//   | MKEYS NMK, NMK x (F d k kept) | CUT value, or 'rulec EPS_TAN' | RANK r (-1: by the cut at the first Jacobian) | TIK NT sw, NT x (index scale)
 //   | TANOPT options | END
+// CUT rulec (research rounds 1008-1009, 1038: n3b_linthroat's 'rulec', eps_J measured once per J step): at the J step's first Jacobian the
+// grade-0 columns also at +-2h (Richardson), eps_J central = ||(J_c(2h) - J_c(h)) / 3||_2 / s_0 in the cut's column-scaled eq space (eps_J
+// forward = ||J_f - J_c||_2 / s_0 reported), tau = the largest 'monrow' output at u; cut = max(10 tau, 10 eps_J central, 10 EPS_TAN).
+// The first Jacobian is cached (WORK/jac_cache.txt: u, labels, centres, values, Jacobians, rank, cut) and loaded when u0 matches it bitwise;
+// The operator's discrete decisions (its rows, their levels, the gate rows' liveness) are those of the J step's first build (WORK/levels.txt;
+// mk_op_build levels_out / levels_in): a non-Kerr b(theta) moves a 1e-7 level test inside a finite difference otherwise (J 0.10: b1 ~ 4e-9).
+// MELLIN_PROBE=1 (env) ends the run after the construction (the first Jacobian, its rank and cut -> WORK/probe.txt), so a driver can size
+// the defect file's rows before the solve -- which then starts from the cache.
 #pragma once
 #include "stageB_eval.hpp"
 
@@ -111,21 +119,46 @@ inline std::vector<double> npy_real(const std::string& p)
     }
     return out;
 }
-// the label with its off-lattice centres (six-decimal numbers) snapped to the nearest of 'cents' within 1e-3 (n3b_linthroat.snap); "" if none
-inline std::string snap(const std::string& l, const std::vector<double>& cents)
+// the centre map of an evaluation's labels onto the reference centres (n3b_linthroat.load_aligned, research round 1030): each reference
+// centre takes its nearest new centre within a quarter of the references' smallest separation, one to one (an outer step -- here a Newton
+// step -- moves the off-lattice centres 1 + s / n with n and the cylinder, by more than 1e-3 at 0.45 and in a J step); the others dropped
+inline std::map<std::string, std::string> centre_map(const std::vector<std::string>& lab, const std::vector<double>& cents)
+{
+    static const std::regex num("[0-9]+\\.[0-9]{6}");
+    double gap = 1.0;
+    for (size_t i = 1; i < cents.size(); i++) gap = std::min(gap, cents[i] - cents[i - 1]);
+    const double tol = 0.25 * gap;
+    std::vector<double> nv;
+    for (const auto& l : lab)
+        for (auto it = std::sregex_iterator(l.begin(), l.end(), num); it != std::sregex_iterator(); ++it) nv.push_back(std::stod(it->str()));
+    std::sort(nv.begin(), nv.end());
+    nv.erase(std::unique(nv.begin(), nv.end()), nv.end());
+    std::map<double, double> best;                                // reference centre -> its new centre
+    for (double v : nv) {
+        double bd = 1e300, c = 0;
+        for (double x : cents) if (std::fabs(x - v) < bd) { bd = std::fabs(x - v); c = x; }
+        if (bd <= tol && (!best.count(c) || std::fabs(c - v) < std::fabs(c - best[c]))) best[c] = v;
+    }
+    std::map<std::string, std::string> vm;
+    char a[32], b[32];
+    for (auto& cv : best) {
+        std::snprintf(a, sizeof a, "%.6f", cv.second);
+        std::snprintf(b, sizeof b, "%.6f", cv.first);
+        vm[a] = b;
+    }
+    return vm;
+}
+// the label with its off-lattice centres (six-decimal numbers) mapped by centre_map; "" if one has no reference centre
+inline std::string snap(const std::string& l, const std::map<std::string, std::string>& vm)
 {
     static const std::regex num("[0-9]+\\.[0-9]{6}");
     std::string out;
     auto it = std::sregex_iterator(l.begin(), l.end(), num);
     size_t last = 0;
     for (; it != std::sregex_iterator(); ++it) {
-        double v = std::stod(it->str());
-        double best = 1e300, c = 0;
-        for (double x : cents) if (std::fabs(x - v) < best) { best = std::fabs(x - v); c = x; }
-        if (best > 1e-3) return "";
-        char b[32];
-        std::snprintf(b, sizeof b, "%.6f", c);
-        out += l.substr(last, size_t(it->position()) - last) + b;
+        auto f = vm.find(it->str());
+        if (f == vm.end()) return "";
+        out += l.substr(last, size_t(it->position()) - last) + f->second;
         last = size_t(it->position() + it->length());
     }
     return out + l.substr(last);
@@ -148,6 +181,8 @@ class MellinEval {
     std::vector<double> u0, h;
     int kcyl = -1, rank_fixed = -1, ntik = 0;
     double cut = 1e-6, sw = 0;
+    bool rule = false;                           // CUT rulec: the cut from the measured accuracies at the first Jacobian
+    double eps_tan = 0, tau = 0, eps_c = -1, eps_f = -1;
     std::vector<int> tik_i;
     std::vector<double> tik_s;
     // the cache
@@ -185,7 +220,13 @@ class MellinEval {
         need("MKEYS"); in >> NMK;
         mk.resize(NMK);
         for (auto& m : mk) in >> m.F >> m.d >> m.k >> m.kept;
-        need("CUT"); in >> cut;
+        need("CUT");
+        {
+            std::string ct;
+            in >> ct;
+            if (ct == "rulec") { rule = true; in >> eps_tan; }
+            else cut = std::stod(ct);
+        }
         need("RANK"); in >> rank_fixed;
         need("TIK"); in >> ntik >> sw;
         tik_i.resize(ntik); tik_s.resize(ntik);
@@ -200,6 +241,18 @@ class MellinEval {
         // the rows are known after the first Jacobian (the rank); set up at construction from a full evaluation at u0
         std::vector<double> rv, mv;
         values(u0, 0.0, rv, mv);
+        if (std::getenv("MELLIN_PROBE")) {                        // the driver's probe: the first Jacobian's rank and cut, then stop
+            if (mpirank == 0) {
+                std::ofstream f(work + "/probe.txt");
+                f.precision(17);
+                f << "RANK " << rk << "\nCUT " << cut << "\nEPSC " << eps_c << "\nEPSF " << eps_f << "\nTAU " << tau << "\nNTIK " << ntik
+                  << "\nTJAC " << tjac << "\nTVAL " << tval << "\n";
+                std::cout << "#  mellin: probe -- rank " << rk << ", cut " << cut << " -> " << work << "/probe.txt\n" << std::flush;
+            }
+            MPI_Barrier(MPI_COMM_WORLD);
+            MPI_Finalize();
+            std::exit(0);
+        }
         rows.clear();
         for (int i = 0; i < rk; i++) rows.push_back(RowInfo{0, 0, i, 0, 0, 1.0});
         for (int k = 0; k < ntik; k++) rows.push_back(RowInfo{1, 9, k, 0, 0, 1.0});
@@ -263,7 +316,11 @@ class MellinEval {
                 if (kind[q] == "p") f << uname[q] << " " << u[q] << "\n";
         }
         char err[1024] = {0};
-        if (mk_bundle_at(base.c_str(), (d + "/cyl.json").c_str(), K, (d + "/b").c_str(), "", err, sizeof err))
+        // the operator's structure frozen per J step (M4e): the first build's discrete decisions (rows, levels, liveness) -> WORK/levels.txt,
+        // reused by every later build -- only its coefficients follow the cylinder (as the cut's rank)
+        const std::string lv = work + "/levels.txt";
+        const std::string bopt = (std::ifstream(lv) ? "levels_in=" : "levels_out=") + lv;
+        if (mk_bundle_at(base.c_str(), (d + "/cyl.json").c_str(), K, (d + "/b").c_str(), bopt.c_str(), err, sizeof err))
             throw std::runtime_error(std::string("mellin: bundle-at: ") + err);
         if (mk_set_params((d + "/b").c_str(), (d + "/params.txt").c_str(), err, sizeof err))
             throw std::runtime_error(std::string("mellin: set-params: ") + err);
@@ -292,8 +349,9 @@ class MellinEval {
     void select(const std::vector<std::string>& lab, const std::vector<double>& val, std::vector<double>& e, std::vector<double>& m)
     {
         std::map<std::string, double> mp;
+        const auto vm = mel::centre_map(lab, cents0);
         for (size_t i = 0; i < lab.size(); i++) {
-            std::string s = cents0.empty() ? lab[i] : mel::snap(lab[i], cents0);
+            std::string s = cents0.empty() ? lab[i] : mel::snap(lab[i], vm);
             if (!s.empty()) mp[s] = val[i];
         }
         e.assign(eqlab.size(), 0.0);
@@ -333,6 +391,8 @@ class MellinEval {
                 if (static_cast<int>(mklab.size()) != NMK) throw std::runtime_error("mellin: " + std::to_string(mklab.size()) + " mk outputs vs NMK " + std::to_string(NMK));
             }
             select(lab, val, H, M);
+            tau = 0;                                              // the rows' measured level (n3b_linthroat.tau_measured)
+            for (size_t i = 0; i < lab.size(); i++) if (lab[i].rfind("monrow ", 0) == 0) tau = std::max(tau, std::fabs(val[i]));
             nE = static_cast<int>(H.size());
             nM = static_cast<int>(M.size());
         }
@@ -341,6 +401,7 @@ class MellinEval {
         H.resize(nE); M.resize(nM);
         MPI_Bcast(H.data(), nE, MPI_DOUBLE, 0, MPI_COMM_WORLD);
         MPI_Bcast(M.data(), nM, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(&tau, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
         neq = nE;
         uv = u;
         tval += MPI_Wtime() - t0;
@@ -352,6 +413,10 @@ class MellinEval {
     {
         if (!uj.empty() && uj == u) return;
         const double t0 = MPI_Wtime();
+        if (uj.empty() && rk < 0 && load_cache(u)) {
+            tjac += MPI_Wtime() - t0;
+            return;
+        }
         if (uv != u) forward(u);
         // the label sets to every rank (the snapping needs them)
         {
@@ -386,11 +451,16 @@ class MellinEval {
         }
         const int ne = static_cast<int>(eqlab.size()), nm = static_cast<int>(mklab.size()), no = ne + nm;
         // tasks: (q, +1), (q, -1) for every theta; (q, 0) for every p (a tangent)
+        // (CUT rulec, the J step's first Jacobian: (q, +2), (q, -2) too -- Richardson's eps_J)
+        const bool rich = rule && rk < 0;
         std::vector<std::pair<int, int>> tasks;
         for (int q = 0; q < NU; q++) {
             if (kind[q] == "t") { tasks.push_back({q, 1}); tasks.push_back({q, -1}); }
             else tasks.push_back({q, 0});
         }
+        if (rich)
+            for (int q = 0; q < NU; q++)
+                if (kind[q] == "t") { tasks.push_back({q, 2}); tasks.push_back({q, -2}); }
         std::vector<double> mine;                                 // per task of this rank: q, s, then no values
         for (size_t t = static_cast<size_t>(mpirank); t < tasks.size(); t += static_cast<size_t>(mpisize)) {
             const int q = tasks[t].first, s = tasks[t].second;
@@ -404,6 +474,9 @@ class MellinEval {
                 std::map<std::string, std::vector<double>> dv;
                 engine(u, -1, 0.0, uname[q], tag, lab, val, &dv);
                 if (!dv.count(uname[q])) throw std::runtime_error("mellin: no tangent for " + uname[q]);
+                if (dv[uname[q]].size() != lab.size())                // (a failed direction writes an empty dv: tangent.json's 'error')
+                    throw std::runtime_error("mellin: the tangent for " + uname[q] + " has " + std::to_string(dv[uname[q]].size()) + " outputs, the base " +
+                                             std::to_string(lab.size()) + " (" + work + "/" + tag + "/run/tangent.json)");
                 select(lab, dv[uname[q]], e, m);
             }
             mine.push_back(q);
@@ -418,7 +491,7 @@ class MellinEval {
         for (int p = 1; p < mpisize; p++) offs[p] = offs[p - 1] + cnts[p - 1];
         std::vector<double> all(static_cast<size_t>(offs[mpisize - 1] + cnts[mpisize - 1]));
         MPI_Allgatherv(mine.data(), cnt, MPI_DOUBLE, all.data(), cnts.data(), offs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
-        std::vector<double> plus(static_cast<size_t>(NU) * no, 0.0), minus = plus;
+        std::vector<double> plus(static_cast<size_t>(NU) * no, 0.0), minus = plus, plus2 = plus, minus2 = plus;
         JH.assign(static_cast<size_t>(ne) * NU, 0.0);
         JM.assign(static_cast<size_t>(nm) * NU, 0.0);
         for (size_t a = 0; a < all.size(); a += 2 + static_cast<size_t>(no)) {
@@ -426,6 +499,8 @@ class MellinEval {
             const double* v = &all[a + 2];
             if (s == 1) std::memcpy(&plus[static_cast<size_t>(q) * no], v, sizeof(double) * no);
             else if (s == -1) std::memcpy(&minus[static_cast<size_t>(q) * no], v, sizeof(double) * no);
+            else if (s == 2) std::memcpy(&plus2[static_cast<size_t>(q) * no], v, sizeof(double) * no);
+            else if (s == -2) std::memcpy(&minus2[static_cast<size_t>(q) * no], v, sizeof(double) * no);
             else {
                 for (int r = 0; r < ne; r++) JH[static_cast<size_t>(r) * NU + q] = v[r];
                 for (int r = 0; r < nm; r++) JM[static_cast<size_t>(r) * NU + q] = v[ne + r];
@@ -438,9 +513,31 @@ class MellinEval {
             for (int r = 0; r < ne; r++) JH[static_cast<size_t>(r) * NU + q] = (p[r] - mm[r]) / (2 * h[q]);
             for (int r = 0; r < nm; r++) JM[static_cast<size_t>(r) * NU + q] = (p[ne + r] - mm[ne + r]) / (2 * h[q]);
         }
+        if (rich) {                                               // eps_J (n3b_linthroat.eps_J) and the rule's cut
+            std::vector<double> Dc = col_scale();
+            std::vector<double> A(static_cast<size_t>(ne) * NU), Ef = A, Ec = A;
+            for (int r = 0; r < ne; r++)
+                for (int q = 0; q < NU; q++) {
+                    const size_t i = static_cast<size_t>(r) * NU + q;
+                    A[i] = JH[i] / Dc[q];
+                    if (kind[q] != "t") continue;
+                    const double c2 = (plus2[static_cast<size_t>(q) * no + r] - minus2[static_cast<size_t>(q) * no + r]) / (4 * h[q]);
+                    const double fw = (plus[static_cast<size_t>(q) * no + r] - H[r]) / h[q];
+                    Ec[i] = (c2 - JH[i]) / Dc[q] / 3;
+                    Ef[i] = (fw - JH[i]) / Dc[q];
+                }
+            const double s0 = smax(A, ne, NU);
+            eps_c = smax(Ec, ne, NU) / s0;
+            eps_f = smax(Ef, ne, NU) / s0;
+            cut = std::max({10 * tau, 10 * eps_c, 10 * eps_tan});
+            if (mpirank == 0)
+                std::cout << "#  mellin: eps_J central " << eps_c << ", forward " << eps_f << "; tau " << tau << ", eps_tan " << eps_tan
+                          << " -> cut " << cut << "\n";
+        }
         cut_basis();
         uj = u;
         tjac += MPI_Wtime() - t0;
+        if (rich && mpirank == 0) save_cache(u);
         if (mpirank == 0) {                                       // the record (for the gates): labels, values, the full Jacobians, u
             std::ofstream f(work + "/jac_" + std::to_string(ncall + 1) + ".txt");
             f.precision(17);
@@ -456,8 +553,8 @@ class MellinEval {
                       << " s; the cut's rank " << rk << " of " << ne << " eq rows\n";
     }
 
-    // the column-scaled SVD of d eq / du (write_lin_full's): U_r, r frozen at the first (or the config's)
-    void cut_basis()
+    // the column scales of write_lin_full: max(|d eq / du_q|, |d mk / du_q|)
+    std::vector<double> col_scale() const
     {
         const int ne = neq;
         std::vector<double> Dc(NU, 0.0);
@@ -468,13 +565,26 @@ class MellinEval {
             Dc[q] = std::max(std::sqrt(a), std::sqrt(b));
             if (Dc[q] == 0) Dc[q] = 1.0;
         }
-        // the SVD of the ne x NU matrix by the eigen-decomposition of A A^T is ill-conditioned; use one-sided Jacobi on A^T (NU x ne)
-        const int m = NU, n = ne;
-        std::vector<double> At(static_cast<size_t>(m) * n);                 // column j of A^T = row j of A (scaled)
-        for (int r = 0; r < n; r++)
-            for (int q = 0; q < m; q++) At[static_cast<size_t>(r) * m + q] = JH[static_cast<size_t>(r) * NU + q] / Dc[q];
-        std::vector<double> V(static_cast<size_t>(n) * n, 0.0);
-        for (int i = 0; i < n; i++) V[static_cast<size_t>(i) * n + i] = 1.0;
+        return Dc;
+    }
+
+    // the largest singular value of the n x m row-major matrix A (one-sided Jacobi, as cut_basis)
+    static double smax(const std::vector<double>& A, int n, int m)
+    {
+        std::vector<double> At(A);
+        std::vector<double> V;
+        std::vector<std::pair<double, int>> sv;
+        jacobi(At, m, n, V, sv, false);
+        return sv.empty() ? 0.0 : sv[0].first;
+    }
+
+    // one-sided Jacobi on At (n columns of length m: the rows of A); sv = (singular value, column) descending; V (n x n) the rotations
+    static void jacobi(std::vector<double>& At, int m, int n, std::vector<double>& V, std::vector<std::pair<double, int>>& sv, bool wantV)
+    {
+        if (wantV) {
+            V.assign(static_cast<size_t>(n) * n, 0.0);
+            for (int i = 0; i < n; i++) V[static_cast<size_t>(i) * n + i] = 1.0;
+        }
         for (int sweep = 0; sweep < 60; sweep++) {
             double off = 0;
             for (int i = 0; i < n; i++)
@@ -488,20 +598,86 @@ class MellinEval {
                     double z = (b - a) / (2 * c), t = (z >= 0 ? 1.0 : -1.0) / (std::fabs(z) + std::sqrt(1 + z * z));
                     double cs = 1 / std::sqrt(1 + t * t), sn = cs * t;
                     for (int k = 0; k < m; k++) { double x = ci[k], y = cj[k]; ci[k] = cs * x - sn * y; cj[k] = sn * x + cs * y; }
+                    if (!wantV) continue;
                     double* vi = &V[static_cast<size_t>(i) * n];
                     double* vj = &V[static_cast<size_t>(j) * n];
                     for (int k = 0; k < n; k++) { double x = vi[k], y = vj[k]; vi[k] = cs * x - sn * y; vj[k] = sn * x + cs * y; }
                 }
             if (off < 1e-15) break;
         }
-        // singular values = column norms of the rotated A^T; the left singular vectors of A (in eq space) = the columns of V
-        std::vector<std::pair<double, int>> sv;
+        sv.clear();
         for (int i = 0; i < n; i++) {
             double a = 0;
             for (int k = 0; k < m; k++) a += At[static_cast<size_t>(i) * m + k] * At[static_cast<size_t>(i) * m + k];
             sv.push_back({std::sqrt(a), i});
         }
         std::sort(sv.begin(), sv.end(), [](const std::pair<double, int>& x, const std::pair<double, int>& y) { return x.first > y.first; });
+    }
+
+    // the first Jacobian's cache (CUT rulec): written by rank 0, read by every rank when u0 matches bitwise
+    void save_cache(const std::vector<double>& u) const
+    {
+        std::ofstream f(work + "/jac_cache.txt");
+        f.precision(17);
+        f << "MELLINCACHE 1\n" << NU << " " << neq << " " << mklab.size() << " " << rk << " " << cut << " " << eps_c << " " << eps_f << " " << tau << "\n";
+        for (double v : u) f << v << "\n";
+        f << cents0.size() << "\n";
+        for (double c : cents0) f << c << "\n";
+        for (int r = 0; r < neq; r++) f << eqlab[r] << "\t" << H[r] << "\n";
+        for (size_t r = 0; r < mklab.size(); r++) f << mklab[r] << "\t" << M[r] << "\n";
+        for (double v : JH) f << v << "\n";
+        for (double v : JM) f << v << "\n";
+    }
+
+    bool load_cache(const std::vector<double>& u)
+    {
+        std::ifstream f(work + "/jac_cache.txt");
+        if (!f) return false;
+        std::string tag, l;
+        int ver = 0, nu = 0, ne = 0, nm = 0, r = 0;
+        double c = 0, ec = 0, ef = 0, ta = 0;
+        f >> tag >> ver >> nu >> ne >> nm >> r >> c >> ec >> ef >> ta;
+        if (tag != "MELLINCACHE" || nu != NU) return false;
+        std::vector<double> uc(NU);
+        for (auto& v : uc) f >> v;
+        if (uc != u) return false;                                // (bitwise: %.17g round-trips)
+        size_t nc = 0;
+        f >> nc;
+        std::vector<double> cs(nc);
+        for (auto& v : cs) f >> v;
+        std::getline(f, l);
+        std::vector<std::string> el(ne), ml(nm);
+        std::vector<double> h_(ne), m_(nm);
+        for (int i = 0; i < ne; i++) { std::getline(f, l); size_t t = l.rfind('\t'); el[i] = l.substr(0, t); h_[i] = std::stod(l.substr(t + 1)); }
+        for (int i = 0; i < nm; i++) { std::getline(f, l); size_t t = l.rfind('\t'); ml[i] = l.substr(0, t); m_[i] = std::stod(l.substr(t + 1)); }
+        std::vector<double> jh(static_cast<size_t>(ne) * NU), jm(static_cast<size_t>(nm) * NU);
+        for (auto& v : jh) f >> v;
+        for (auto& v : jm) f >> v;
+        if (!f) throw std::runtime_error("mellin: truncated " + work + "/jac_cache.txt");
+        eqlab = el; mklab = ml; cents0 = cs; H = h_; M = m_; JH = jh; JM = jm;
+        neq = ne; rk = r; cut = c; eps_c = ec; eps_f = ef; tau = ta;
+        uv = u;
+        cut_basis();
+        uj = u;
+        if (mpirank == 0)
+            std::cout << "#  mellin: the first Jacobian from " << work << "/jac_cache.txt (rank " << rk << ", cut " << cut << ", eps_J central "
+                      << eps_c << ")\n";
+        return true;
+    }
+
+    // the column-scaled SVD of d eq / du (write_lin_full's): U_r, r frozen at the first (or the config's)
+    void cut_basis()
+    {
+        const int ne = neq;
+        std::vector<double> Dc = col_scale();
+        // the SVD of the ne x NU matrix by the eigen-decomposition of A A^T is ill-conditioned; use one-sided Jacobi on A^T (NU x ne)
+        const int m = NU, n = ne;
+        std::vector<double> At(static_cast<size_t>(m) * n);                 // column j of A^T = row j of A (scaled)
+        for (int r = 0; r < n; r++)
+            for (int q = 0; q < m; q++) At[static_cast<size_t>(r) * m + q] = JH[static_cast<size_t>(r) * NU + q] / Dc[q];
+        std::vector<double> V;
+        std::vector<std::pair<double, int>> sv;
+        jacobi(At, m, n, V, sv, true);
         if (rk < 0) {
             if (rank_fixed > 0) rk = rank_fixed;
             else { rk = 0; for (auto& p : sv) if (p.first > cut * sv[0].first) rk++; }
@@ -515,8 +691,8 @@ class MellinEval {
 
     void values(const std::vector<double>& u, double, std::vector<double>& rv, std::vector<double>& mv)
     {
+        if (Ur.empty()) precompute_jacobian(u);                 // the first call: the rank and the basis (or the cache's)
         if (uv != u) forward(u);
-        if (Ur.empty()) precompute_jacobian(u);                 // the first call: the rank and the basis
         rv.assign(static_cast<size_t>(rk + ntik), 0.0);
         for (int c = 0; c < rk; c++) {
             double acc = 0;

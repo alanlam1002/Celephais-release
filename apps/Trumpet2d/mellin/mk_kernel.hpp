@@ -280,6 +280,204 @@ struct Kernel {
         if (keep_v) *keep_v = v;
         if (keep_dv && dC) *keep_dv = dv;
     }
+
+    // ---- G1 (NOTES_M4_DESIGN.md section 19; research round 1049): the SECOND-ORDER forward pass -- d1 a series direction dC (as run's), d2
+    // a direction of the cylinder (grade 0: its grid values, K, bnorm, n), d12 the mixed derivative.  The operator build reads d1 (M); d12 is
+    // its derivative with respect to the cylinder (dM / d theta).  n enters the ops only through drad (e + n key, the log moment n v[k + 1])
+    // and logser (e / n); the fields carry the rest ----
+    struct DCyl {                              // d / d theta of the cylinder: grid values, K (the Ph / r constant), bnorm, n
+        std::vector<double> U, P, b, q, Qb, bt;
+        double dK = 0.0, dbnorm = 0.0, dn = 0.0;
+    };
+    Ser d2out[6], d12out[6];
+    Ser cser(const std::vector<double>& vals, double top) {     // a grid function as a key-0 series (empty if zero)
+        std::vector<std::pair<Key, Piece>> d;
+        if (!vals.empty()) add0(d, vals);
+        return d.empty() ? c.emptyser(top) : c.make(std::move(d), true, 0, top);
+    }
+    // the shifted P x series(f) product of fields() (Phb's), with the grid factor w
+    std::vector<std::pair<Key, Piece>> pshift(const std::vector<std::pair<Key, Piece>>& p, const std::vector<double>& w) {
+        std::vector<std::pair<Key, Piece>> pp;
+        for (auto& kv : p) {
+            Piece x = kv.second;
+            for (int b = 0; b < x.B; b++)
+                for (int k = 0; k < c.K; k++)
+                    for (int q = 0; q < c.NF; q++) x.a[(size_t(b) * c.K + k) * c.NF + q] *= w[q];
+            pp.emplace_back(Key{kv.first.v + 1, kv.first.isint}, std::move(x));
+        }
+        return pp;
+    }
+    // the fields' d2 (F2) and d12 (F12) at the series C in the series direction dC (F, dF, dU2: run's)
+    void fields2(const std::vector<Entry>& C, const std::vector<Entry>& dC, double top, const DCyl& d, const Ser F[6], const Ser dF[6],
+                 const Ser& dU2, Ser F2[6], Ser F12[6]) {
+        for (int k = 0; k < 6; k++) { F2[k] = c.emptyser(); F12[k] = c.emptyser(); }
+        // psi2 = r^-1 exp(2 U): d2 = psi2 2 dU, d12 = psi2 (2 dU_C) (2 dU)
+        if (!d.U.empty()) {
+            std::vector<double> u2(d.U.size());
+            for (size_t i = 0; i < u2.size(); i++) u2[i] = 2.0 * d.U[i];
+            Ser du = cser(u2, top);
+            if (!du.empty()) {
+                F2[0] = c.trunc(c.mul(F[0], du), F[0].top);
+                if (!dU2.empty()) F12[0] = c.trunc(c.mul(c.mul(F[0], dU2), du), F[0].top);
+            }
+        }
+        // Phbar = (K / r) x [P (1 + series(PH))] shifted: d2 = (dK / K) Phb + (K / r) [dP (1 + series)], d12 the same on series(dC)
+        {
+            Ser cP = c.const_ser(cyl.e_Ph_r, cyl.v_Ph_r);
+            double Kv = cyl.v_Ph_r.empty() ? 1.0 : cyl.v_Ph_r[0].real();
+            Ser a2 = d.dK != 0.0 && !F[1].empty() ? c.scale(F[1], d.dK / Kv) : c.emptyser();
+            Ser a12 = d.dK != 0.0 && !dF[1].empty() ? c.scale(dF[1], d.dK / Kv) : c.emptyser();
+            if (!d.P.empty()) {
+                auto p = series(fam("PH"), C, top);
+                add0(p, std::vector<double>(c.NF, 1.0));
+                Ser t2 = c.mul(cP, c.make(pshift(p, d.P), true, 0, top + 1));
+                a2 = a2.empty() ? t2 : c.add(a2, t2);
+                auto pd = series(fam("PH"), dC, top);
+                if (!pd.empty()) {
+                    Ser t12 = c.mul(cP, c.make(pshift(pd, d.P), true, 0, top + 1));
+                    a12 = a12.empty() ? t12 : c.add(a12, t12);
+                }
+            }
+            F2[1] = a2;
+            F12[1] = a12;
+        }
+        // beta^r = r (b + bnorm series(BR)): d2 = r (db + dbnorm series), d12 = r dbnorm series(dC)
+        {
+            Ser cr = c.const_ser(cyl.e_r, cyl.v_r);
+            auto bs = series(fam("BR"), C, top);
+            for (auto& kv : bs)
+                for (auto& z : kv.second.a) z *= d.dbnorm;
+            if (!d.b.empty()) add0(bs, d.b);
+            if (!bs.empty()) F2[3] = c.mul(cr, c.make(std::move(bs), true, 0, top));
+            if (d.dbnorm != 0.0) {
+                auto bd = series(fam("BR"), dC, top);
+                for (auto& kv : bd)
+                    for (auto& z : kv.second.a) z *= d.dbnorm;
+                if (!bd.empty()) F12[3] = c.mul(cr, c.make(std::move(bd), true, 0, top));
+            }
+        }
+        F2[2] = cser(d.q, top);                                    // qf, beta^theta, Qbar: additive in the cylinder
+        F2[4] = cser(d.bt, top);
+        F2[5] = cser(d.Qb, top);
+    }
+    // d / dn of drad at fixed keys: (e + n key) v + n v[k + 1]  ->  key v + v[k + 1]
+    Ser drad_dn(const Ser& a) {
+        if (a.empty()) return c.emptyser(a.top);
+        std::vector<std::pair<Key, Piece>> d;
+        for (auto& kv : a.d) {
+            const Piece& v = kv.second;
+            Piece w = c.zeros(v.B);
+            for (int b = 0; b < v.B; b++)
+                for (int k = 0; k < c.K; k++)
+                    for (int q = 0; q < c.NF; q++) {
+                        size_t i = (size_t(b) * c.K + k) * c.NF + q;
+                        w.a[i] = kv.first.v * v.a[i];
+                        if (k < c.K - 1) w.a[i] += v.a[i + c.NF];
+                    }
+            d.emplace_back(kv.first, std::move(w));
+        }
+        return c.make(std::move(d), true, a.e - 1, a.top);
+    }
+    // d / dn of logser at fixed keys: its key-0 moment-1 term e / n  ->  - e / n^2
+    Ser log_dn(const Ser& a) {
+        if (a.empty() || c.K < 2 || a.e == 0) return c.emptyser();
+        Piece v = c.zeros(1);
+        for (int q = 0; q < c.NF; q++) v.a[size_t(c.NF) + q] = -double(a.e) / (c.n * c.n);
+        std::vector<std::pair<Key, Piece>> d;
+        d.emplace_back(Key{0.0, true}, std::move(v));
+        return c.make(std::move(d), true, 0, BIG);
+    }
+    void run2(const std::vector<Entry>& C, const std::vector<Entry>& dC, const DCyl& dcy, double top) {
+        Ser F[6], dF[6], U2, dU2, F2[6], F12[6];
+        fields(C, top, F, &U2);
+        fields(dC, top, dF, &dU2, true);
+        dF[0] = c.trunc(c.mul(F[0], dU2), F[0].top);
+        fields2(C, dC, top, dcy, F, dF, dU2, F2, F12);
+        size_t N = tp.op.size();
+        std::vector<Ser> v(N), d1(N), d2(N), d12(N);
+        auto T = [&](size_t i, const Ser& s_) { return c.trunc(s_, v[i].top); };
+        auto A2 = [&](const Ser& x, const Ser& y) { return x.empty() ? y : y.empty() ? x : c.add(x, y); };
+        auto M2 = [&](const Ser& x, const Ser& y) { return (x.empty() || y.empty()) ? c.emptyser() : c.mul(x, y); };
+        auto S2 = [&](const Ser& x, cd f) { return x.empty() ? x : c.scale(x, f); };
+        for (size_t i = 0; i < N; i++) {
+            int o = tp.op[i], A = tp.a[i], Bq = tp.b[i];
+            switch (o) {
+            case IN:
+                v[i] = F[A]; d1[i] = dF[A]; d2[i] = F2[A]; d12[i] = F12[A];
+                break;
+            case EMPTY:
+                v[i] = c.emptyser(); d1[i] = d2[i] = d12[i] = c.emptyser();
+                break;
+            case C0:
+                v[i] = tp.ce[A] == INT_MIN ? c.emptyser() : c.const_ser(tp.ce[A], tp.cv[A]);
+                d1[i] = d2[i] = d12[i] = c.emptyser();
+                break;
+            case ADD:
+            case SUB: {
+                cd sg = o == ADD ? 1.0 : -1.0;
+                v[i] = o == ADD ? c.add(v[A], v[Bq]) : c.sub(v[A], v[Bq]);
+                d1[i] = T(i, A2(d1[A], S2(d1[Bq], sg)));
+                d2[i] = T(i, A2(d2[A], S2(d2[Bq], sg)));
+                d12[i] = T(i, A2(d12[A], S2(d12[Bq], sg)));
+                break;
+            }
+            case MUL:
+                v[i] = c.mul(v[A], v[Bq]);
+                d1[i] = T(i, A2(M2(d1[A], v[Bq]), M2(v[A], d1[Bq])));
+                d2[i] = T(i, A2(M2(d2[A], v[Bq]), M2(v[A], d2[Bq])));
+                d12[i] = T(i, A2(A2(M2(d12[A], v[Bq]), M2(d1[A], d2[Bq])), A2(M2(d2[A], d1[Bq]), M2(v[A], d12[Bq]))));
+                break;
+            case SCALE:
+                v[i] = c.scale(v[A], tp.sc[i]);
+                d1[i] = T(i, S2(d1[A], tp.sc[i])); d2[i] = T(i, S2(d2[A], tp.sc[i])); d12[i] = T(i, S2(d12[A], tp.sc[i]));
+                break;
+            case DRAD: {
+                v[i] = c.drad(v[A]);
+                d1[i] = T(i, d1[A].empty() ? d1[A] : c.drad(d1[A]));
+                Ser n2 = dcy.dn != 0.0 ? S2(drad_dn(v[A]), dcy.dn) : c.emptyser();
+                Ser n12 = dcy.dn != 0.0 ? S2(drad_dn(d1[A]), dcy.dn) : c.emptyser();
+                d2[i] = T(i, A2(d2[A].empty() ? d2[A] : c.drad(d2[A]), n2));
+                d12[i] = T(i, A2(d12[A].empty() ? d12[A] : c.drad(d12[A]), n12));
+                break;
+            }
+            case DTH:
+                v[i] = c.dth(v[A]);
+                d1[i] = T(i, c.dth(d1[A])); d2[i] = T(i, c.dth(d2[A])); d12[i] = T(i, c.dth(d12[A]));
+                break;
+            case INV: {
+                v[i] = c.inv(v[A]);
+                Ser v2 = c.mul(v[i], v[i]);
+                d1[i] = T(i, S2(M2(v2, d1[A]), -1.0));
+                d2[i] = T(i, S2(M2(v2, d2[A]), -1.0));
+                d12[i] = T(i, A2(S2(M2(M2(c.mul(v2, v[i]), d1[A]), d2[A]), 2.0), S2(M2(v2, d12[A]), -1.0)));
+                break;
+            }
+            case EXP:
+                v[i] = c.expser(v[A]);
+                d1[i] = T(i, M2(v[i], d1[A]));
+                d2[i] = T(i, M2(v[i], d2[A]));
+                d12[i] = T(i, M2(v[i], A2(d12[A], M2(d1[A], d2[A]))));
+                break;
+            case LOG: {
+                v[i] = c.logser(v[A]);
+                Ser ia = (d1[A].empty() && d2[A].empty() && d12[A].empty()) ? c.emptyser() : c.inv(v[A]);
+                d1[i] = T(i, M2(d1[A], ia));
+                Ser n2 = dcy.dn != 0.0 ? S2(log_dn(v[A]), dcy.dn) : c.emptyser();
+                d2[i] = T(i, A2(M2(d2[A], ia), n2));
+                d12[i] = T(i, A2(M2(d12[A], ia), S2(M2(M2(d1[A], d2[A]), M2(ia, ia)), -1.0)));
+                break;
+            }
+            default:
+                throw std::runtime_error("mk: unknown op");
+            }
+        }
+        for (int k = 0; k < 6; k++) {
+            out[k] = v[tp.outputs[k]];
+            dout[k] = d1[tp.outputs[k]];
+            d2out[k] = d2[tp.outputs[k]];
+            d12out[k] = d12[tp.outputs[k]];
+        }
+    }
 };
 
 }  // namespace mk

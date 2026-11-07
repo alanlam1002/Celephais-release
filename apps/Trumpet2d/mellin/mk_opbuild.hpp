@@ -207,6 +207,70 @@ inline Op build(Kernel& kr, int nn, const std::vector<int>& rf, const std::vecto
     return o;
 }
 
+// ---- G1 (NOTES_M4_DESIGN.md section 19): the operator's derivative with respect to the cylinder -- build's loop with the kernel's second-
+// order pass (run2): d1 the column directions (M, as build), d12 their derivative along dcy; M(e) -> A + s B + s^2 C with s = n e, n's own
+// derivative (dcy.dn) through 1 / n and 1 / n^2.  The exact-lkdiv convention only (rowwise's background term is not differentiated).
+// Returns {M's A, B, C (as build's, for the check), dA, dB, dC} ----
+struct Op2 {
+    std::vector<double> A, B, C, dA, dB, dC;
+};
+inline Op2 build2(Kernel& kr, int nn, const std::vector<int>& rf, const std::vector<int>& rD, const std::vector<int>& PL, double e0, double top,
+                  int chunk, const Quad& Q, const Kernel::DCyl& dcy) {
+    Ctx& c = kr.c;
+    int K = c.K, NF = c.NF, nr = int(rf.size()), np_ = int(PL.size());
+    std::vector<cd> Wt(size_t(nr) * NF);
+    {
+        std::map<int, std::vector<cd>> cache;
+        for (int r = 0; r < nr; r++) {
+            if (!cache.count(rD[r])) cache[rD[r]] = Q.stored(rD[r]);
+            std::copy(cache[rD[r]].begin(), cache[rD[r]].end(), Wt.begin() + long(r) * NF);
+        }
+    }
+    std::vector<cd> M(size_t(np_) * 3 * nr * nn, 0.0), dM(M.size(), 0.0);   // [ip][m][r][j]
+    std::vector<Entry> empty;
+    Key k0 = ckey(c, e0);
+    for (int c0 = 0; c0 < nn; c0 += chunk) {
+        int nq = std::min(nn, c0 + chunk) - c0;
+        std::vector<Entry> dC;
+        for (int q = 0; q < nq; q++) {
+            std::vector<cd> arr(size_t(nq) * K, 0.0);
+            arr[size_t(q) * K + 2] = 1.0;
+            dC.push_back(Entry{c0 + q, k0, nq, std::move(arr)});
+        }
+        kr.run2(empty, dC, dcy, std::max(top, std::ceil(e0) + 4));
+        for (int ip = 0; ip < np_; ip++) {
+            std::vector<int> lev(nr, PL[ip]);
+            auto R = project(c, kr.dout, e0, nq, rf, lev, Wt, false);
+            auto R2 = project(c, kr.d12out, e0, nq, rf, lev, Wt, false);
+            for (int q = 0; q < nq; q++)
+                for (int m = 0; m < 3; m++)
+                    for (int r = 0; r < nr; r++) {
+                        size_t at = ((size_t(ip) * 3 + m) * nr + r) * nn + c0 + q;
+                        M[at] = R[(size_t(q) * K + (2 - m)) * nr + r];
+                        dM[at] = R2[(size_t(q) * K + (2 - m)) * nr + r];
+                    }
+        }
+    }
+    double n = c.n, dn = dcy.dn;
+    size_t sz = size_t(np_) * nr * nn;
+    Op2 o;
+    o.A.assign(sz, 0.0); o.B = o.A; o.C = o.A; o.dA = o.A; o.dB = o.A; o.dC = o.A;
+    for (int ip = 0; ip < np_; ip++)
+        for (int r = 0; r < nr; r++)
+            for (int j = 0; j < nn; j++) {
+                auto g = [&](const std::vector<cd>& X, int m) { return X[((size_t(ip) * 3 + m) * nr + r) * nn + j]; };
+                cd m0 = g(M, 0), m1 = g(M, 1), m2 = g(M, 2), d0 = g(dM, 0), d1 = g(dM, 1), d2 = g(dM, 2);
+                size_t at = (size_t(ip) * nr + r) * nn + j;
+                o.A[at] = (m0 - e0 * m1 + e0 * e0 * m2).real();
+                o.B[at] = (m1 / n - 2 * e0 * m2 / n).real();
+                o.C[at] = (m2 / (n * n)).real();
+                o.dA[at] = (d0 - e0 * d1 + e0 * e0 * d2).real();
+                o.dB[at] = ((d1 - 2 * e0 * d2) / n - (m1 - 2 * e0 * m2) * dn / (n * n)).real();
+                o.dC[at] = (d2 / (n * n) - 2.0 * m2 * dn / (n * n * n)).real();
+            }
+    return o;
+}
+
 // ---- the derived quantities: n2a_rec.build_ops (kE_fixed) + _finish, n2a_nl's --dEbt0 / --rw-out-used, conditions, gate rows ----
 struct Sel {                                     // an operator on selected rows: M_p (np, nsel, nn) as A, B, C
     std::vector<double> A, B, C;

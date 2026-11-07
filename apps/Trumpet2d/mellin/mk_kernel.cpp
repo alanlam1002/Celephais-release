@@ -10,6 +10,7 @@
 #include <climits>
 #include <cstring>
 #include <map>
+#include <filesystem>
 
 
 using mk::cd;
@@ -726,6 +727,169 @@ extern "C" {
 // column l + 14, kept above rowtol (1e-10) of the family's largest entry; H_c, L_K on E_sigma's degrees), lkdiv (exact | rowwise), edge (12), chunk (34), ng (200);
 // levels_out=PATH / levels_in=PATH (M4e: the structure frozen per J step) -- the build's discrete decisions written / reused: the tall rows
 // (PATH.rows, as 'rows'), the square, condition and gate rows' leading levels and the gate rows' liveness (PATH)
+// G1 (NOTES_M4_DESIGN.md section 19): the operator's derivative with respect to the cylinder parameters (n3b names without 'cyl ': uJ, P_shapeJ,
+// qJ, QJ, bJ, btK, c, n, K) at the bundle DIR's cylinder, on the frozen rows of opts 'levels_in=FILE' (its FILE.rows) -- the layout of
+// mk_op_build's A / B / C.  Writes OUT/dA.npy, dB.npy, dC.npy (ntheta, np, nr, nn), OUT/thetas.txt and, for the check against mk_op_build,
+// OUT/A2.npy, B2.npy, C2.npy (the second-order pass's own M).  opts: levels_in (required), thetas=NAME,NAME,..., e0, chunk, ng
+int mk_op_build_dtheta(const char* dir, const char* out, const char* opts, char* err, int errcap) {
+    try {
+        using namespace mk;
+        Kernel k;
+        Proj P;
+        en::Setup S;
+        en::Cfg cf;
+        en::load_engine(dir, k, P, S, cf);
+        Bundle Bd;
+        {
+            std::ifstream f(std::string(dir) + "/config.txt");
+            std::string line;
+            while (std::getline(f, line)) {
+                size_t sp = line.find(' ');
+                if (sp != std::string::npos) Bd.cfg[line.substr(0, sp)] = line.substr(sp + 1);
+            }
+        }
+        double e0 = 1.3137;
+        int chunk = 34, ng = 200;
+        std::string lvin, ths;
+        std::string o(opts ? opts : "");
+        size_t a = 0;
+        while (a < o.size()) {
+            size_t b = o.find(';', a);
+            if (b == std::string::npos) b = o.size();
+            std::string it = o.substr(a, b - a);
+            size_t e = it.find('=');
+            if (e != std::string::npos) {
+                std::string kk = it.substr(0, e), v = it.substr(e + 1);
+                if (kk == "e0") e0 = std::stod(v);
+                else if (kk == "chunk") chunk = std::stoi(v);
+                else if (kk == "ng") ng = std::stoi(v);
+                else if (kk == "levels_in") lvin = v;
+                else if (kk == "thetas") ths = v;
+                else throw std::runtime_error("mk: unknown op-build-dtheta option " + kk);
+            }
+            a = b + 1;
+        }
+        if (lvin.empty()) throw std::runtime_error("mk: op-build-dtheta needs levels_in (the J step's frozen rows)");
+        std::vector<int> rf, rD;
+        {
+            std::ifstream f(lvin + ".rows");
+            if (!f) throw std::runtime_error("mk: op-build-dtheta: cannot read " + lvin + ".rows");
+            std::string l;
+            while (std::getline(f, l)) {
+                if (l.empty()) continue;
+                size_t at = l.find("@P");
+                int fi = ob::rowfam(l.substr(0, at));
+                if (fi < 0) continue;
+                rf.push_back(fi);
+                rD.push_back(std::stoi(l.substr(at + 2)));
+            }
+        }
+        std::vector<std::string> names;
+        {
+            size_t p0 = 0;
+            while (p0 < ths.size()) {
+                size_t p1 = ths.find(',', p0);
+                if (p1 == std::string::npos) p1 = ths.size();
+                if (p1 > p0) names.push_back(ths.substr(p0, p1 - p0));
+                p0 = p1 + 1;
+            }
+        }
+        if (names.empty()) throw std::runtime_error("mk: op-build-dtheta: no thetas");
+        int nn = int(S.collab.size());
+        ob::Quad Q;
+        Q.init(k.c.NF, ng);
+        std::vector<int> PL = {-2, -1, 0, 1, 2};
+        double top = Bd.getd("TOP", 9.0);
+        const auto& th = S.TH;
+        size_t NF = th.size();
+        auto grid = [&](auto f) { std::vector<double> v(NF); for (size_t g = 0; g < NF; g++) v[g] = f(th[g]); return v; };
+        std::vector<double> dA, dB, dC, A2, B2, C2;
+        for (size_t t = 0; t < names.size(); t++) {
+            const std::string& key = names[t];
+            Kernel::DCyl d;
+            if (key == "n") d.dn = 1.0;
+            else if (key == "K") d.dK = 1.0;
+            else if (key == "c") { d.b = grid([](double) { return 1.0; }); d.dbnorm = 1.0; }
+            else {
+                size_t dg = key.find_first_of("0123456789");
+                if (dg == std::string::npos) throw std::runtime_error("mk: op-build-dtheta: theta " + key);
+                std::string fam = key.substr(0, dg);
+                double j = std::stod(key.substr(dg));
+                if (fam == "u") d.U = grid([&](double x) { return std::cos(2.0 * j * x); });
+                else if (fam == "P_shape") d.P = grid([&](double x) { return std::cos(2.0 * j * x); });
+                else if (fam == "q") d.q = grid([&](double x) { double s_ = std::sin(x); return s_ * s_ * std::cos(2.0 * j * x); });
+                else if (fam == "Q") d.Qb = grid([&](double x) { double s_ = std::sin(x); return s_ * s_ * s_ * s_ * std::cos((2.0 * j + 1.0) * x); });
+                else if (fam == "b") d.b = grid([&](double x) { return std::cos(2.0 * j * x); });
+                else if (fam == "bt") d.bt = grid([&](double x) { return std::sin(2.0 * (j + 1.0) * x); });
+                else throw std::runtime_error("mk: op-build-dtheta: theta " + key);
+            }
+            auto o2 = ob::build2(k, nn, rf, rD, PL, e0, top, chunk, Q, d);
+            dA.insert(dA.end(), o2.dA.begin(), o2.dA.end());
+            dB.insert(dB.end(), o2.dB.begin(), o2.dB.end());
+            dC.insert(dC.end(), o2.dC.begin(), o2.dC.end());
+            if (t == 0) { A2 = o2.A; B2 = o2.B; C2 = o2.C; }
+        }
+        std::string od(out);
+        std::filesystem::create_directories(od);
+        long nth = long(names.size()), np_ = long(PL.size()), nr = long(rf.size());
+        en::npy_write(od + "/dA.npy", dA.data(), "<f8", {nth, np_, nr, long(nn)}, 8);
+        en::npy_write(od + "/dB.npy", dB.data(), "<f8", {nth, np_, nr, long(nn)}, 8);
+        en::npy_write(od + "/dC.npy", dC.data(), "<f8", {nth, np_, nr, long(nn)}, 8);
+        en::npy_write(od + "/A2.npy", A2.data(), "<f8", {np_, nr, long(nn)}, 8);
+        en::npy_write(od + "/B2.npy", B2.data(), "<f8", {np_, nr, long(nn)}, 8);
+        en::npy_write(od + "/C2.npy", C2.data(), "<f8", {np_, nr, long(nn)}, 8);
+        {
+            // G3: the square rows' projection (mk_op_build's 'tri' pairing: column (cl, l) on its family's rows, test function P_l -- QF P_l, BT
+            // P_(l+1), QB (1 - z^2)^2 P_l -- int P_D T on 200 Gauss nodes) and kE (s = n (sigma + kE)): the families' roots are the level-0
+            // square pencil's
+            std::vector<std::string> cl(nn);
+            std::vector<int> lc(nn);
+            for (int j = 0; j < nn; j++) {
+                size_t p = S.collab[j].find_first_of("0123456789");
+                cl[j] = S.collab[j].substr(0, p);
+                lc[j] = std::stoi(S.collab[j].substr(p));
+            }
+            std::vector<double> gx, gw;
+            ob::gauss_legendre(200, gx, gw);
+            int Dmx = 0;
+            for (int r = 0; r < nr; r++) Dmx = std::max(Dmx, rD[r]);
+            for (int j = 0; j < nn; j++) Dmx = std::max(Dmx, lc[j] + 1);
+            std::vector<std::vector<double>> PLg(200);
+            for (int g = 0; g < 200; g++) ob::legendre_upto(Dmx, gx[g], PLg[g]);
+            static const char* cfm[6] = {"QF", "PS", "PH", "BR", "BT", "QB"};
+            std::vector<double> Psq(size_t(nn) * nr, 0.0);
+            std::vector<int> kE(nn);
+            for (int j = 0; j < nn; j++) {
+                int fi = -1;
+                for (int i = 0; i < 6; i++)
+                    if (cl[j] == cfm[i]) fi = i;
+                int lt = cl[j] == "BT" ? lc[j] + 1 : lc[j];
+                for (int r = 0; r < nr; r++) {
+                    if (rf[r] != fi) continue;
+                    double s_ = 0.0;
+                    for (int g = 0; g < 200; g++) {
+                        double T = PLg[g][lt];
+                        if (cl[j] == "QB") T *= (1 - gx[g] * gx[g]) * (1 - gx[g] * gx[g]);
+                        s_ += gw[g] * PLg[g][rD[r]] * T;
+                    }
+                    Psq[size_t(j) * nr + r] = s_;
+                }
+                kE[j] = (cl[j] == "QF" || cl[j] == "PH" || (cl[j] == "BR" && lc[j] == 0)) ? -1 : 0;
+            }
+            en::npy_write(od + "/Psq.npy", Psq.data(), "<f8", {long(nn), nr}, 8);
+            en::npy_write(od + "/kE_sq.npy", kE.data(), "<i4", {long(nn)}, 4);
+            double nv = k.c.n;
+            en::npy_write(od + "/n.npy", &nv, "<f8", {1}, 8);
+        }
+        std::ofstream f(od + "/thetas.txt");
+        for (auto& nm : names) f << nm << "\n";
+        return 0;
+    } catch (const std::exception& ex) {
+        std::snprintf(err, size_t(errcap), "%s", ex.what());
+        return 1;
+    }
+}
+
 int mk_op_build(const char* dir, const char* out, const char* opts, char* err, int errcap) {
     try {
         using namespace mk;

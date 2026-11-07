@@ -83,6 +83,8 @@ struct Json {
 
 struct Cfg {
     double R = 0.015, pass_tol = 1e-10, condtol = 0.0, meff_h = 1e-2, top = 9, J = 0.0;
+    double pass_stop = 0.0;                                         // research round 1049: n2a_nl --pass-stop (0: off)
+    bool newton_floor_memo = false;                                 // n2a_nl --newton-floor-memo
     int N = 96, gmax = 8, gdata = 1, passes = 1, newton = 6, defect = 8, offl_lmax = 8, meff_mode = 0, meff_chunk = 34, gauge_steps = 2;
     bool cond_fit = false, notgt = false, cond_full = false, robust = false, offl_auto = false;
     std::string tgt;
@@ -151,6 +153,7 @@ inline void load_engine(const std::string& dir, Kernel& k, Proj& P, Setup& S, Cf
     }
     auto gs = [&](const std::string& key) { auto i = B.cfg.find(key); return i == B.cfg.end() ? std::string() : i->second; };
     c.R = B.getd("R", 0.015); c.N = B.geti("N", 96); c.gmax = B.geti("gmax", 8); c.gdata = B.geti("gdata", 1); c.top = B.getd("TOP", 10);
+    c.pass_stop = B.getd("pass_stop", 0.0); c.newton_floor_memo = B.geti("newton_floor_memo", 0) != 0;
     c.passes = B.geti("passes", 1); c.pass_tol = B.getd("pass_tol", 1e-10); c.newton = B.geti("newton", 6); c.defect = B.geti("defect", 8);
     c.condtol = B.getd("condtol", 0.0); c.meff_chunk = B.geti("meff_chunk", 34); c.offl_lmax = B.geti("offl_lmax", 8); c.J = B.getd("J", 0.0);
     c.gauge_steps = B.geti("gauge_steps", 2); c.cond_fit = B.geti("cond_fit", 0); c.notgt = B.geti("notarget", 0);
@@ -341,6 +344,8 @@ inline void Engine::run() {
     size_t nm = size_t(NB) * NB, nmc = size_t(nc) * NB;
     std::vector<Entry> C = S_.C0;
     std::map<double, std::pair<Vec, Vec>> cache;                    // meff_cache: the converged operator per integer centre
+    std::map<double, double> nfloor;                                // --newton-floor-memo: per centre, the floor a futile Newton step found
+    std::vector<double> rel_hist;                                   // --pass-stop: the pass changes relative to the series' scale
     std::map<double, int> rk_fix;
     std::map<double, Vec> c_warm;
     std::vector<std::pair<std::string, Key>> fams;                  // fams_offl, in insertion order
@@ -392,6 +397,7 @@ inline void Engine::run() {
             stc.isint = isint;
             stc.kept_only = isint;                                  // nb = 1, no --dc-predictor
             std::vector<double> newton_hist;
+            bool memo_used = false;
             bool offint_done = false;
             std::vector<char> act;
             for (int newt = 0; newt < c_.newton; newt++) {
@@ -603,6 +609,18 @@ inline void Engine::run() {
                 J_.kv("X", arr("X", moments(Xg), {K, NB}));
                 J_.kv("X_nodes", arr("X_nodes", Xg, {N, NB}));
                 J_.close('}');
+                {
+                    // n2a_nl: Newton at its floor (a step that does not halve the rows) records the floor; --newton-floor-memo: a centre whose
+                    // Newton step was futile at an earlier pass is not re-linearised while its rows stay within twice that floor
+                    size_t nh = newton_hist.size();
+                    bool stagn = nh > 1 && newton_hist[nh - 1] > st::HALVE * newton_hist[nh - 2];
+                    if (stagn) {
+                        nfloor[g] = std::max(newton_hist[nh - 1], newton_hist[nh - 2]);
+                    } else if (c_.newton_floor_memo && newt == 0 && nfloor.count(g) && newton_hist[nh - 1] <= 2 * nfloor[g]) {
+                        memo_used = true;
+                        break;
+                    }
+                }
                 if (st::newton_continue(newton_hist, Smax, newt, c_.newton, isint, c_.defect)) {
                     Xk = Xg;
                     continue;
@@ -623,6 +641,7 @@ inline void Engine::run() {
                 if (isint) cache[g] = {Ms, Mc};
                 J_.kv("rows_g", Json::num(rres));
                 J_.kv("newton_hist", Json::nums(newton_hist));
+                if (c_.newton_floor_memo) J_.kv("newton_floor_memo", memo_used ? "true" : "false");
                 J_.kv("cent_after", cent());
                 J_.kv("pending_after", Json::nums(Q.after()));
             }
@@ -643,6 +662,15 @@ inline void Engine::run() {
         J_.kv("cent_end", cent());
         J_.close('}');
         if (ps && dch < c_.pass_tol) { ps++; break; }
+        if (c_.pass_stop > 0) {
+            // research round 1049 (n2a_nl --pass-stop): converged when the change relative to the series' scale (its largest entry) stays below
+            // pass_stop for two consecutive passes
+            double scl = 0.0;
+            for (auto& en : C)
+                for (auto& v : en.m) scl = std::max(scl, std::abs(v));
+            rel_hist.push_back(dch / std::max(scl > 0 ? scl : 1.0, 1e-300));
+            if (ps && rel_hist.size() >= 2 && rel_hist.back() < c_.pass_stop && rel_hist[rel_hist.size() - 2] < c_.pass_stop) { ps++; break; }
+        }
     }
     J_.close(']');
     J_.kv("families", families_json);

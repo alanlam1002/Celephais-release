@@ -14,7 +14,7 @@
 // Config (whitespace-separated, written by scripts/n3b_linthroat.py m4):
 //   MELLIN 1 | BASE dir | CYL template.json | WORK dir | RM r | KCYL index-of-'cyl K' | UNK NU, NU x (kind name-with-underscores u0 h)
 //   | MKEYS NMK, NMK x (F d k kept) | CUT value, or 'rulec EPS_TAN' | RANK r (-1: by the cut at the first Jacobian) | TIK NT sw, NT x (index scale centre)
-//   | TANOPT options | END
+//   | [EQDROP N, N x label (spaces as ~)] | TANOPT options | END
 // CUT rulec (research rounds 1008-1009, 1038: n3b_linthroat's 'rulec', eps_J measured once per J step): at the J step's first Jacobian the
 // grade-0 columns also at +-2h (Richardson), eps_J central = ||(J_c(2h) - J_c(h)) / 3||_2 / s_0 in the cut's column-scaled eq space (eps_J
 // forward = ||J_f - J_c||_2 / s_0 reported), tau = the largest 'monrow' output at u; cut = max(10 tau, 10 eps_J central, 10 EPS_TAN).
@@ -36,6 +36,7 @@
 #include <fstream>
 #include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -191,6 +192,7 @@ class MellinEval {
     std::vector<double> JH, JM;                  // their full Jacobians at uj (row-major, rows x NU)
     std::vector<double> Ur;                      // the cut's basis (n_eq x r, column-major per combination)
     std::vector<std::string> eqlab, mklab;
+    std::set<std::string> eqdrop;                                 // EQDROP: 'eq' outputs not among the equations
     std::vector<double> cents0;
     int neq = 0, rk = -1, ncall = 0;
     int mpirank = 0, mpisize = 1;
@@ -231,7 +233,22 @@ class MellinEval {
         need("TIK"); in >> ntik >> sw;
         tik_i.resize(ntik); tik_s.resize(ntik); tik_c.assign(ntik, 0.0);
         for (int k = 0; k < ntik; k++) in >> tik_i[k] >> tik_s[k] >> tik_c[k];
-        need("TANOPT"); in >> tanopt;
+        // research round 1051 (spec section 33, the l-spectra test (i)): optional 'EQDROP N label~with~tildes ...' -- 'eq' outputs left out of the
+        // equations (the top degrees' aligned-1 rows)
+        in >> tag;
+        if (tag == "EQDROP") {
+            int nd = 0;
+            in >> nd;
+            for (int k = 0; k < nd; k++) {
+                std::string l;
+                in >> l;
+                for (auto& ch : l) if (ch == '~') ch = ' ';
+                eqdrop.insert(l);
+            }
+            in >> tag;
+        }
+        if (tag != "TANOPT") throw std::runtime_error(std::string("mellin config: expected TANOPT, got ") + tag);
+        in >> tanopt;
         need("END");
         if (!in) throw std::runtime_error("mellin: truncated config " + path);
         mkdir(work.c_str(), 0755);
@@ -412,7 +429,7 @@ class MellinEval {
                 std::vector<double> cs;
                 static const std::regex num("[0-9]+\\.[0-9]{6}");
                 for (const auto& l : lab) {
-                    if (l.rfind("eq ", 0) == 0) eqlab.push_back(l);
+                    if (l.rfind("eq ", 0) == 0 && !eqdrop.count(l)) eqlab.push_back(l);
                     if (l.rfind("mk ", 0) == 0) mklab.push_back(l);
                     for (auto it = std::sregex_iterator(l.begin(), l.end(), num); it != std::sregex_iterator(); ++it) cs.push_back(std::stod(it->str()));
                 }

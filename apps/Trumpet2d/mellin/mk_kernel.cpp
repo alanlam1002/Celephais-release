@@ -674,6 +674,28 @@ int mk_run_bundle(const char* dir, const char* out, char* err, int errcap) {
 }
 // M3: the forward run, then the tangents.  opts: 'key=value;...' -- which (';'-list as n2a_nl's --tangent, '|'-separated here), tol, passes,
 // ctol, iters, h, margin, threads, top_local, no_stall, mode (fd / jvp)
+// G3 (i): the forward, then the matching keys' exact n-derivative on the final series against the Richardson differences with n moved by +-h,
+// +-2h and the series frozen -> OUT/mk_dn.json (per key: value, exact, D(h), D(2h)); opts 'h=VALUE' (default 1e-5)
+int mk_mk_dn(const char* dir, const char* out, const char* opts, char* err, int errcap) {
+    try {
+        mk::Kernel k;
+        mk::Proj P;
+        mk::en::Setup S;
+        mk::en::Cfg c;
+        mk::en::load_engine(dir, k, P, S, c);
+        double h = 1e-5;
+        std::string o(opts ? opts : "");
+        if (o.rfind("h=", 0) == 0) h = std::stod(o.substr(2));
+        mk::en::Engine E(k, P, S, c, out);
+        E.run();
+        E.mk_dn_check(h);
+        return 0;
+    } catch (const std::exception& ex) {
+        std::snprintf(err, size_t(errcap), "%s", ex.what());
+        return 1;
+    }
+}
+
 int mk_run_bundle_tan(const char* dir, const char* out, const char* opts, char* err, int errcap) {
     try {
         mk::Kernel k;

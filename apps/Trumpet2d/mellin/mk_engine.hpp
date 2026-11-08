@@ -239,6 +239,11 @@ class Engine {
     void tangents(const TanOpt& T);
     // n2a_nl fit_out's fvec: the fit's equations and outputs on a series (the gauge families' amplitudes given)
     std::vector<cd> fvec(Kernel& kc, const std::vector<Entry>& Cx, const std::vector<std::pair<int, double>>& gauge, const std::vector<double>& cents);
+    // G3 (i) (spinning_trumpet NOTES_M4_DESIGN.md section 19): the matching keys' own n-dependence at a FIXED series -- d mk / dn through the
+    // gauge Lie flow (its generator's keys l / n move: a log-moment shift at the same key) and the evaluation at r_m (x_m = r_m^n)
+    std::vector<double> mkey_dn(Kernel& kc, const std::vector<Entry>& Cx, const std::vector<std::pair<int, double>>& gauge);
+    // after run(): the exact d mk / dn on the final series and its Richardson check (n moved by +-h, +-2h, the series frozen) -> OUT/mk_dn.json
+    void mk_dn_check(double h);
 
   private:
     Kernel& k_;
@@ -721,6 +726,193 @@ inline void Engine::run() {
 // (/ the condition rows' scale); the monitored square rows at the other centres (zeros where the grade is beyond the rows' validity); grade
 // 0's rows (--g0rows: aligned -1, 0); stage B's matching keys (--match-data: the fields through gmax + 1 after the gauge families' Lie flow,
 // summed at r_m -- values, d/dr -- on the engine grid, interpolated to the matching nodes, each key's projector row)]
+inline std::vector<double> Engine::mkey_dn(Kernel& kc, const std::vector<Entry>& Cx, const std::vector<std::pair<int, double>>& gauge) {
+    Ctx& c = kc.c;
+    int K = c.K, NF = c.NF;
+    const double n = c.n;
+    auto A2 = [&](const Ser& x, const Ser& y) { return x.empty() ? y : y.empty() ? x : c.add(x, y); };
+    auto M2 = [&](const Ser& x, const Ser& y) { return (x.empty() || y.empty()) ? c.emptyser() : c.mul(x, y); };
+    auto S2 = [&](const Ser& x, double f) { return x.empty() ? x : c.scale(x, cd(f, 0.0)); };
+    auto DR = [&](const Ser& x) { return x.empty() ? x : c.drad(x); };
+    auto DT = [&](const Ser& x) { return x.empty() ? x : c.dth(x); };
+    auto drad_dn = [&](const Ser& a) { return a.empty() ? a : kc.drad_dn(a); };
+    // d / dn drad(f) at fixed keys, f's own derivative df
+    auto ddrad = [&](const Ser& f, const Ser& df) { return A2(DR(df), drad_dn(f)); };
+    Ser F[6], dF[6];
+    kc.fields(Cx, c_.gmax + 1, F);
+    for (int i = 0; i < 6; i++) dF[i] = c.emptyser();
+    if (!gauge.empty()) {
+        // the generator and its n-derivative: a piece at key l / n with moment 0 a_0 -> d / dn: moment 1 = a_0 (-l / n^2) (x^key's key moving)
+        fm::Xi xi = fm::lie_xi(c, gauge, S_.TH), dxi{c.emptyser(), c.emptyser(), c.emptyser()};
+        {
+            auto one = [&](double key, double cf, const std::vector<double>& f, int e, double dk) {
+                Piece v = c.zeros(1);
+                if (K > 1)
+                    for (int q = 0; q < NF; q++) v.a[size_t(NF) + q] = ct::mul(cd(cf, 0.0), cd(f[q], 0.0)) * dk;
+                std::vector<std::pair<Key, Piece>> d;
+                d.emplace_back(Key{key, false}, std::move(v));
+                return c.make(std::move(d), true, e, BIG);
+            };
+            for (auto& lc : gauge) {
+                int l = lc.first;
+                double key = l / n, dk = -double(l) / (n * n);
+                std::vector<double> co(NF), si(NF);
+                for (int q = 0; q < NF; q++) { co[q] = std::cos(l * S_.TH[q]); si[q] = std::sin(l * S_.TH[q]); }
+                dxi.xr = A2(dxi.xr, one(key, lc.second, co, 1, dk));
+                dxi.xr_r = A2(dxi.xr_r, one(key, lc.second, co, 0, dk));
+                dxi.xt = A2(dxi.xt, one(key, lc.second, si, 0, dk));
+            }
+        }
+        std::vector<double> cot(NF), s3(NF);
+        for (int q = 0; q < NF; q++) {
+            cot[q] = std::cos(S_.TH[q]) / std::sin(S_.TH[q]);
+            s3[q] = (6 * c_.J) * std::pow(std::sin(S_.TH[q]), 3.0);
+        }
+        Ser cotS = fm::theta_ser(c, cot), thS = fm::theta_ser(c, s3);
+        // lie_L and its n-derivative (the same sequence as fm::lie_L, each term's product rule)
+        auto L2 = [&](const Ser G[6], const Ser dG[6], Ser out[6], Ser dout[6]) {
+            auto dot = [&](const Ser& f, const Ser& df, Ser& v, Ser& dv) {
+                if (f.empty() && df.empty()) { v = c.emptyser(); dv = c.emptyser(); return; }
+                Ser dr = DR(f), dt = DT(f);
+                v = A2(M2(xi.xr, dr), M2(xi.xt, dt));
+                dv = A2(A2(M2(dxi.xr, dr), M2(xi.xr, ddrad(f, df))), A2(M2(dxi.xt, dt), M2(xi.xt, DT(df))));
+            };
+            Ser w = A2(xi.xr_r, M2(xi.xt, cotS)), dw = A2(dxi.xr_r, M2(dxi.xt, cotS));
+            for (int i = 0; i < 2; i++) {
+                Ser a, da;
+                dot(G[i], dG[i], a, da);
+                out[i] = A2(a, M2(G[i], w));
+                dout[i] = A2(da, A2(M2(dG[i], w), M2(G[i], dw)));
+            }
+            {
+                Ser a, da;
+                dot(G[2], dG[2], a, da);
+                out[2] = A2(A2(a, DR(xi.xr)), S2(w, -1.0));
+                dout[2] = A2(A2(da, ddrad(xi.xr, dxi.xr)), S2(dw, -1.0));
+            }
+            for (int i = 3; i < 5; i++) {
+                const Ser& x = i == 3 ? xi.xr : xi.xt;
+                const Ser& dx = i == 3 ? dxi.xr : dxi.xt;
+                Ser a, da;
+                dot(G[i], dG[i], a, da);
+                Ser xd = DR(x), dxd = ddrad(x, dx);
+                Ser pq = A2(M2(G[3], xd), G[4].empty() ? c.emptyser() : M2(G[4], DT(x)));
+                Ser dpq = A2(A2(M2(dG[3], xd), M2(G[3], dxd)), A2(M2(dG[4], DT(x)), M2(G[4], DT(dx))));
+                out[i] = A2(a, S2(pq, -1.0));
+                dout[i] = A2(da, S2(dpq, -1.0));
+            }
+            {
+                Ser a, da;
+                dot(G[5], dG[5], a, da);
+                out[5] = A2(a, M2(xi.xt, thS));
+                dout[5] = A2(da, M2(dxi.xt, thS));
+            }
+        };
+        double h = 1.0 / c_.gauge_steps;
+        auto addc = [&](const Ser A_[6], const Ser B_[6], double cf, Ser o[6]) { for (int i = 0; i < 6; i++) o[i] = A2(A_[i], S2(B_[i], cf)); };
+        for (int st = 0; st < c_.gauge_steps; st++) {
+            Ser k[4][6], dk[4][6], T[6], dT[6];
+            L2(F, dF, k[0], dk[0]);
+            addc(F, k[0], h / 2, T); addc(dF, dk[0], h / 2, dT);
+            L2(T, dT, k[1], dk[1]);
+            addc(F, k[1], h / 2, T); addc(dF, dk[1], h / 2, dT);
+            L2(T, dT, k[2], dk[2]);
+            addc(F, k[2], h, T); addc(dF, dk[2], h, dT);
+            L2(T, dT, k[3], dk[3]);
+            const double wgt[4] = {h / 6, h / 3, h / 3, h / 6};
+            for (int i = 0; i < 6; i++) {
+                Ser f = F[i], df = dF[i];
+                for (int j = 0; j < 4; j++) { f = A2(f, S2(k[j][i], wgt[j])); df = A2(df, S2(dk[j][i], wgt[j])); }
+                F[i] = f; dF[i] = df;
+            }
+        }
+    }
+    // the evaluation at r_m (fvec's ms_at) and its n-derivative: the series' part ms_at(dG), the explicit x = r^n part
+    // d / dn [x^t (ln x)^m / m!] = ln r [t x^t (ln x)^m / m! + x^t (ln x)^(m-1) / (m-1)!]
+    double r = S_.md_rm, x = std::pow(r, n), lx = std::log(x), lr = std::log(r);
+    std::vector<double> fac(K);
+    {
+        double f = 1.0;
+        for (int m = 0; m < K; m++) { if (m) f *= m; fac[m] = std::pow(lx, m) / f; }
+    }
+    auto ms = [&](const Ser& G, bool expl, std::vector<cd>& tot) {
+        tot.assign(NF, cd(0.0, 0.0));
+        if (G.empty()) return false;
+        for (auto& kv : G.d) {
+            double xt = std::pow(x, kv.first.v);
+            for (int q = 0; q < NF; q++) {
+                cd s = 0.0;
+                for (int m = 0; m < K; m++) {
+                    cd a = kv.second.a[size_t(m) * NF + q];
+                    s += expl ? lr * (kv.first.v * fac[m] + (m ? fac[m - 1] : 0.0)) * a : fac[m] * a;
+                }
+                tot[q] += xt * s;
+            }
+        }
+        double re = std::pow(r, double(G.e));
+        for (auto& z : tot) z *= re;
+        return true;
+    };
+    std::vector<cd> dval[6], ddval[6];
+    for (int f = 0; f < 6; f++) {
+        std::vector<cd> a, b;
+        ms(dF[f], false, a);
+        ms(F[f], true, b);
+        dval[f].assign(NF, 0.0);
+        for (int q = 0; q < NF; q++) dval[f][q] = a[q] + b[q];
+        Ser G = DR(F[f]), dG = ddrad(F[f], dF[f]);
+        ms(dG, false, a);
+        ms(G, true, b);
+        ddval[f].assign(NF, 0.0);
+        for (int q = 0; q < NF; q++) ddval[f][q] = a[q] + b[q];
+    }
+    std::vector<double> out;
+    size_t nk = S_.md_key.size() / 3;
+    int nt = S_.md_nthm;
+    for (size_t q = 0; q < nk; q++) {
+        int f = S_.md_key[3 * q], d = S_.md_key[3 * q + 1];
+        const std::vector<cd>& fv = d ? ddval[f] : dval[f];
+        double s = 0.0;
+        for (int t = 0; t < nt; t++) {
+            cd y = 0.0;
+            for (int k = 0; k < NF; k++) y += fv[k] * S_.md_I[size_t(t) * NF + k];
+            s += y.real() * S_.md_p[q * size_t(nt) + t];
+        }
+        out.push_back(s);
+    }
+    return out;
+}
+
+inline void Engine::mk_dn_check(double h) {
+    if (!S_.has_md) throw std::runtime_error("mk: mk-dn: the bundle has no matching keys");
+    std::vector<double> cents;
+    for (int gg = 1; gg <= c_.gdata; gg++) cents.push_back(gg);
+    for (double g : order_last_) {
+        bool dat = false;
+        for (int gg = 1; gg <= c_.gdata; gg++)
+            if (std::abs(g - gg) < 1e-9) dat = true;
+        if (!dat) cents.push_back(g);
+    }
+    size_t nk = S_.md_key.size() / 3;
+    auto mk_at = [&](double dn) {
+        double n0 = k_.c.n;
+        k_.c.n = n0 + dn;
+        auto v = fvec(k_, C_final_, c_.gauge, cents);
+        k_.c.n = n0;
+        return std::vector<cd>(v.end() - long(nk), v.end());
+    };
+    auto ex = mkey_dn(k_, C_final_, c_.gauge);
+    auto b0 = mk_at(0.0), p1 = mk_at(h), m1 = mk_at(-h), p2 = mk_at(2 * h), m2 = mk_at(-2 * h);
+    std::ofstream f(out_ + "/mk_dn.json");
+    f.precision(17);
+    f << "{\"h\": " << h << ", \"n\": " << k_.c.n << ", \"keys\": [";
+    for (size_t q = 0; q < nk; q++) {
+        double D1 = (p1[q].real() - m1[q].real()) / (2 * h), D2 = (p2[q].real() - m2[q].real()) / (4 * h);
+        f << (q ? ", " : "") << "[" << b0[q].real() << ", " << ex[q] << ", " << D1 << ", " << D2 << "]";
+    }
+    f << "]}\n";
+}
+
 inline std::vector<cd> Engine::fvec(Kernel& kc, const std::vector<Entry>& Cx, const std::vector<std::pair<int, double>>& gauge,
                                     const std::vector<double>& cents) {
     int nn = P_.nn, nc = P_.nc, K = kc.c.K, NF = kc.c.NF;

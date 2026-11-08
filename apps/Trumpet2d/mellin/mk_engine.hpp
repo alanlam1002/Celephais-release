@@ -16,10 +16,14 @@
 #include "mk_families.hpp"
 #include "mk_steps.hpp"
 #include "mk_tangent.hpp"
+#include "mk_cluster.hpp"
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <set>
+#include <tuple>
 #include <map>
 #include <sstream>
 #include <sys/stat.h>
@@ -87,6 +91,9 @@ struct Cfg {
     bool newton_floor_memo = false;                                 // n2a_nl --newton-floor-memo
     int N = 96, gmax = 8, gdata = 1, passes = 1, newton = 6, defect = 8, offl_lmax = 8, meff_mode = 0, meff_chunk = 34, gauge_steps = 2;
     bool cond_fit = false, notgt = false, cond_full = false, robust = false, offl_auto = false;
+    // stage (ii) port, items 2-3 (n2a_nl N2A_CLUSTER, N2A_EPS_S / N2A_XMIN, --no-spur-orth): the clusters, the storage merge, the ii8 projection
+    bool cluster = false, spur_orth = true;
+    double eps_s = 0.0, xmin = 1e-5;
     std::string tgt;
     std::vector<std::pair<std::string, double>> set_offl;
     std::vector<std::pair<int, double>> gauge;
@@ -155,6 +162,8 @@ inline void load_engine(const std::string& dir, Kernel& k, Proj& P, Setup& S, Cf
     c.R = B.getd("R", 0.015); c.N = B.geti("N", 96); c.gmax = B.geti("gmax", 8); c.gdata = B.geti("gdata", 1); c.top = B.getd("TOP", 10);
     c.pass_stop = B.getd("pass_stop", 0.0); c.newton_floor_memo = B.geti("newton_floor_memo", 0) != 0;
     k.c.gauge_reg = B.geti("gauge_reg", 0) != 0; k.c.reg_tol = B.getd("reg_tol", 1e-3);    // stage (ii) item 1 (n2a_nl N2A_GAUGE_REG / _REG_TOL)
+    c.cluster = B.geti("cluster", 0) != 0; c.spur_orth = B.geti("spur_orth", 1) != 0;       // stage (ii) items 2-3
+    c.eps_s = B.getd("eps_s", 0.0); c.xmin = B.getd("xmin", 1e-5);
     c.passes = B.geti("passes", 1); c.pass_tol = B.getd("pass_tol", 1e-10); c.newton = B.geti("newton", 6); c.defect = B.geti("defect", 8);
     c.condtol = B.getd("condtol", 0.0); c.meff_chunk = B.geti("meff_chunk", 34); c.offl_lmax = B.geti("offl_lmax", 8); c.J = B.getd("J", 0.0);
     c.gauge_steps = B.geti("gauge_steps", 2); c.cond_fit = B.geti("cond_fit", 0); c.notgt = B.geti("notarget", 0);
@@ -271,6 +280,8 @@ class Engine {
         return Json::nums(v);
     }
     std::vector<Entry> strip(const std::vector<Entry>& C, double g) {
+        if (const auto* pl = Ctx::kv_cget(k_.c.clus, g))         // stage (ii): a cluster key -- its storage poles' own columns too
+            if (!k_.c.noclus) return cl::strip(k_.c, C, g, *pl, P_.kofs);
         std::vector<Entry> o;
         std::vector<Key> ks;
         for (int j = 0; j < P_.nn; j++) ks.push_back(ckey(k_.c, g + P_.kofs[j]));
@@ -287,14 +298,14 @@ class Engine {
         for (auto& z : v) m = std::max(m, std::abs(z));
         return m;
     }
-    Vec moments(const Vec& X) { return ct::moments_of(X, k_.c.K, P_.nn, S_.e1, c_.R); }
+    Vec moments(const Vec& X) { return ct::moments_of(X, k_.c.K, P_.nn, S_.e1, Rcur_); }
     dt::Eval eval(const std::vector<Entry>& base, double g) {
         dt::Eval ev;
         Kernel* k = &k_;
         const Proj* P = &P_;
         std::vector<int> xr = xrows_;
         Vec e1 = S_.e1;
-        double R = c_.R, top = c_.top;
+        double R = Rcur_, top = c_.top;
         ev.cond = [k, P, base, g, top, xr, e1, R](const Vec& X) {
             k->run(with_grade(k->c, base, X, g, P->kofs, e1, R), nullptr, top);
             int K = k->c.K, nc = P->nc, nn = P->nn;
@@ -324,7 +335,7 @@ class Engine {
         Kernel* k = &k_;
         const Proj* P = &P_;
         Vec e1 = S_.e1;
-        double R = c_.R, top = c_.top;
+        double R = Rcur_, top = c_.top;
         r.gal = [k, P, base, g, top, e1, R](const Vec& X) {
             k->run(with_grade(k->c, base, X, g, P->kofs, e1, R), nullptr, top);
             return project(k->c, k->out, g, 1, P->gfam, P->dE, P->W, false);
@@ -336,12 +347,16 @@ class Engine {
         return r;
     }
     std::vector<int> xrows_;
+    double Rcur_ = 0.0;                                             // stage (ii): the current step's contour radius (a cluster's larger)
     // M3: the forward's last pass -- each centre's step state, the centre order, the final series, the families
     std::map<double, tn::StepState> steps_;
     std::vector<double> order_last_;
     std::vector<Entry> C_final_;
     std::vector<std::pair<std::string, Key>> fams_;
     std::vector<std::pair<std::string, Key>> gfams_;                // stage (ii) item 1: the registered gauge roots ('gauge lL')
+    // stage (ii) item 4: the spurious members (storage member, label, cluster key), sorted -- their l = 0 conditions are fit equations
+    std::vector<std::tuple<double, std::string, double>> spur_r_;
+    std::map<std::string, std::array<double, 3>> spur_;
     static double kf(double g) { return std::nearbyint(g * 1e9) / 1e9; }
 };
 
@@ -367,6 +382,141 @@ inline void Engine::run() {
         t.insert(t.end(), t2.begin(), t2.end());
         return t;
     };
+    // ---- stage (ii) port, items 2-3 (n2a_nl N2A_CLUSTER=1: spec sections 23-32) ----
+    const bool CL = c_.cluster && k_.c.exact && k_.c.Rm > 0;
+    const double R0 = c_.R;
+    const double EPS_S = c_.eps_s > 0 ? c_.eps_s
+        : std::min(k_.c.Rm > 0 ? k_.c.Rm : 1.0, std::pow(1e-12 * k_.c.fact[K - 1] * K, 1.0 / K) / std::abs(std::log(c_.xmin)));
+    std::map<std::string, std::array<double, 3>> SPUR;            // 'spurious S' -> (root, storage member, cluster key)
+    std::set<double> SPUR_SINGLE, ROUTED;                           // (kf keys)
+    auto rkey = [&](double x) { double xi = std::nearbyint(x); return std::abs(x - xi) < 1e-9 ? Key{xi, true} : k_.c.xkey(x); };
+    auto is_root = [&](double x) {                                  // an integer, a family (lapse / gauge) or its tower, a spurious member
+        if (std::abs(x - std::nearbyint(x)) < 1e-9) return true;
+        for (auto* fv : {&fams, &gfams})
+            for (auto& f : *fv) {
+                double k = std::nearbyint(x - f.second.v);
+                if (k >= 0 && std::abs(x - f.second.v - k) < 1e-9) return true;
+            }
+        for (auto& sp : SPUR)
+            if (std::abs(x - sp.second[0]) < 1e-9 || std::abs(x - sp.second[1]) < 1e-9) return true;
+        return false;
+    };
+    auto reg_roots = [&]() {                                        // the registered roots in (gdata, gmax]: integers, families
+        std::set<double> o;
+        for (int x = c_.gdata + 1; x <= int(c_.gmax); x++) o.insert(double(x));
+        for (auto* fv : {&fams, &gfams})
+            for (auto& f : *fv)
+                if (c_.gdata < f.second.v && f.second.v <= c_.gmax + 1e-9) o.insert(f.second.v);
+        return std::vector<double>(o.begin(), o.end());
+    };
+    auto root_clusters = [&]() {                                    // the roots grouped transitively by 2 R_m (groups of two or more)
+        std::set<double> rs;
+        for (int x = c_.gdata + 1; x <= int(c_.gmax); x++) rs.insert(double(x));
+        for (double c0 : k_.c.cent)
+            if (c_.gdata < c0 && c0 <= c_.gmax + 1e-9 && is_root(c0) && !SPUR_SINGLE.count(kf(c0))) rs.insert(c0);
+        std::vector<std::vector<double>> out;
+        std::vector<double> grp;
+        for (double r : rs) {
+            if (!grp.empty() && r - grp.back() >= 2 * k_.c.Rm) {
+                if (grp.size() > 1) out.push_back(grp);
+                grp.clear();
+            }
+            grp.push_back(r);
+        }
+        if (grp.size() > 1) out.push_back(grp);
+        return out;
+    };
+    auto spur_label = [&](double x) {
+        int bL = -1;
+        double bd = 1e300;
+        for (auto& f : fams) {
+            int L = std::stoi(f.first.substr(f.first.rfind('l') + 1));
+            double dd = f.second.v - x;
+            if (L >= 4 && 0.01 < dd && dd < 0.15 && dd < bd) { bd = dd; bL = L; }
+        }
+        if (bL >= 0) return "spurious i" + std::to_string(bL);
+        bd = 1e300;
+        for (int L = 2; L < 40; L += 2) {
+            double dd = 1 + L / k_.c.n - x;
+            if (0 < dd && dd < 0.3 && dd < bd) { bd = dd; bL = L; }
+        }
+        if (bL >= 0) return "spurious ii" + std::to_string(bL);
+        char b[64];
+        std::snprintf(b, sizeof b, "spurious %.4f", x);
+        return std::string(b);
+    };
+    auto root_label = [&](double er) {                              // spec section 31, the first labelling (no N2A_IDENT_PREV yet: item 5)
+        std::string bk;
+        double bp = 0.0, bd = 1e300;
+        for (int i = 1; i <= int(c_.gmax) + 2; i++)
+            if (std::abs(double(i) - er) < bd) { bd = std::abs(double(i) - er); bk = "int " + std::to_string(i); bp = i; }
+        for (auto* fv : {&fams, &gfams})
+            for (auto& f : *fv)
+                if (std::abs(f.second.v - er) < bd) { bd = std::abs(f.second.v - er); bk = f.first; bp = f.second.v; }
+        (void)bp;
+        return bd < R0 / 4 ? bk : spur_label(er);
+    };
+    auto is_spur = [](const std::string& l) { return l.rfind("spurious", 0) == 0; };
+    // spec section 28: the cluster's storage poles -- its member roots and every source exponent inside the contour (the square rows' pieces
+    // of the stripped series at aligned |s - key| < Rr), each at its exact exponent; a source within eps_s of a pole merged into it
+    struct Stor { int roots = 0, sources = 0, merged = 0, moments = 0; std::vector<double> poles; double cond = 0, svmin = 0, radius = 0; };
+    std::map<double, Stor> STOR;
+    auto set_storage = [&](const Ser* rr, double g, double Rr) {
+        auto* cr = Ctx::kv_get(k_.c.clroots, g);
+        std::vector<double> poles = *cr;
+        std::set<double> src;
+        for (int i = 0; i < nn; i++) {
+            int fam = P_.gfam[i];
+            for (auto& kv : rr[fam].d) {
+                double sc = kv.first.v - ROWOFF1[fam] - P_.dE[i];
+                double mx = 0.0;
+                for (auto& z : kv.second.a) mx = std::max(mx, std::abs(z));
+                if (std::abs(sc - g) < Rr && mx > 1e-15) src.insert(std::nearbyint(sc * 1e11) / 1e11);
+            }
+        }
+        int nsrc = 0;
+        std::vector<double> absb;
+        if (std::getenv("MK_DEBUG_STOR")) {                         // diagnostic: the sources read
+            std::printf("    [debug storage %.6f] R %.6f, sources:", g, Rr);
+            for (double s0 : src) std::printf(" %.11f", s0);
+            std::printf("\n");
+        }
+        for (double s0 : src) {
+            double d = 1e300;
+            for (double p0 : poles) d = std::min(d, std::abs(s0 - p0));
+            if (d < 1e-9) continue;
+            if (d < EPS_S) { absb.push_back(s0); continue; }
+            poles.push_back(s0);
+            nsrc++;
+        }
+        std::vector<double> nw;
+        for (double p0 : poles) nw.push_back(rkey(p0).v);
+        std::sort(nw.begin(), nw.end());
+        Ctx::kv_set(k_.c.clus, g, nw);
+        Ctx::kv_set(k_.c.clabs, g, absb);
+        std::vector<double> dmv;
+        for (double p0 : nw) dmv.push_back(p0 - g);
+        int NM;
+        auto A = cl::clus_map(dmv, K, N, Rr, NM);
+        int LK = int(nw.size()) * K;
+        Vec Ac(A.size());
+        for (int q = 0; q < LK; q++) {
+            double cn = 0.0;
+            for (int n_ = 0; n_ < NM; n_++) cn += A[size_t(n_) * LK + q] * A[size_t(n_) * LK + q];
+            cn = std::max(std::sqrt(cn), 1e-300);
+            for (int n_ = 0; n_ < NM; n_++) Ac[size_t(n_) * LK + q] = A[size_t(n_) * LK + q] / cn;
+        }
+        std::vector<double> sv;
+        la::svd(Ac, NM, LK, sv);
+        Stor st;
+        st.roots = int(cr->size()); st.sources = nsrc; st.merged = int(absb.size()); st.poles = nw; st.moments = NM;
+        st.cond = sv.front() / std::max(sv.back(), 1e-300); st.svmin = sv.back(); st.radius = Rr;
+        STOR[kf(g)] = st;
+        std::printf("    [cluster %.6f] storage (spec section 28): %d roots + %d source exponents (%d merged within eps_s %.1e) = %d poles x K %d = %d "
+                    "unknowns from %d contour moments; the scaled map's condition %.1e (sigma_min %.1e)\n", g, st.roots, nsrc, st.merged, EPS_S,
+                    int(nw.size()), K, LK, NM, st.cond, sv.back());
+        std::fflush(stdout);
+    };
     bool have_mref = false;
     double mref_g = 0.0;
     Vec mref_s, mref_c;
@@ -384,6 +534,7 @@ inline void Engine::run() {
         J_.okey("centres");
         J_.open('[');
         fm::Queue Q;
+        Q.manual = CL;                                              // stage (ii): n2a_nl's seen set (marked when decided, not when popped)
         std::vector<Key> lat;
         for (int g = c_.gdata + 1; g <= c_.gmax; g++) lat.push_back(Key{double(g), true});
         Q.push(lat);
@@ -399,6 +550,114 @@ inline void Engine::run() {
                     if (std::abs(c_ - g) <= 1e-12) { reg_ = true; break; }
                 if (!reg_) continue;
             }
+            // ---- stage (ii) (items 2-3): the step's selection (n2a_nl's pass loop under N2A_CLUSTER=1) ----
+            bool iscl = false;
+            Rcur_ = c_.R;
+            std::vector<double> mem;                                // a cluster's member roots (absolute)
+            std::vector<cd> own_roots;                              // the cluster operator's roots within R_0 / 4 of a member
+            if (CL) {
+                if (SPUR_SINGLE.count(kf(g))) {
+                    // spec section 29: a root that is a member of a single product exponent's step is stepped there (stored by it)
+                    std::vector<double> ks;
+                    for (auto& sp : SPUR)
+                        if (std::abs(sp.second[0] - g) < 1e-9 || std::abs(sp.second[1] - g) < 1e-9) ks.push_back(sp.second[2]);
+                    if (ks.empty() || Q.has(rkey(ks[0]).v)) continue;
+                    gk = rkey(ks[0]); g = gk.v; isint = gk.isint;
+                    Q.remove(g);
+                }
+                if (!is_root(g)) {
+                    // spec section 28 / round 1047: a product exponent is never a member -- inside a cluster of roots not yet stepped this pass it
+                    // is that cluster's storage (the cluster first, the exponent back on the queue); within R_0 of a registered root not yet
+                    // stepped, that root's step's storage (routed); else its own step
+                    auto rcs = root_clusters();
+                    std::vector<std::vector<double>> rg;
+                    for (auto& q : rcs) {
+                        double mn = 0.0;
+                        for (double x : q) mn += x;
+                        mn /= q.size();
+                        if (std::abs(g - mn) < 1.2 * (q.back() - q.front()) / 2 + R0) rg.push_back(q);
+                    }
+                    std::vector<double> rr0;
+                    for (double r : reg_roots())
+                        if (std::abs(r - g) < R0 && !Q.has(rkey(r).v)) rr0.push_back(r);
+                    std::vector<double> stm;
+                    if (!rg.empty())
+                        for (double r : rg[0])
+                            if (!Q.has(rkey(r).v)) stm.push_back(r);
+                    Key gp = gk;
+                    if (!stm.empty()) {
+                        Q.push({gp});
+                        gk = rkey(*std::min_element(stm.begin(), stm.end()));
+                        g = gk.v; isint = gk.isint;
+                        Q.remove(g);
+                    } else if (!rr0.empty()) {
+                        double r0 = rr0[0];
+                        for (double r : rr0)
+                            if (std::abs(r - gp.v) < std::abs(r0 - gp.v)) r0 = r;
+                        std::printf("    [g %.6f] a product exponent within reach of the registered root %.6f (%.4f < R_0 %.4f): stored at that root's step\n",
+                                    gp.v, r0, std::abs(r0 - gp.v), R0);
+                        Q.push({gp});
+                        ROUTED.insert(kf(r0));
+                        gk = rkey(r0); g = gk.v; isint = gk.isint;
+                        Q.remove(g);
+                    }
+                }
+                Q.mark(g);
+                if (is_root(g)) {
+                    // the roots closer than 2 R_m to g, transitively: one step at their mean (a re-formed cluster keeps its key)
+                    std::set<double> cs;
+                    for (int x = c_.gdata + 1; x <= int(c_.gmax); x++) cs.insert(double(x));
+                    for (double c0 : k_.c.cent) {
+                        bool iskey = false;
+                        for (auto& e : k_.c.clroots)
+                            if (std::abs(c0 - e.first) < 1e-9) iskey = true;
+                        if (c_.gdata < c0 && c0 <= c_.gmax + 1e-9 && is_root(c0) && !SPUR_SINGLE.count(kf(c0)) && !iskey) cs.insert(c0);
+                    }
+                    const std::vector<double>* kc = nullptr;
+                    double kck = 0.0;
+                    for (auto& e : k_.c.clroots) {
+                        bool hit = std::abs(e.first - g) < 1e-9;
+                        for (double m_ : e.second)
+                            if (std::abs(m_ - g) < 1e-9) hit = true;
+                        if (hit) { kc = &e.second; kck = e.first; break; }
+                    }
+                    mem = kc ? *kc : std::vector<double>{g};
+                    bool grow = !kc;
+                    while (grow) {
+                        grow = false;
+                        for (double c0 : cs) {
+                            bool in = false, near = false;
+                            for (double m_ : mem) {
+                                if (std::abs(c0 - m_) <= 1e-9) in = true;
+                                if (std::abs(c0 - m_) < 2 * k_.c.Rm) near = true;
+                            }
+                            if (!in && near) { mem.push_back(c0); grow = true; }
+                        }
+                    }
+                    if (mem.size() > 1 || ROUTED.count(kf(g))) {
+                        std::sort(mem.begin(), mem.end());
+                        for (double m_ : mem) Q.mark(rkey(m_).v);
+                        double mn = 0.0;
+                        for (double m_ : mem) mn += m_;
+                        Key gck = kc ? Key{kck, std::abs(kck - std::nearbyint(kck)) < 1e-9} : k_.c.xkey(mn / mem.size());
+                        std::vector<double> mr;
+                        for (double m_ : mem) mr.push_back(std::abs(m_ - std::nearbyint(m_)) < 1e-9 ? std::nearbyint(m_) : m_);
+                        Ctx::kv_set(k_.c.clroots, gck.v, mr);
+                        Ctx::kv_set(k_.c.clus, gck.v, mr);
+                        bool have = false;
+                        for (double c0 : k_.c.cent)
+                            if (std::abs(c0 - gck.v) <= 1e-9) have = true;
+                        if (!have) { k_.c.cent.push_back(gck.v); std::sort(k_.c.cent.begin(), k_.c.cent.end()); }
+                        gk = gck; g = gk.v; isint = gk.isint;
+                        iscl = true;
+                        Rcur_ = std::max(R0, 1.2 * (mem.back() - mem.front()) / 2 + R0);
+                        std::printf("    [cluster %.6f] members", g);
+                        for (double m_ : mem) std::printf(" %.6f", m_);
+                        std::printf(" (spread %.4f < 2 R_m %.4f): one step, contour radius %.4f\n", mem.back() - mem.front(), 2 * k_.c.Rm, Rcur_);
+                        std::fflush(stdout);
+                    }
+                }
+            }
             order.push_back(g);
             J_.sep();
             J_.open('{');
@@ -409,7 +668,11 @@ inline void Engine::run() {
             std::vector<Entry> Cs = strip(C, g);
             k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " sources";
             k_.run(Cs, nullptr, c_.top);
-            Vec S = galb(g);
+            Ser rows_pre[6];                                        // stage (ii): the stripped series' rows (the storage's sources, re-read)
+            if (CL)
+                for (int f = 0; f < 6; f++) rows_pre[f] = k_.out[f];
+            if (iscl) set_storage(rows_pre, g, Rcur_);              // spec section 28: the storage at the contour's largest radius
+            Vec S = CL ? project(k_.c, rows_pre, g, 1, P_.gfam, P_.dE, P_.W, false) : galb(g);
             double Smax = maxabs(S);
             auto cand = c_.offl_auto ? fm::announce_candidates(k_.out, P_, g, c_.gmax) : std::vector<std::pair<double, double>>{};
             J_.okey("newton");
@@ -426,7 +689,18 @@ inline void Engine::run() {
                 bool from_cache = newt == 0 && cache.count(g);
                 k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " newton " + std::to_string(newt) + " operator";
                 std::string opname;
-                if (isint || !have_mref) {
+                if (iscl) {                                         // stage (ii): the operator from perturbations at the key, read plainly
+                    opname = "engine-integer";
+                    if (from_cache) { Ms = cache[g].first; Mc = cache[g].second; }
+                    else {
+                        std::vector<Entry> Cs2 = strip(C, g);       // (the storage poles' own columns too, as n2a_nl's strip now)
+                        k_.c.noclus = true;
+                        meff(k_, P_, Cs2, g, c_.top, c_.meff_mode, c_.meff_h, c_.meff_chunk, Ms, Mc);
+                        k_.c.noclus = false;
+                        cache[g] = {Ms, Mc};
+                    }
+                    have_mref = true; mref_g = g; mref_s = Ms; mref_c = Mc;
+                } else if (isint || !have_mref) {
                     opname = "engine-integer";
                     if (newt) meff(k_, P_, with_grade(k_.c, Cs, Xk, g, P_.kofs, S_.e1, c_.R), g, c_.top, c_.meff_mode, c_.meff_h, c_.meff_chunk, Ms, Mc);
                     else if (from_cache) { Ms = cache[g].first; Mc = cache[g].second; }
@@ -437,16 +711,158 @@ inline void Engine::run() {
                     recentre(mref_s, Ms, nm, g - mref_g);
                     recentre(mref_c, Mc, nmc, g - mref_g);
                 }
+                if (CL && newt == 0 && (iscl || (!isint && !is_root(g)))) {
+                    std::vector<int> iax;
+                    {
+                        auto ac = ct::active(g, P_.kofs);
+                        for (int j = 0; j < NB; j++)
+                            if (ac[j]) iax.push_back(j);
+                    }
+                    Vec ev = cl::pencil_roots(Ms, NB, iax, S_.rw, S_.cw);
+                    for (auto& e : ev) e += g;
+                    if (iscl) {
+                        // stage (ii): the cluster's contour encloses its members' roots and no other root of its operator; spec sections 27 / 31:
+                        // every root inside (1.2 x half the spread + R_0) that is no integer's or family's (the spurious third family) is excluded by
+                        // the radius where a margin allows, else a member (its amplitude an N3b parameter)
+                        double half = (mem.back() - mem.front()) / 2;
+                        if (k_.c.gauge_reg) {
+                            for (auto it = SPUR.begin(); it != SPUR.end();)
+                                it = std::abs(it->second[2] - g) < 1e-9 ? SPUR.erase(it) : std::next(it);
+                            std::vector<cd> evs = ev;
+                            std::sort(evs.begin(), evs.end(), [](const cd& a, const cd& b) { return a.real() < b.real(); });
+                            std::set<std::string> done;
+                            for (auto& e : evs) {
+                                double er = e.real();
+                                if (std::abs(e.imag()) > 1e-9 || std::abs(er - g) > 1.2 * half + R0) continue;
+                                std::string lb = root_label(er);
+                                if (!is_spur(lb)) continue;
+                                if (done.count(lb)) std::printf("    [cluster %.6f] WARNING: two roots named %s (the second %.6f)\n", g, lb.c_str(), er);
+                                done.insert(lb);
+                                double dmn = 1e300;
+                                for (double m_ : mem) dmn = std::min(dmn, std::abs(er - m_));
+                                if (std::abs(er - g) - R0 / 4 >= 1.1 * half && dmn >= R0 / 4) {
+                                    std::printf("    [cluster %.6f] spurious root %.6f (%s, the third family): excluded by the radius\n", g, er, lb.c_str());
+                                    continue;
+                                }
+                                // the member: stored on a member within reg_tol, else at its own exponent (a new pole and member)
+                                double mm = mem[0];
+                                for (double m_ : mem)
+                                    if (std::abs(m_ - er) < std::abs(mm - er)) mm = m_;
+                                double stm_;
+                                if (std::abs(mm - er) < k_.c.reg_tol) stm_ = mm;
+                                else {
+                                    stm_ = k_.c.reg_exact(er).v;
+                                    Key xk = k_.c.xkey(stm_);
+                                    auto* cr = Ctx::kv_get(k_.c.clroots, g);
+                                    cr->push_back(xk.v);
+                                    std::sort(cr->begin(), cr->end());
+                                    auto* cp = Ctx::kv_get(k_.c.clus, g);
+                                    bool have = false;
+                                    for (double m_ : *cp)
+                                        if (std::abs(m_ - stm_) <= 1e-9) have = true;
+                                    if (!have) { cp->push_back(xk.v); std::sort(cp->begin(), cp->end()); }
+                                    mem.push_back(stm_);
+                                    std::sort(mem.begin(), mem.end());
+                                }
+                                SPUR[lb] = {er, stm_, g};
+                                std::printf("    [cluster %.6f] spurious root %.6f (the third family) too close to exclude: member '%s' (amplitude an N3b parameter, "
+                                            "datum %.3e), stored at %.6f\n", g, er, lb.c_str(), offl_set.count(lb) ? offl_set[lb] : 0.0, stm_);
+                            }
+                            half = (mem.back() - mem.front()) / 2;
+                        }
+                        std::vector<double> spr;
+                        for (auto& sp : SPUR)
+                            if (std::abs(sp.second[2] - g) < 1e-9) spr.push_back(sp.second[0]);
+                        std::vector<cd> oth;
+                        own_roots.clear();
+                        for (auto& e : ev) {
+                            double dmn = 1e300;
+                            for (double m_ : mem) dmn = std::min(dmn, std::abs(e - m_));
+                            for (double m_ : spr) dmn = std::min(dmn, std::abs(e - m_));
+                            (dmn < R0 / 4 ? own_roots : oth).push_back(e);
+                        }
+                        std::stable_sort(oth.begin(), oth.end(), [&](const cd& a, const cd& b) { return std::abs(a - g) < std::abs(b - g); });
+                        double Rc = 1.2 * half + R0;
+                        if (!oth.empty() && std::abs(oth[0] - g) - R0 / 4 < Rc) Rc = std::max(std::abs(oth[0] - g) - R0 / 4, 1.1 * half);
+                        Rcur_ = Rc;
+                        set_storage(rows_pre, g, Rcur_);
+                        S = project(k_.c, rows_pre, g, 1, P_.gfam, P_.dE, P_.W, false);
+                        Smax = maxabs(S);
+                        for (double p0 : *Ctx::kv_get(k_.c.clus, g)) Q.mark(rkey(p0).v);
+                        if (auto* ab = Ctx::kv_get(k_.c.clabs, g))
+                            for (double p0 : *ab) Q.mark(rkey(p0).v);
+                        std::printf("    [cluster %.6f] its operator's roots: members'", g);
+                        for (auto& e : own_roots) std::printf(" %.6f", e.real());
+                        if (oth.empty()) std::printf("; nearest other - -> contour radius %.4f\n", Rcur_);
+                        else std::printf("; nearest other %.6f (distance %.4f) -> contour radius %.4f\n", oth[0].real(), std::abs(oth[0] - g), Rcur_);
+                        std::fflush(stdout);
+                    } else {
+                        // spec section 29: a SINGLE product exponent's step that reaches a root of its operator -- excluded by the radius when a
+                        // margin allows (|root - g| - R_0 / 4 >= eps_s), else a member, the step a cluster of that root with g's exponent a pole
+                        std::vector<double> evr;
+                        for (auto& e : ev)
+                            if (std::abs(e.imag()) < 1e-9 && std::abs(e - g) < Rcur_) evr.push_back(e.real());
+                        std::stable_sort(evr.begin(), evr.end(), [&](double a, double b) { return std::abs(a - g) < std::abs(b - g); });
+                        std::vector<double> memb;
+                        std::map<double, std::string> mlab;
+                        for (double er : evr) {
+                            std::string lb = root_label(er);
+                            if (!is_spur(lb)) {
+                                Rcur_ = std::min(Rcur_, std::max(std::abs(er - g) - R0 / 4, EPS_S));
+                                std::printf("    [g %.6f] a root of its operator %.6f is the registered root %s: not spurious; excluded by the radius (%.4f)\n",
+                                            g, er, lb.c_str(), Rcur_);
+                                continue;
+                            }
+                            if (std::abs(er - g) - R0 / 4 >= EPS_S) {
+                                Rcur_ = std::min(Rcur_, std::max(std::abs(er - g) - R0 / 4, EPS_S));
+                                std::printf("    [g %.6f] a root of its operator %.6f (%s) inside the contour: excluded by the radius (%.4f)\n", g, er, lb.c_str(), Rcur_);
+                            } else {
+                                memb.push_back(er);
+                                mlab[er] = lb;
+                            }
+                        }
+                        if (!memb.empty()) {
+                            for (auto it = SPUR.begin(); it != SPUR.end();)
+                                it = std::abs(it->second[2] - g) < 1e-9 ? SPUR.erase(it) : std::next(it);
+                            std::set<double> sts;
+                            for (double er : memb) {
+                                bool at_g = std::abs(er - g) < EPS_S;
+                                double stm_ = at_g ? g : k_.c.reg_exact(er).v;
+                                SPUR[mlab[er]] = {er, stm_, g};
+                                SPUR_SINGLE.insert(kf(er));
+                                sts.insert(rkey(stm_).v);
+                                std::printf("    [g %.6f] a root of its operator %.6f (%s) too close to exclude (%.1e): a member (amplitude an N3b parameter, "
+                                            "datum %.3e), stored at %.6f\n", g, er, mlab[er].c_str(), std::abs(er - g), offl_set.count(mlab[er]) ? offl_set[mlab[er]] : 0.0, stm_);
+                            }
+                            std::vector<double> mr(sts.begin(), sts.end());
+                            Ctx::kv_set(k_.c.clroots, g, mr);
+                            Ctx::kv_set(k_.c.clus, g, mr);
+                            iscl = true;
+                            mem = mr;
+                            own_roots.clear();
+                            for (double er : memb) own_roots.push_back(cd(er, 0.0));
+                            set_storage(rows_pre, g, Rcur_);
+                            S = project(k_.c, rows_pre, g, 1, P_.gfam, P_.dE, P_.W, false);
+                            Smax = maxabs(S);
+                            for (double p0 : *Ctx::kv_get(k_.c.clus, g)) Q.mark(rkey(p0).v);
+                            if (auto* ab = Ctx::kv_get(k_.c.clabs, g))
+                                for (double p0 : *ab) Q.mark(rkey(p0).v);
+                        }
+                    }
+                }
                 k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " contour/sources";
                 // the contour step
-                Vec Sn = newt ? st::newton_sources(Xk, Ms, K, NB, S_.e1, c_.R, rowsfn(Cs, g)) : ct::nodes_of(S, K, NB, S_.e1, c_.R);
+                bool clk_;
+                auto dmk_ = cl::clus_mem(k_.c, g, clk_);              // stage (ii): a cluster key -- the sources' poles at its storage
+                Vec Sn = newt ? st::newton_sources(Xk, Ms, K, NB, S_.e1, Rcur_, rowsfn(Cs, g))
+                              : (clk_ ? cl::nodes_of(S, dmk_, K, NB, S_.e1, Rcur_) : ct::nodes_of(S, K, NB, S_.e1, Rcur_));
                 act = ct::active(g, P_.kofs);
                 xrows_.clear();
                 for (int j = 0; j < NB; j++)
                     if (!act[j]) xrows_.push_back(j);
                 double kf = std::nearbyint(g * 1e9) / 1e9;
                 ct::Contour o;
-                ct::contour(Ms, NB, S_.rw, S_.cw, S_.e1, c_.R, act, Sn, rk_fix.count(kf) ? rk_fix[kf] : -1, o);
+                ct::contour(Ms, NB, S_.rw, S_.cw, S_.e1, Rcur_, act, Sn, rk_fix.count(kf) ? rk_fix[kf] : -1, o);
                 if (!rk_fix.count(kf)) rk_fix[kf] = o.rk_thr;
                 int rk = o.rk;
                 stc.Minv = o.Minv;
@@ -510,6 +926,347 @@ inline void Engine::run() {
                         families_json = F.s.str();
                     }
                 }
+                if (!isint && iscl) {
+                    // ---- stage (ii): the cluster's step (spec sections 24-32) -- n2a_nl's off-integer branch at a cluster key ----
+                    bool okc;
+                    std::vector<double> dm = cl::clus_mem(k_.c, g, okc);
+                    double R = Rcur_;
+                    auto tgdc = [&](const Vec& X) { return st::tg_dc(X, NB, S_.e1, R); };
+                    auto tg2 = [&](const Vec& X) {                  // moments 0 and 1 of the node values (all columns): 2 NB
+                        Vec o2(2 * NB, 0.0);
+                        for (int k = 0; k < N; k++)
+                            for (int j = 0; j < NB; j++) {
+                                o2[j] += R / N * S_.e1[k] * X[size_t(k) * NB + j];
+                                o2[NB + j] += R * R / N * S_.e1[k] * S_.e1[k] * X[size_t(k) * NB + j];
+                            }
+                        return o2;
+                    };
+                    // the labelled members: the lapse families first (by value), then the gauge roots, then the spurious members (by root)
+                    std::vector<std::pair<std::string, double>> labl;
+                    for (auto* fv : {&fams, &gfams})
+                        for (auto& f : *fv) {
+                            bool hit = std::abs(f.second.v - g) < 1e-12;
+                            for (double m_ : mem)
+                                if (std::abs(f.second.v - m_) < 1e-9) hit = true;
+                            if (hit) labl.emplace_back(f.first, f.second.v);
+                        }
+                    std::stable_sort(labl.begin(), labl.end(), [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) {
+                        bool ga = a.first.rfind("gauge", 0) == 0, gb = b.first.rfind("gauge", 0) == 0;
+                        return ga != gb ? gb : a.second < b.second;
+                    });
+                    std::vector<std::pair<std::string, double>> spl;
+                    for (auto& sp : SPUR)
+                        if (std::abs(sp.second[2] - g) < 1e-9) spl.emplace_back(sp.first, sp.second[0]);
+                    std::stable_sort(spl.begin(), spl.end(), [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) { return a.second < b.second; });
+                    std::vector<std::string> lab_;
+                    for (auto& l : labl) lab_.push_back(l.first);
+                    for (auto& l : spl) lab_.push_back(l.first);
+                    std::vector<Vec> Wq = o.Wq;
+                    Vec Xg_ = o.X0;
+                    struct Lab { std::string label; double root, svmin, svmax, pres; bool datum_none; double datum; };
+                    std::vector<Lab> per;
+                    std::vector<int> spq;
+                    std::vector<cd> dat;
+                    if (rk) {
+                        if (!lab_.empty()) {
+                            // each labelled member's datum on the residue combination nearest its null vector at its own root (the cluster's
+                            // operator there); the registry's centre moved to the operator's root of that identity (its towers with it)
+                            std::vector<double> own_r;
+                            for (auto& e : own_roots)
+                                if (std::abs(e.imag()) < 1e-9) own_r.push_back(e.real());
+                            Vec U_(size_t(NB) * rk);
+                            for (int q = 0; q < rk; q++) {
+                                auto t = tgdc(Wq[q]);
+                                for (int j = 0; j < NB; j++) U_[size_t(j) * rk + q] = t[j];
+                            }
+                            std::vector<Vec> Acols;
+                            int nl = std::min(int(lab_.size()), rk);
+                            for (int li = 0; li < nl; li++) {
+                                const std::string& lb = lab_[li];
+                                bool sp = is_spur(lb);
+                                auto* regv = lb.rfind("gauge", 0) == 0 ? &gfams : &fams;
+                                double sf = 0.0;
+                                Key* regk = nullptr;
+                                if (sp) sf = SPUR[lb][0];
+                                else
+                                    for (auto& f : *regv)
+                                        if (f.first == lb) { sf = f.second.v; regk = &f.second; }
+                                if (!own_r.empty() && !sp) {
+                                    std::vector<double> idr;
+                                    for (double e : own_r)
+                                        if (root_label(e) == lb) idr.push_back(e);
+                                    double rt = sf;
+                                    if (!idr.empty()) {
+                                        rt = idr[0];
+                                        for (double e : idr)
+                                            if (std::abs(e - sf) < std::abs(rt - sf)) rt = e;
+                                    }
+                                    if (std::abs(rt - sf) > 1e-12 && !(mem.size() == 1 && ROUTED.count(Engine::kf(mem[0])))) {
+                                        Key nk = k_.c.xkey(rt);
+                                        std::printf("    [cluster %.6f] %s: the registered centre %.9f -> the operator's root %.9f (moved %.1e)\n", g, lb.c_str(), sf, nk.v, nk.v - sf);
+                                        if (regk) *regk = nk;
+                                        std::vector<std::pair<double, double>> mv{{sf, nk.v}};
+                                        if (k_.c.gauge_reg)
+                                            for (int kk = 1; kk <= int(c_.gmax); kk++)
+                                                if (sf + kk <= c_.gmax + 1e-9) mv.emplace_back(sf + kk, nk.v + kk);
+                                        for (auto& ow : mv) {
+                                            double o_ = ow.first, w_ = ow.second;
+                                            Key wk = k_.c.xkey(w_);
+                                            std::vector<double> cn;
+                                            for (double c0 : k_.c.cent)
+                                                if (std::abs(c0 - o_) > 1e-12) cn.push_back(c0);
+                                            bool have = false;
+                                            for (double c0 : k_.c.cent)
+                                                if (std::abs(c0 - w_) <= 1e-12) have = true;
+                                            if (!have) cn.push_back(wk.v);
+                                            std::sort(cn.begin(), cn.end());
+                                            k_.c.cent = cn;
+                                            for (auto* D_ : {&k_.c.clus, &k_.c.clroots})
+                                                for (auto& e : *D_)
+                                                    for (auto& m_ : e.second)
+                                                        if (std::abs(m_ - std::nearbyint(m_)) > 1e-9 && std::abs(m_ - o_) < 1e-12) m_ = wk.v;
+                                            if (std::abs(o_ - sf) > 1e-12) {
+                                                int ndrop = 0;
+                                                std::vector<Entry> Cn;
+                                                for (auto& en : C) {
+                                                    if (std::abs(en.t.v - (o_ + P_.kofs[en.j])) < 1e-12) { ndrop++; continue; }
+                                                    Cn.push_back(en);
+                                                }
+                                                C = Cn;
+                                                std::printf("    [cluster %.6f] %s + %d: the tower %.9f -> %.9f (%d stored entries dropped)\n", g, lb.c_str(),
+                                                            int(std::nearbyint(o_ - sf)), o_, w_, ndrop);
+                                                if (w_ > g + 1e-9) Q.push({wk});
+                                            }
+                                        }
+                                        mem = *Ctx::kv_get(k_.c.clroots, g);
+                                        sf = nk.v;
+                                    }
+                                }
+                                double d = sf - g;
+                                size_t nmm = size_t(NB) * NB;
+                                int na_ = int(o.ia.size());
+                                Vec Mf(size_t(na_) * na_);
+                                for (int a = 0; a < na_; a++)
+                                    for (int b = 0; b < na_; b++) {
+                                        size_t ij = size_t(o.ia[a]) * NB + o.ia[b];
+                                        Mf[size_t(a) * na_ + b] = (Ms[ij] + d * Ms[nmm + ij] + d * d * Ms[2 * nmm + ij]) / (S_.rw[o.ia[a]] * S_.cw[o.ia[b]]);
+                                    }
+                                std::vector<double> svf;
+                                Vec Uf, Vf;
+                                la::svd(Mf, na_, na_, svf, &Uf, &Vf, true);
+                                Vec vf(NB, 0.0);
+                                for (int b = 0; b < na_; b++) vf[o.ia[b]] = std::conj(Vf[size_t(na_ - 1) * na_ + b]) / S_.cw[o.ia[b]];
+                                Vec a_ = la::lstsq(U_, NB, rk, vf, 1);
+                                double rn = 0.0, vn = 0.0;
+                                for (int j = 0; j < NB; j++) {
+                                    cd t = -vf[j];
+                                    for (int q = 0; q < rk; q++) t += U_[size_t(j) * rk + q] * a_[q];
+                                    rn += std::norm(t);
+                                    vn += std::norm(vf[j]);
+                                }
+                                Acols.push_back(Vec(a_.begin(), a_.begin() + rk));
+                                Lab lr{lb, sf, svf.back(), svf.front(), std::sqrt(rn) / std::max(std::sqrt(vn), 1e-300), sp, 0.0};
+                                lr.datum = sp ? (offl_set.count(lb) ? offl_set[lb] : 0.0) : lb.rfind("gauge", 0) == 0 ? 0.0 : (offl_set.count(lb) ? offl_set[lb] : 0.0);
+                                lr.datum_none = false;                  // (the parameter route: a spurious member's datum is its N3b parameter)
+                                per.push_back(lr);
+                            }
+                            std::vector<Vec> Wl;
+                            for (int k = 0; k < nl; k++) {
+                                Vec w(Wq[0].size(), 0.0);
+                                for (int q = 0; q < rk; q++)
+                                    for (size_t i = 0; i < w.size(); i++) w[i] += Acols[k][q] * Wq[q][i];
+                                Wl.push_back(w);
+                            }
+                            if (rk > nl) {
+                                Vec Am(size_t(rk) * (nl + rk), 0.0);
+                                for (int q = 0; q < rk; q++) {
+                                    for (int k = 0; k < nl; k++) Am[size_t(q) * (nl + rk) + k] = Acols[k][q];
+                                    Am[size_t(q) * (nl + rk) + nl + q] = 1.0;
+                                }
+                                Vec Qa = cl::qr_q(Am, rk, nl + rk);           // rk x rk
+                                for (int k = nl; k < rk; k++) {
+                                    Vec w(Wq[0].size(), 0.0);
+                                    for (int q = 0; q < rk; q++)
+                                        for (size_t i = 0; i < w.size(); i++) w[i] += Qa[size_t(q) * rk + k] * Wq[q][i];
+                                    Wl.push_back(w);
+                                }
+                            }
+                            Wq = Wl;
+                            for (auto& lr : per)
+                                std::printf("    [cluster %.6f] residue rank %d; %s on its null vector (sigma_min %.1e of %.1e at the root %.6f; projection residual %.1e): datum %s\n",
+                                            g, rk, lr.label.c_str(), lr.svmin, lr.svmax, lr.root, lr.pres, lr.label.rfind("gauge", 0) == 0 ? "pinned to 0 (gauge)" : "given");
+                        }
+                        for (auto& w : Wq) {                            // unit residue, the largest u_g residue real positive
+                            auto t = tg2(w);
+                            double nr = 0.0;
+                            for (int j = 0; j < NB; j++) nr += std::norm(t[j]);
+                            nr = std::sqrt(nr);
+                            for (auto& z : w) z /= nr;
+                            t = tg2(w);
+                            int im = 0;
+                            for (int j = 1; j < nn; j++)
+                                if (std::abs(t[j]) > std::abs(t[im])) im = j;
+                            cd ph = std::exp(cd(0.0, -std::arg(t[im])));
+                            for (auto& z : w) z *= ph;
+                        }
+                        if (!lab_.empty())
+                            for (size_t q = 0; q < Wq.size() && q < lab_.size(); q++) {
+                                const std::string& lb = lab_[q];
+                                dat.push_back(lb.rfind("gauge", 0) == 0 ? 0.0 : (offl_set.count(lb) ? offl_set[lb] : 0.0));
+                                if (is_spur(lb)) spq.push_back(int(q));
+                            }
+                        for (size_t q = 0; q < dat.size(); q++)
+                            for (size_t i = 0; i < Xg_.size(); i++) Xg_[i] += dat[q] * Wq[q][i];
+                    }
+                    // the contour solution's defect correction (the amplitudes held): the CHECK of the local parts below.  (The poles' offsets
+                    // re-read: a labelled member moved to its operator's root moved its pole, as n2a_nl's clus_mem reads the registry here)
+                    dm = cl::clus_mem(k_.c, g, okc);
+                    std::vector<Entry> Cst = strip(C, g);
+                    auto rowsat = [&](const Vec& X) {
+                        k_.run(cl::with_grade(k_.c, Cst, X, g, dm, P_.kofs, S_.e1, R), nullptr, c_.top);
+                        return galb(g);
+                    };
+                    Vec Ahold(size_t(NB) * std::max(rk, 1), 0.0);
+                    for (int q = 0; q < rk; q++) {
+                        auto t = tgdc(Wq[q]);
+                        for (int j = 0; j < NB; j++) Ahold[size_t(j) * rk + q] = t[j];
+                    }
+                    std::vector<double> dres;
+                    int ndef = std::max(c_.defect, 4);
+                    for (int it = 0; it <= ndef; it++) {
+                        Vec Rr = rowsat(Xg_);
+                        dres.push_back(maxabs(Rr));
+                        if (dres.back() < 1e-14 || it == ndef) break;
+                        if (c_.robust && dres.size() > 1 && dres.back() > 0.5 * dres[dres.size() - 2]) break;
+                        Vec nd = cl::nodes_of(Rr, dm, K, NB, S_.e1, R), dX(size_t(N) * NB);
+                        for (int k = 0; k < N; k++)
+                            for (int i = 0; i < NB; i++) {
+                                cd sacc = 0.0;
+                                for (int j = 0; j < NB; j++) sacc += o.Minv[k][size_t(i) * NB + j] * nd[size_t(k) * NB + j];
+                                dX[size_t(k) * NB + i] = -sacc;
+                            }
+                        if (rk) {
+                            auto t = tgdc(dX);
+                            Vec a = la::lstsq(Ahold, NB, rk, t, 1);
+                            for (int q = 0; q < rk; q++)
+                                for (size_t i = 0; i < dX.size(); i++) dX[i] -= a[q] * Wq[q][i];
+                        }
+                        for (size_t i = 0; i < Xg_.size(); i++) Xg_[i] += dX[i];
+                    }
+                    // spec section 29: the storage from each pole's LOCAL principal part -- the particular part from the stripped series' source,
+                    // the roots' data on their null directions, then the defect correction pole by pole (the full rows' stacked readout)
+                    std::vector<std::pair<int, int>> bordl;
+                    for (auto& bd : o.bord) {
+                        int r_ = -1, c0 = -1;
+                        for (size_t a = 0; a < o.ia.size(); a++) {
+                            if (o.ia[a] == bd.first) r_ = int(a);
+                            if (o.ia[a] == bd.second) c0 = int(a);
+                        }
+                        bordl.emplace_back(r_, c0);
+                    }
+                    std::map<int, cd> ampL;
+                    for (auto& lr : per) {
+                        int iL = 0;
+                        for (size_t i = 1; i < dm.size(); i++)
+                            if (std::abs(g + dm[i] - lr.root) < std::abs(g + dm[iL] - lr.root)) iL = int(i);
+                        ampL[iL] = lr.label.rfind("gauge", 0) == 0 ? cd(0.0, 0.0) : cd(lr.datum, 0.0);
+                    }
+                    Vec mS(S.size());
+                    for (size_t i = 0; i < S.size(); i++) mS[i] = -S[i];
+                    cl::LocalInfo info;
+                    Vec XL = cl::local_pp(Ms, NB, nn, K, o.ia, bordl, dm, mS, R, EPS_S, S_.rw, S_.cw, &ampL, &info);
+                    std::vector<double> histL;
+                    Vec RL;
+                    for (int itL = 0; itL < ndef + 4; itL++) {
+                        k_.run(cl::with_grade_mom(k_.c, Cst, XL, g, dm, P_.kofs), nullptr, c_.top);
+                        RL = galb(g);
+                        histL.push_back(maxabs(RL));
+                        size_t h = histL.size();
+                        if (histL.back() < 1e-14 || (h > 2 && histL[h - 1] > 0.5 * histL[h - 2] && histL[h - 2] > 0.5 * histL[h - 3])) break;
+                        Vec mR(RL.size());
+                        for (size_t i = 0; i < RL.size(); i++) mR[i] = -RL[i];
+                        Vec dXL = cl::local_pp(Ms, NB, nn, K, o.ia, bordl, dm, mR, R, EPS_S, S_.rw, S_.cw, nullptr, nullptr);
+                        for (size_t i = 0; i < XL.size(); i++) XL[i] += dXL[i];
+                    }
+                    Vec Fc = project(k_.c, k_.out, g, 1, P_.cfam, P_.cdE, P_.Wc, true);   // the conditions (not imposed), the last rows
+                    if (!spq.empty() && c_.spur_orth) {
+                        // research round 1049 (option (c)): the particular solution's component along a spurious member's null direction removed,
+                        // the amplitude parameter the whole of it
+                        for (int q : spq) {
+                            const std::string& lb = lab_[q];
+                            int i = 0;
+                            for (size_t ii = 1; ii < dm.size(); ii++)
+                                if (std::abs(g + dm[ii] - SPUR[lb][1]) < std::abs(g + dm[i] - SPUR[lb][1])) i = int(ii);
+                            if (!info.vhat.count(i)) {
+                                std::printf("    [cluster %.6f] %s: its storage pole %.6f is regular -- no null direction to project\n", g, lb.c_str(), g + dm[i]);
+                                continue;
+                            }
+                            Vec v = info.vhat[i];
+                            double vn = 0.0;
+                            for (auto& z : v) vn += std::norm(z);
+                            vn = std::sqrt(vn);
+                            for (auto& z : v) z /= vn;
+                            cd c0 = 0.0;
+                            for (int j = 0; j < NB; j++) c0 += std::conj(v[j]) * XL[size_t(i * K) * NB + j];
+                            cd a0 = ampL.count(i) ? ampL[i] : cd(0.0, 0.0);
+                            cd dl0 = info.dl.count(i) ? info.dl[i] : cd(0.0, 0.0);
+                            for (int m = 0; m < K; m++) {
+                                cd f = (a0 - c0) * std::pow(dl0, m);
+                                for (int j = 0; j < NB; j++) XL[size_t(i * K + m) * NB + j] += f * v[j];
+                            }
+                            std::printf("    [cluster %.6f] %s (pole %.6f): the particular solution's component along the null direction %.3e%+.3ei removed, the "
+                                        "amplitude %.3e%+.3ei (the N3b parameter) the whole of it (round 1049)\n", g, lb.c_str(), g + dm[i], (c0 - a0).real(),
+                                        (c0 - a0).imag(), a0.real(), a0.imag());
+                        }
+                    }
+                    // the CHECK: the contour solution's moments against the local parts'
+                    int NMc;
+                    auto Amc = cl::clus_map(dm, K, N, R, NMc);
+                    double chk = 0.0, mumax = 0.0;
+                    {
+                        int LK = int(dm.size()) * K;
+                        for (int n_ = 0; n_ < NMc; n_++)
+                            for (int j = 0; j < NB; j++) {
+                                cd mu = 0.0;
+                                for (int k = 0; k < N; k++) mu += std::pow(R * S_.e1[k], n_ + 1) * Xg_[size_t(k) * NB + j];
+                                mu = mu / double(N) / std::pow(R, n_);
+                                cd ax = 0.0;
+                                for (int q = 0; q < LK; q++) ax += Amc[size_t(n_) * LK + q] * XL[size_t(q) * NB + j] * std::pow(R, -(q % K));
+                                chk = std::max(chk, std::abs(ax - mu));
+                                mumax = std::max(mumax, std::abs(mu));
+                            }
+                    }
+                    chk /= std::max(mumax, 1e-300);
+                    std::printf("    [cluster %.6f] local principal parts (spec section 29): %d poles (%d roots), rows", g, int(dm.size()), int(info.singular.size()));
+                    for (double h : histL) std::printf(" %.1e", h);
+                    std::printf("; the CHECK |contour sum - contour solution| %.1e (relative)\n", chk);
+                    std::fflush(stdout);
+                    if (STOR.count(Engine::kf(g))) {
+                        auto& st0 = STOR[Engine::kf(g)];
+                        (void)st0;
+                    }
+                    C = cl::with_grade_mom(k_.c, C, XL, g, dm, P_.kofs);
+                    stc.Wq = Wq;
+                    stc.X = cl::nodes_of(XL, dm, K, NB, S_.e1, R);
+                    stc.has_label = !lab_.empty();
+                    stc.label = lab_.empty() ? std::string() : lab_[0];
+                    J_.close('}');
+                    J_.close(']');
+                    J_.kv("offlattice", "true");
+                    J_.kv("cluster", "{\"members\":" + Json::nums(mem) + ",\"radius\":" + Json::num(R) + ",\"poles\":" + Json::nums(*Ctx::kv_get(k_.c.clus, g)) +
+                                         ",\"merged\":" + Json::nums(Ctx::kv_get(k_.c.clabs, g) ? *Ctx::kv_get(k_.c.clabs, g) : std::vector<double>{}) +
+                                         ",\"check\":" + Json::num(chk) + ",\"singular\":" + Json::nums(info.singular) + "}");
+                    std::string ls = "[";
+                    for (size_t q = 0; q < lab_.size(); q++) ls += (q ? "," : "") + Json::str(lab_[q]);
+                    J_.kv("labels", ls + "]");
+                    J_.kv("defect", Json::nums(dres));
+                    J_.kv("defect_local", Json::nums(histL));
+                    J_.kv("conditions", arr("conditions", Fc, {long(Fc.size() / nc), nc}));
+                    J_.kv("X", arr("X", XL, {long(XL.size() / NB), NB}));
+                    J_.kv("cent_after", cent());
+                    offint_done = true;
+                    break;
+                }
                 if (!isint) {
                     // the off-integer centre: the family's datum, the defect loop, the conditions (not imposed)
                     std::string lab;
@@ -523,10 +1280,10 @@ inline void Engine::run() {
                     Vec Xs = o.X0;
                     bool hf = false;
                     cd amp(0.0, 0.0);
-                    if (rk) dt::offl_start(o.X0, o.Wq, nn, NB, S_.e1, c_.R, !lab.empty(), datum, c_.cond_fit, eval(Cs, g), Wn, Xs, hf, amp);
+                    if (rk) dt::offl_start(o.X0, o.Wq, nn, NB, S_.e1, Rcur_, !lab.empty(), datum, c_.cond_fit, eval(Cs, g), Wn, Xs, hf, amp);
                     st::DefectOut d;
-                    st::defect_off(Xs, o.Minv, Wn, K, NB, S_.e1, c_.R, std::max(c_.defect, 4), c_.robust, rowsfn(Cs, g), d);
-                    C = with_grade(k_.c, C, d.X, g, P_.kofs, S_.e1, c_.R);
+                    st::defect_off(Xs, o.Minv, Wn, K, NB, S_.e1, Rcur_, std::max(c_.defect, 4), c_.robust, rowsfn(Cs, g), d);
+                    C = with_grade(k_.c, C, d.X, g, P_.kofs, S_.e1, Rcur_);
                     stc.Wq = Wn;
                     stc.X = d.X;
                     stc.has_label = !lab.empty();
@@ -570,7 +1327,7 @@ inline void Engine::run() {
                     stc.has_src = true;
                     stc.src_tgt.assign(2 * size_t(NB), std::string());
                     for (auto& h : hit) stc.src_tgt[h.first] = S_.collab[h.first] + "@t" + std::to_string(int(g + P_.kofs[h.first]));
-                    din.nn = nn; din.NB = NB; din.rk = rk; din.R = c_.R; din.e1 = S_.e1; din.X0 = o.X0; din.Wq = o.Wq; din.g = g;
+                    din.nn = nn; din.NB = NB; din.rk = rk; din.R = Rcur_; din.e1 = S_.e1; din.X0 = o.X0; din.Wq = o.Wq; din.g = g;
                     din.notgt = c_.notgt; din.cond_fit = c_.cond_fit; din.cond_full = c_.cond_full; din.condtol_fixed = c_.condtol; din.lc = S_.lc;
                     din.j_br0 = S_.j_br0;
                     din.warm = c_warm.count(kf) && int(c_warm[kf].size()) == rk;
@@ -626,7 +1383,7 @@ inline void Engine::run() {
                 }
                 k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " defect";
                 st::DefectOut d;
-                st::defect_int(Xg, o.Minv, Wn, act, Smax, K, NB, S_.e1, c_.R, c_.defect, c_.robust, dfix, rowsfn(Cs, g), d);
+                st::defect_int(Xg, o.Minv, Wn, act, Smax, K, NB, S_.e1, Rcur_, c_.defect, c_.robust, dfix, rowsfn(Cs, g), d);
                 Xg = d.X;
                 stc.X = Xg;
                 newton_hist.push_back(d.rows_after);
@@ -657,7 +1414,7 @@ inline void Engine::run() {
             steps_[std::nearbyint(g * 1e9) / 1e9] = stc;
             if (!offint_done) {
                 J_.close(']');
-                C = with_grade(k_.c, C, Xg, g, P_.kofs, S_.e1, c_.R);
+                C = with_grade(k_.c, C, Xg, g, P_.kofs, S_.e1, Rcur_);
                 k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " rows after";
                 k_.run(C, nullptr, c_.top);
                 Vec rb = galb(g);
@@ -704,6 +1461,10 @@ inline void Engine::run() {
     C_final_ = C;
     fams_ = fams;
     gfams_ = gfams;
+    spur_ = SPUR;
+    spur_r_.clear();
+    for (auto& sp : SPUR) spur_r_.emplace_back(sp.second[1], sp.first, sp.second[2]);
+    std::sort(spur_r_.begin(), spur_r_.end());
     J_.kv("passes_run", std::to_string(std::min(ps, c_.passes)));
     // the final series and the gauge families' Lie flow of it
     {
@@ -959,6 +1720,20 @@ inline std::vector<cd> Engine::fvec(Kernel& kc, const std::vector<Entry>& Cx, co
         for (int m = 0; m < 2; m++)
             for (int q = 0; q < nc; q++) v.push_back(Sq[size_t(m) * nc + q] / S_.rwc[q]);
     }
+    for (auto& sp : spur_r_) {                                      // spec section 27: the spurious members' l = 0 conditions (stored_member)
+        double mem_ = std::get<0>(sp), key_ = std::get<2>(sp), ck;
+        std::vector<double> cm;
+        std::vector<cd> Sq;
+        int off = 0;
+        if (!kc.c.clus.empty() && kc.c.clus_at(key_, ck, cm)) {
+            Sq = project(kc.c, kc.out, key_, 1, P_.cfam, P_.cdE, P_.Wc, true);
+            for (size_t i = 1; i < cm.size(); i++)
+                if (std::abs(cm[i] - mem_) < std::abs(cm[off] - mem_)) off = int(i);
+        } else
+            Sq = project(kc.c, kc.out, mem_, 1, P_.cfam, P_.cdE, P_.Wc, true);
+        for (int m = 0; m < 2; m++)
+            for (int q = 0; q < nc; q++) v.push_back(Sq[size_t(off * K + m) * nc + q] / S_.rwc[q]);
+    }
     for (size_t i = size_t(c_.gdata); i < cents.size(); i++) gal(cents[i], true);
     if (S_.g0rows)
         for (int gg = -1; gg <= 0; gg++) gal(gg, false);
@@ -1020,6 +1795,7 @@ inline std::vector<cd> Engine::fvec(Kernel& kc, const std::vector<Entry>& Cx, co
 // tangent series is zero: their derivative enters through the outputs' Lie flow).  Each direction runs on its own copy of the kernel (its
 // own registry, as the oracle's forked workers).  Output: OUT/tangent/<i>_{col,key,isint,mom}.npy, OUT/tangent.json.
 inline void Engine::tangents(const TanOpt& T) {
+    Rcur_ = c_.R;
     int nn = P_.nn, K = k_.c.K, NB = nn;
     const std::vector<int>& kofs = P_.kofs;
     std::vector<std::pair<std::string, tn::Seed>> dirs;
@@ -1355,6 +2131,10 @@ inline void Engine::tangents(const TanOpt& T) {
             for (int m = 0; m < 2; m++)
                 for (int q = 0; q < P_.nc; q++) lab.push_back(std::string(eq ? "eq" : "mon") + " cond " + fmt("%.6f", gc) + " m" + std::to_string(m) + " " + S_.condlab[q]);
         }
+        for (auto& sp : spur_r_)
+            for (int m = 0; m < 2; m++)
+                for (int q = 0; q < P_.nc; q++)
+                    lab.push_back("eq scond " + std::get<1>(sp) + " " + fmt("%.6f", std::get<0>(sp)) + " m" + std::to_string(m) + " " + S_.condlab[q]);
         for (size_t i = size_t(c_.gdata); i < cents.size(); i++)
             for (int m = 0; m < 2; m++)
                 for (int q = 0; q < P_.nn; q++) lab.push_back("monrow " + fmt("%.6f", cents[i]) + " m" + std::to_string(m) + " " + S_.collab[q]);

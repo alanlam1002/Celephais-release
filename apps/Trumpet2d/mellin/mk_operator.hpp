@@ -60,10 +60,73 @@ inline const Piece* piece_at(Ctx& c, const Ser& s, double Gr, Piece& buf) {
     return any ? &buf : nullptr;
 }
 
-// rows projected at aligned g: (B, K, nrows), rows' weights W (nrows x NF); the family / level per row; B the batch of the result
+// stage (ii) port, item 2 (n2a_nl.piece_at's cluster branch, research round 1032 / spec section 28): at a cluster's grade the content at its
+// MEMBERS' exact exponents -- each piece whose nearest centre is a (shifted) member, or an exponent merged into a pole, re-expanded about its
+// nearest member, the blocks STACKED (members x K); an absent block zeros.  Returns false when no piece is read (all zeros)
+inline bool piece_at_cl(Ctx& c, const Ser& s, double Gr, std::vector<Piece>& blocks) {
+    if (Gr > s.top) throw std::runtime_error("mk: grade beyond validity");
+    double rm = std::max(c.Rm, 1e-9), key;
+    std::vector<double> mem;
+    c.clus_at(Gr, key, mem);
+    std::vector<double> T{Gr};
+    T.insert(T.end(), mem.begin(), mem.end());
+    auto ab = c.clus_abs_at(Gr);
+    T.insert(T.end(), ab.begin(), ab.end());
+    auto inT = [&](double x) {
+        for (double t : T)
+            if (std::abs(x - t) < 1e-9) return true;
+        return false;
+    };
+    blocks.assign(mem.size(), Piece{0, {}});
+    bool any = false;
+    for (auto& kv : s.d) {
+        double e = kv.first.v, dm = 1e300;
+        for (double t : T) dm = std::min(dm, std::abs(e - t));
+        if (dm >= rm) continue;
+        bool skip = false;
+        for (double c_ : c.cent)
+            if (std::abs(c_ - e) < dm - 1e-12 && !inT(c_)) { skip = true; break; }
+        if (skip) continue;
+        double gi = Ctx::pyround(e);
+        if (std::abs(e - gi) < dm - 1e-12 && !inT(gi)) continue;
+        size_t im = 0;
+        for (size_t i = 1; i < mem.size(); i++)
+            if (std::abs(e - mem[i]) < std::abs(e - mem[im])) im = i;
+        double de = e - mem[im];
+        Piece w = std::abs(de) < 1e-14 ? kv.second : c.shift(kv.second, de);
+        if (blocks[im].B == 0) blocks[im] = w;
+        else blocks[im] = c.padd(blocks[im], w);
+        any = true;
+    }
+    return any;
+}
+
+// rows projected at aligned g: (B, K, nrows), rows' weights W (nrows x NF); the family / level per row; B the batch of the result.  Stage
+// (ii): at a cluster's grade (B, L K, nrows), the members' blocks stacked (n2a_nl's stacked readout)
 inline std::vector<cd> project(Ctx& c, const Ser rows[6], double g, int B, const std::vector<int>& fam, const std::vector<int>& lev,
                                const std::vector<cd>& W, bool absent99) {
     int nr = int(fam.size()), K = c.K, NF = c.NF;
+    if (c.is_clus(g)) {
+        int L = c.clus_L(g), LK = L * K;
+        std::vector<cd> out(size_t(B) * LK * nr, 0.0);
+        for (int i = 0; i < nr; i++) {
+            if (absent99 && lev[i] >= 99) continue;
+            std::vector<Piece> bl;
+            if (!piece_at_cl(c, rows[fam[i]], ROWOFF1[fam[i]] + lev[i] + g, bl)) continue;
+            const cd* w = &W[size_t(i) * NF];
+            for (int l = 0; l < L; l++) {
+                if (bl[l].B == 0) continue;
+                for (int b = 0; b < B; b++)
+                    for (int k = 0; k < K; k++) {
+                        const cd* v = &bl[l].a[((bl[l].B == 1 ? 0 : b) * size_t(K) + k) * NF];
+                        cd s = 0.0;
+                        for (int q = 0; q < NF; q++) s += v[q] * w[q];
+                        out[(size_t(b) * LK + l * K + k) * nr + i] = s;
+                    }
+            }
+        }
+        return out;
+    }
     std::vector<cd> out(size_t(B) * K * nr, 0.0);
     for (int i = 0; i < nr; i++) {
         if (absent99 && lev[i] >= 99) continue;

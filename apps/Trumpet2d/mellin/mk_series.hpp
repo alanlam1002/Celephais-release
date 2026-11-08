@@ -71,6 +71,64 @@ struct Ctx {
     // exponents; reg() then merges only near-coincidences (< reg_tol, N2A_REG_TOL 1e-3) instead of everything within R_m
     bool gauge_reg = false;
     double reg_tol = 1e-3;
+    // stage (ii) port, item 2 (spec sections 23-28; n2a_nl CF.clus / clroots / clabs, insertion-ordered as Python's dicts): per cluster key
+    // its storage poles (clus: the member roots and the source poles), its member roots (clroots), the exponents merged into its poles (clabs);
+    // noclus: the plain readout (meff's perturbations at a cluster key)
+    using KV = std::vector<std::pair<double, std::vector<double>>>;
+    KV clus, clroots, clabs;
+    bool noclus = false;
+    static std::vector<double>* kv_get(KV& m, double k) {
+        for (auto& e : m)
+            if (std::abs(e.first - k) < 1e-9) return &e.second;
+        return nullptr;
+    }
+    static const std::vector<double>* kv_cget(const KV& m, double k) {
+        for (auto& e : m)
+            if (std::abs(e.first - k) < 1e-9) return &e.second;
+        return nullptr;
+    }
+    static void kv_set(KV& m, double k, const std::vector<double>& v) {
+        if (auto* p = kv_get(m, k)) *p = v;
+        else m.emplace_back(k, v);
+    }
+    // n2a_nl.clus_at: the cluster read at grade G -- (key + k, members + k) when G is a cluster key shifted by an integer k
+    bool clus_at(double G, double& key, std::vector<double>& mem) const {
+        for (auto& e : clus) {
+            double k = pyround(G - e.first);
+            if (std::abs(G - e.first - k) < 1e-9) {
+                key = e.first + k;
+                mem.clear();
+                for (double m : e.second) mem.push_back(m + k);
+                return true;
+            }
+        }
+        return false;
+    }
+    // n2a_nl.clus_abs_at: the exponents merged into the storage poles of the cluster read at G (shifted alike)
+    std::vector<double> clus_abs_at(double G) const {
+        for (auto& e : clabs) {
+            double k = pyround(G - e.first);
+            if (std::abs(G - e.first - k) < 1e-9) {
+                std::vector<double> o;
+                for (double a : e.second) o.push_back(a + k);
+                return o;
+            }
+        }
+        return {};
+    }
+    // the stacked readout's block count at grade G (1: not a cluster's grade, or the plain readout)
+    int clus_L(double G) const {
+        if (clus.empty() || noclus) return 1;
+        double k;
+        std::vector<double> m;
+        return clus_at(G, k, m) ? int(m.size()) : 1;
+    }
+    bool is_clus(double G) const {
+        if (clus.empty() || noclus) return false;
+        double k;
+        std::vector<double> m;
+        return clus_at(G, k, m);
+    }
     std::vector<double> xk;                     // the interned exact exponents (sorted)
     std::vector<cd> D;                          // d/dtheta on the grid (NF x NF): Dth(v) = v @ D^T
     std::vector<double> fact;

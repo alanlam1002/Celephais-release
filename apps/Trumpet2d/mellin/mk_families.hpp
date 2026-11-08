@@ -172,10 +172,27 @@ struct Queue {
             for (double x : seen)
                 if (x == g.v) { s = true; break; }
             if (s) continue;
-            seen.push_back(g.v);
+            if (!manual) seen.push_back(g.v);
             return true;
         }
         return false;
+    }
+    // stage (ii) port, item 2: n2a_nl's own seen-set handling -- a centre is marked when the recursion decides it (stepped, or stored / routed
+    // elsewhere), not when popped; a product re-queued behind the step that stores it; the redirected centre taken off the queue
+    bool manual = false;
+    bool has(double v) const {
+        for (double x : seen)
+            if (x == v) return true;
+        return false;
+    }
+    void mark(double v) {
+        if (!has(v)) seen.push_back(v);
+    }
+    void remove(double v) {
+        std::vector<Key> u;
+        for (auto& k : pending)
+            if (std::abs(k.v - v) > 1e-12) u.push_back(k);
+        pending = u;
     }
     std::vector<double> after() const {                           // sorted({float(x) for x in pending})
         std::set<double> s;

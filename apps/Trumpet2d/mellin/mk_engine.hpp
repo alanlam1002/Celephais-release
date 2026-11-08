@@ -154,6 +154,7 @@ inline void load_engine(const std::string& dir, Kernel& k, Proj& P, Setup& S, Cf
     auto gs = [&](const std::string& key) { auto i = B.cfg.find(key); return i == B.cfg.end() ? std::string() : i->second; };
     c.R = B.getd("R", 0.015); c.N = B.geti("N", 96); c.gmax = B.geti("gmax", 8); c.gdata = B.geti("gdata", 1); c.top = B.getd("TOP", 10);
     c.pass_stop = B.getd("pass_stop", 0.0); c.newton_floor_memo = B.geti("newton_floor_memo", 0) != 0;
+    k.c.gauge_reg = B.geti("gauge_reg", 0) != 0; k.c.reg_tol = B.getd("reg_tol", 1e-3);    // stage (ii) item 1 (n2a_nl N2A_GAUGE_REG / _REG_TOL)
     c.passes = B.geti("passes", 1); c.pass_tol = B.getd("pass_tol", 1e-10); c.newton = B.geti("newton", 6); c.defect = B.geti("defect", 8);
     c.condtol = B.getd("condtol", 0.0); c.meff_chunk = B.geti("meff_chunk", 34); c.offl_lmax = B.geti("offl_lmax", 8); c.J = B.getd("J", 0.0);
     c.gauge_steps = B.geti("gauge_steps", 2); c.cond_fit = B.geti("cond_fit", 0); c.notgt = B.geti("notarget", 0);
@@ -340,6 +341,7 @@ class Engine {
     std::vector<double> order_last_;
     std::vector<Entry> C_final_;
     std::vector<std::pair<std::string, Key>> fams_;
+    std::vector<std::pair<std::string, Key>> gfams_;                // stage (ii) item 1: the registered gauge roots ('gauge lL')
     static double kf(double g) { return std::nearbyint(g * 1e9) / 1e9; }
 };
 
@@ -354,6 +356,17 @@ inline void Engine::run() {
     std::map<double, int> rk_fix;
     std::map<double, Vec> c_warm;
     std::vector<std::pair<std::string, Key>> fams;                  // fams_offl, in insertion order
+    std::vector<std::pair<std::string, Key>> gfams;                 // fams_gauge (stage (ii) item 1, k_.c.gauge_reg): datum pinned to 0
+    // the families' towers (n2a_nl towers(): the lapse families' -- exactly registered with the gauge roots -- then the gauge roots')
+    auto towers_all = [&]() {
+        std::vector<Key> fk, gk_;
+        for (auto& f : fams) fk.push_back(f.second);
+        for (auto& f : gfams) gk_.push_back(f.second);
+        auto t = fm::towers(k_.c, fk, c_.gmax, k_.c.gauge_reg);
+        auto t2 = fm::towers(k_.c, gk_, c_.gmax, true);
+        t.insert(t.end(), t2.begin(), t2.end());
+        return t;
+    };
     bool have_mref = false;
     double mref_g = 0.0;
     Vec mref_s, mref_c;
@@ -373,15 +386,19 @@ inline void Engine::run() {
         fm::Queue Q;
         std::vector<Key> lat;
         for (int g = c_.gdata + 1; g <= c_.gmax; g++) lat.push_back(Key{double(g), true});
-        std::vector<Key> fk;
-        for (auto& f : fams) fk.push_back(f.second);
         Q.push(lat);
-        Q.push(fm::towers(k_.c, fk, c_.gmax));
+        Q.push(towers_all());
         std::vector<double> order;
         Key gk;
         while (Q.pop(gk)) {
             double g = gk.v;
             bool isint = gk.isint;
+            if (k_.c.gauge_reg && !isint) {                         // spec section 26: a tower moved with its family (no longer registered)
+                bool reg_ = false;
+                for (double c_ : k_.c.cent)
+                    if (std::abs(c_ - g) <= 1e-12) { reg_ = true; break; }
+                if (!reg_) continue;
+            }
             order.push_back(g);
             J_.sep();
             J_.open('{');
@@ -474,9 +491,8 @@ inline void Engine::run() {
                         fm::Lapse L;
                         fm::lapse_roots(k_.c, Ms, NB, S_.rw, S_.cw, o.bord, g, k_.c.n, c_.gmax, c_.offl_lmax, L);
                         for (auto& l : L.lapse) fams.emplace_back("lapse l" + std::to_string(l.first), l.second);
-                        std::vector<Key> fk2;
-                        for (auto& f : fams) fk2.push_back(f.second);
-                        Q.push(fm::towers(k_.c, fk2, c_.gmax));
+                        for (auto& l : L.gauge) gfams.emplace_back("gauge l" + std::to_string(l.first), l.second);
+                        Q.push(towers_all());
                         Json F;
                         F.open('{');
                         F.kv("block_roots_real", Json::nums(L.evr));
@@ -484,6 +500,9 @@ inline void Engine::run() {
                         std::string la = "{";
                         for (size_t q = 0; q < L.lapse.size(); q++) la += (q ? "," : "") + Json::str("lapse l" + std::to_string(L.lapse[q].first)) + ":" + Json::num(L.lapse[q].second.v);
                         F.kv("lapse", la + "}");
+                        std::string ga = "{";
+                        for (size_t q = 0; q < L.gauge.size(); q++) ga += (q ? "," : "") + Json::str("gauge l" + std::to_string(L.gauge[q].first)) + ":" + Json::num(L.gauge[q].second.v);
+                        F.kv("gauge", ga + "}");
                         std::string rg = "[";
                         for (size_t q = 0; q < L.registry.size(); q++) rg += (q ? "," : "") + std::string("[") + std::to_string(L.registry[q].first) + "," + Json::num(L.registry[q].second) + "]";
                         F.kv("registry", rg + "]");
@@ -496,7 +515,10 @@ inline void Engine::run() {
                     std::string lab;
                     for (auto& f : fams)
                         if (keq(f.second, gk)) { lab = f.first; break; }
-                    double datum = (!lab.empty() && offl_set.count(lab)) ? offl_set[lab] : 0.0;
+                    if (lab.empty())                                // stage (ii) item 1: a gauge root, its datum pinned to zero
+                        for (auto& f : gfams)
+                            if (keq(f.second, gk)) { lab = f.first; break; }
+                    double datum = (!lab.empty() && lab.rfind("gauge", 0) != 0 && offl_set.count(lab)) ? offl_set[lab] : 0.0;
                     std::vector<Vec> Wn;
                     Vec Xs = o.X0;
                     bool hf = false;
@@ -681,6 +703,7 @@ inline void Engine::run() {
     J_.kv("families", families_json);
     C_final_ = C;
     fams_ = fams;
+    gfams_ = gfams;
     J_.kv("passes_run", std::to_string(std::min(ps, c_.passes)));
     // the final series and the gauge families' Lie flow of it
     {

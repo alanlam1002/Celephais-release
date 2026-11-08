@@ -67,6 +67,10 @@ struct Ctx {
     // xk: a table of exponents, not centres); the algebra never merges, re-expands or registers; reg() is the recursion's registration (the
     // families, their towers, the announced centres); the merge at readout (mk_operator.hpp piece_at).  Off: the round-1028 merge (canon).
     bool exact = false;
+    // stage (ii) port, item 1 (spec section 26, n2a_nl N2A_GAUGE_REG; on with the clusters): the gauge roots registered at their own exact
+    // exponents; reg() then merges only near-coincidences (< reg_tol, N2A_REG_TOL 1e-3) instead of everything within R_m
+    bool gauge_reg = false;
+    double reg_tol = 1e-3;
     std::vector<double> xk;                     // the interned exact exponents (sorted)
     std::vector<cd> D;                          // d/dtheta on the grid (NF x NF): Dth(v) = v @ D^T
     std::vector<double> fact;
@@ -104,16 +108,39 @@ struct Ctx {
             if (std::abs(x - gi) < 1e-9) return Key{gi, true};
             return canon(x).first;
         }
-        if (std::abs(x - gi) < std::max(Rm, 1e-9)) return Key{gi, true};
+        double rt = gauge_reg ? reg_tol : std::max(Rm, 1e-9);
+        if (std::abs(x - gi) < std::max(rt, 1e-9)) return Key{gi, true};
         if (!cent.empty()) {
             double c = cent[0];
             for (double c_ : cent)
                 if (std::abs(c_ - x) < std::abs(c - x)) c = c_;
-            if (std::abs(c - x) < std::max(Rm, 1e-9)) return Key{c, false};
+            if (std::abs(c - x) < std::max(rt, 1e-9)) return Key{c, false};
         }
         Key k = xkey(x);
         cent.push_back(k.v);
         std::sort(cent.begin(), cent.end());
+        return k;
+    }
+    // n2a_nl.register_exact (spec section 26): a centre at its own exact exponent, never merged into a neighbour within R_m (the gauge roots,
+    // the lapse towers beside them); a near-coincidence (< reg_tol) is the same centre
+    Key reg_exact(double x) {
+        if (!exact) return reg(x);
+        double gi = pyround(x);
+        if (std::abs(x - gi) < 1e-9) return Key{gi, true};
+        if (!cent.empty()) {
+            double c = cent[0];
+            for (double c_ : cent)
+                if (std::abs(c_ - x) < std::abs(c - x)) c = c_;
+            if (std::abs(c - x) < reg_tol) return xkey(c);
+        }
+        Key k = xkey(x);
+        bool have = false;
+        for (double c_ : cent)
+            if (std::abs(c_ - k.v) <= 1e-12) { have = true; break; }
+        if (!have) {
+            cent.push_back(k.v);
+            std::sort(cent.begin(), cent.end());
+        }
         return k;
     }
     std::pair<Key, double> canon(double g) {

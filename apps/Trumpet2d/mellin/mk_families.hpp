@@ -68,6 +68,7 @@ struct Lapse {
     std::vector<cd> eig_all;
     std::vector<double> evr;
     std::vector<std::pair<int, Key>> lapse;          // (l, the refined root's key)
+    std::vector<std::pair<int, Key>> gauge;          // stage (ii) item 1 (c.gauge_reg): (L, the block root nearest L / n)
     std::vector<std::pair<int, double>> registry;    // (l, guess)
 };
 // Ms: 3 x NB x NB; bord: full (row, column) indices
@@ -120,16 +121,32 @@ inline void lapse_roots(Ctx& c, const std::vector<cd>& Ms, int NB, const std::ve
             size_t at = fs.find(k);
             if (at != std::string::npos) sgm = std::stod(fs.substr(at + k.size()));
         }
-        o.lapse.emplace_back(L, c.reg(sgm));                    // n2a_nl: register(sgm)
+        o.lapse.emplace_back(L, c.gauge_reg ? c.reg_exact(sgm) : c.reg(sgm));   // n2a_nl: (register_exact if _GAUGE_REG else register)(sgm)
+    }
+    if (c.gauge_reg) {
+        // spec section 26: the gauge families at L / n (s = L in r units, aligned), each refined to the nearest root of the block operator;
+        // registered exactly, the datum pinned to zero (n2a_nl: range(2, 2 ceil(gmax n / 2) + 2, 2), within 0.01 of L / n, <= gmax)
+        int Lmax = 2 * int(std::ceil(gmax * n / 2));
+        for (int L = 2; L <= Lmax; L += 2) {
+            double guess = L / n;
+            if (guess <= 2 + 1e-9 || guess > gmax + GUESS_MARGIN || o.evr.empty()) continue;
+            size_t im = 0;
+            for (size_t i = 1; i < o.evr.size(); i++)
+                if (std::abs(o.evr[i] - guess) < std::abs(o.evr[im] - guess)) im = i;
+            double sgm = o.evr[im];
+            if (std::abs(sgm - guess) > 0.01 || sgm > gmax) continue;
+            o.gauge.emplace_back(L, c.reg_exact(sgm));
+        }
     }
 }
 
 // the families' lattice towers: [ckey(sf + k) for sf in fams for k in 0 .. int(gmax) if sf + k <= gmax + 1e-9]
-inline std::vector<Key> towers(Ctx& c, const std::vector<Key>& fams, double gmax) {
+// (stage (ii) item 1: exact -- register_exact, the gauge families' towers and, with c.gauge_reg, the lapse families')
+inline std::vector<Key> towers(Ctx& c, const std::vector<Key>& fams, double gmax, bool exact = false) {
     std::vector<Key> t;
     for (auto& sf : fams)
         for (int k = 0; k <= int(gmax); k++)
-            if (sf.v + k <= gmax + 1e-9) t.push_back(c.reg(sf.v + k));      // n2a_nl: register(sf + k)
+            if (sf.v + k <= gmax + 1e-9) t.push_back(exact ? c.reg_exact(sf.v + k) : c.reg(sf.v + k));   // n2a_nl: register(sf + k)
     return t;
 }
 

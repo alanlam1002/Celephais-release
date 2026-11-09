@@ -528,7 +528,9 @@ inline void Engine::run() {
     // N2A_FREEZE=FILE: absent -- decided at this point (the J step's first) and written; present -- replayed by identity
     std::string FZP = std::getenv("N2A_FREEZE") ? std::getenv("N2A_FREEZE") : "";
     const double ID_TOL = std::getenv("N2A_ID_TOL") ? std::atof(std::getenv("N2A_ID_TOL")) : 1e-4;
-    const bool STOR1059 = std::getenv("N2A_STOR_RULE") && std::string(std::getenv("N2A_STOR_RULE")) == "1059";   // round 1059 rule: opt-in
+    const std::string STOR_RULE = std::getenv("N2A_STOR_RULE") ? std::getenv("N2A_STOR_RULE") : "pre1059";   // pre1059 (default), 1059, 1060
+    if (STOR_RULE != "pre1059" && STOR_RULE != "1059" && STOR_RULE != "1060") throw std::runtime_error("N2A_STOR_RULE: pre1059, 1059 or 1060");
+    const bool STOR1059 = STOR_RULE == "1059" || STOR_RULE == "1060";   // the threshold rule and (c): the opt-in rules
     const bool SRC_STRUCT = !(std::getenv("N2A_SRC_STRUCT") && std::string(std::getenv("N2A_SRC_STRUCT")) == "0");   // rule (a) off: 0
     const double SRC_REL = std::getenv("N2A_SRC_REL") ? std::atof(std::getenv("N2A_SRC_REL")) : 1e-12;   // research round 1059
     js::Val FZv;
@@ -685,10 +687,16 @@ inline void Engine::run() {
         }
         double big = 0.0;
         for (auto& kv : cand) big = std::max(big, kv.second);
+        if (STOR_RULE == "1060") {                                       // round 1060 (b'): the stripped rows' largest piece over all grades
+            big = 0.0;
+            for (int i = 0; i < nn; i++)
+                for (auto& kv : rr[P_.gfam[i]].d)
+                    for (auto& z : kv.second.a) big = std::max(big, std::abs(z));
+        }
         std::set<double> src;
         for (auto& kv : cand) {
             std::string lb = (STOR1059 || std::getenv("MK_SRC_LOG")) ? pole_label(kv.first) : std::string();
-            bool st = STOR1059 && SRC_STRUCT && !(lb.rfind("int ", 0) == 0 || lb.rfind("x", 0) == 0);
+            bool st = STOR_RULE == "1059" && SRC_STRUCT && !(lb.rfind("int ", 0) == 0 || lb.rfind("x", 0) == 0);
             bool kept = STOR1059 ? (st || kv.second > SRC_REL * big) : kv.second > 1e-15;   // default: the pre-1059 rule
             if (kept) src.insert(kv.first);
             if (std::getenv("MK_SRC_LOG"))                          // diagnostic: every candidate and its rule
@@ -721,6 +729,7 @@ inline void Engine::run() {
                 fz_note("storage " + sl + ": source " + lb, !fz.empty() ? fz : !STOR1059 ? "new (the point's rule)" : rt ? "a root (the point's rule)"
                         : "new (merged onto the nearest frozen pole)", own, fmtm(d - EPS_S));
                 own = !fz.empty() ? fz : (rt || !STOR1059) ? own : "merged";   // research round 1059 (opt-in): never promoted
+                if (STOR_RULE == "1060" && d < EPS_S) own = "merged";      // round 1060: the eps_s merge for any source within eps_s of a pole
             }
             if (own == "merged") { absb.push_back(s0); continue; }
             poles.push_back(s0);

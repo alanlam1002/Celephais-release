@@ -528,9 +528,12 @@ inline void Engine::run() {
     // N2A_FREEZE=FILE: absent -- decided at this point (the J step's first) and written; present -- replayed by identity
     std::string FZP = std::getenv("N2A_FREEZE") ? std::getenv("N2A_FREEZE") : "";
     const double ID_TOL = std::getenv("N2A_ID_TOL") ? std::atof(std::getenv("N2A_ID_TOL")) : 1e-4;
-    const std::string STOR_RULE = std::getenv("N2A_STOR_RULE") ? std::getenv("N2A_STOR_RULE") : "pre1059";   // pre1059 (default), 1059, 1060
-    if (STOR_RULE != "pre1059" && STOR_RULE != "1059" && STOR_RULE != "1060") throw std::runtime_error("N2A_STOR_RULE: pre1059, 1059 or 1060");
-    const bool STOR1059 = STOR_RULE == "1059" || STOR_RULE == "1060";   // the threshold rule and (c): the opt-in rules
+    // the storage rule (n2a_nl's): 1061 (default) -- the absolute threshold 1e-15 and, in replay, (c) with the root exemption and the eps_s
+    // merge, and a product new within the J step routed to the nearest registered root (never stepped); pre1059; 1059 / 1060 (withdrawn)
+    const std::string STOR_RULE = std::getenv("N2A_STOR_RULE") ? std::getenv("N2A_STOR_RULE") : "1061";
+    if (STOR_RULE != "pre1059" && STOR_RULE != "1059" && STOR_RULE != "1060" && STOR_RULE != "1061")
+        throw std::runtime_error("N2A_STOR_RULE: 1061 (default), pre1059, 1059 or 1060");
+    const bool STOR1059 = STOR_RULE == "1059" || STOR_RULE == "1060" || STOR_RULE == "1061";   // (c) in replay
     const bool SRC_STRUCT = !(std::getenv("N2A_SRC_STRUCT") && std::string(std::getenv("N2A_SRC_STRUCT")) == "0");   // rule (a) off: 0
     const double SRC_REL = std::getenv("N2A_SRC_REL") ? std::atof(std::getenv("N2A_SRC_REL")) : 1e-12;   // research round 1059
     js::Val FZv;
@@ -697,7 +700,7 @@ inline void Engine::run() {
         for (auto& kv : cand) {
             std::string lb = (STOR1059 || std::getenv("MK_SRC_LOG")) ? pole_label(kv.first) : std::string();
             bool st = STOR_RULE == "1059" && SRC_STRUCT && !(lb.rfind("int ", 0) == 0 || lb.rfind("x", 0) == 0);
-            bool kept = STOR1059 ? (st || kv.second > SRC_REL * big) : kv.second > 1e-15;   // default: the pre-1059 rule
+            bool kept = (STOR_RULE == "pre1059" || STOR_RULE == "1061") ? kv.second > 1e-15 : (st || kv.second > SRC_REL * big);
             if (kept) src.insert(kv.first);
             if (std::getenv("MK_SRC_LOG"))                          // diagnostic: every candidate and its rule
                 std::printf("    [src] step %.6f source %.6f (%s): |piece| %.3e of %.3e%s\n", g, kv.first, lb.c_str(), kv.second, big,
@@ -729,7 +732,7 @@ inline void Engine::run() {
                 fz_note("storage " + sl + ": source " + lb, !fz.empty() ? fz : !STOR1059 ? "new (the point's rule)" : rt ? "a root (the point's rule)"
                         : "new (merged onto the nearest frozen pole)", own, fmtm(d - EPS_S));
                 own = !fz.empty() ? fz : (rt || !STOR1059) ? own : "merged";   // research round 1059 (opt-in): never promoted
-                if (STOR_RULE == "1060" && d < EPS_S) own = "merged";      // round 1060: the eps_s merge for any source within eps_s of a pole
+                if ((STOR_RULE == "1060" || STOR_RULE == "1061") && d < EPS_S) own = "merged";      // round 1060: the eps_s merge for any source within eps_s of a pole
             }
             if (own == "merged") { absb.push_back(s0); continue; }
             poles.push_back(s0);
@@ -880,6 +883,15 @@ inline void Engine::run() {
                         for (double r : reg_roots()) mg = std::min(mg, std::abs(r - g));
                         fz_note("product " + lbg + " (" + fmtm(g) + ")", fz.empty() ? "new (the point's rule)" : fz, own, fmtm(mg - R0));
                         dec = fz.empty() ? own : fz;
+                        if (fz.empty() && STOR_RULE == "1061" && own == "stepped" && !reg_roots().empty()) {
+                            // research round 1061: (c) for the product steps -- new within the J step: routed to the nearest registered root
+                            auto rr = reg_roots();
+                            r0 = rr[0];
+                            for (double r : rr)
+                                if (std::abs(r - g) < std::abs(r0 - g)) r0 = r;
+                            dec = "routed";
+                            fz_note("product " + lbg + " (" + fmtm(g) + "): new, routed to " + pole_label(r0) + " (never stepped; round 1061)", "routed", own, "None");
+                        }
                         if (fz == "routed") r0 = pole_pos(FZv.get("routed")->get(lbg)->s);
                         else if (fz == "stored") {
                             const js::Val* fc = FZv.get("clusters")->get(slz[0]);

@@ -17,6 +17,7 @@
 #include "mk_steps.hpp"
 #include "mk_tangent.hpp"
 #include "mk_cluster.hpp"
+#include "mk_json.hpp"
 
 #include <array>
 #include <cstdio>
@@ -27,6 +28,7 @@
 #include <map>
 #include <sstream>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -445,7 +447,69 @@ inline void Engine::run() {
         std::snprintf(b, sizeof b, "spurious %.4f", x);
         return std::string(b);
     };
-    auto root_label = [&](double er) {                              // spec section 31, the first labelling (no N2A_IDENT_PREV yet: item 5)
+    // ---- item 5 (research round 1048, spec section 31): identities by continuation, the frozen decisions ----
+    // N2A_IDENT_PREV=FILE[,FILE]: the previous J steps' decision files -- their roots predicted at this J (one: its positions; two or more:
+    // linear in J^2 through the last two) and matched within a quarter of the smallest spacing to the other predicted roots
+    std::vector<std::pair<std::string, double>> PRED;
+    {
+        std::vector<js::Val> idp;
+        if (const char* e = std::getenv("N2A_IDENT_PREV")) {
+            std::string sv(e);
+            size_t a0 = 0;
+            while (a0 < sv.size()) {
+                size_t b0 = sv.find(',', a0);
+                if (b0 == std::string::npos) b0 = sv.size();
+                if (b0 > a0) idp.push_back(js::load(sv.substr(a0, b0 - a0)));
+                a0 = b0 + 1;
+            }
+        }
+        std::stable_sort(idp.begin(), idp.end(), [](const js::Val& x, const js::Val& y) { return x.get("J")->n < y.get("J")->n; });
+        if (!idp.empty()) {
+            const js::Val& b_ = *idp.back().get("roots");
+            bool lin = idp.size() > 1 && std::abs(idp.back().get("J")->n - idp[idp.size() - 2].get("J")->n) > 1e-12;
+            double w_ = 0.0;
+            const js::Val* a_ = nullptr;
+            if (lin) {
+                a_ = idp[idp.size() - 2].get("roots");
+                double Ja = idp[idp.size() - 2].get("J")->n, Jb = idp.back().get("J")->n;
+                w_ = (c_.J * c_.J - Ja * Ja) / (Jb * Jb - Ja * Ja);
+            }
+            for (auto& kv : b_.o) {
+                double v = kv.second.n;
+                if (lin && a_->has(kv.first)) v = (1 - w_) * a_->get(kv.first)->n + w_ * v;
+                PRED.emplace_back(kv.first, v);
+            }
+            for (int i = 1; i <= int(c_.gmax) + 2; i++) {
+                std::string k0 = "int " + std::to_string(i);
+                bool have = false;
+                for (auto& p0 : PRED)
+                    if (p0.first == k0) { p0.second = i; have = true; }
+                if (!have) PRED.emplace_back(k0, double(i));
+            }
+            std::printf("  [identity] the roots continued from %d decision file(s)\n", int(idp.size()));
+        }
+    }
+    struct IdRec { double pos; std::string rule; bool has_margin; double margin; };
+    std::vector<std::pair<std::string, IdRec>> IDLOG;               // label -> the last naming (insertion-ordered)
+    auto idlog_set = [&](const std::string& k0, const IdRec& r) {
+        for (auto& e : IDLOG)
+            if (e.first == k0) { e.second = r; return; }
+        IDLOG.emplace_back(k0, r);
+    };
+    auto root_label = [&](double er) {                              // spec section 31: a root of a step's operator named
+        if (!PRED.empty()) {
+            size_t ib = 0;
+            for (size_t i = 1; i < PRED.size(); i++)
+                if (std::abs(PRED[i].second - er) < std::abs(PRED[ib].second - er)) ib = i;
+            double sp = 1e300;
+            for (size_t i = 0; i < PRED.size(); i++)
+                if (i != ib) sp = std::min(sp, std::abs(PRED[ib].second - PRED[i].second));
+            if (std::abs(er - PRED[ib].second) < sp / 4) {
+                idlog_set(PRED[ib].first, IdRec{er, "continued", true, sp / 4 - std::abs(er - PRED[ib].second)});
+                return PRED[ib].first;
+            }
+        }
+        std::string rl = PRED.empty() ? "first" : "new";
         std::string bk;
         double bp = 0.0, bd = 1e300;
         for (int i = 1; i <= int(c_.gmax) + 2; i++)
@@ -453,8 +517,142 @@ inline void Engine::run() {
         for (auto* fv : {&fams, &gfams})
             for (auto& f : *fv)
                 if (std::abs(f.second.v - er) < bd) { bd = std::abs(f.second.v - er); bk = f.first; bp = f.second.v; }
-        (void)bp;
-        return bd < R0 / 4 ? bk : spur_label(er);
+        if (bd < R0 / 4) {
+            idlog_set(bk, IdRec{er, rl, true, R0 / 4 - std::abs(er - bp)});
+            return bk;
+        }
+        bk = spur_label(er);
+        idlog_set(bk, IdRec{er, rl, false, 0.0});
+        return bk;
+    };
+    // N2A_FREEZE=FILE: absent -- decided at this point (the J step's first) and written; present -- replayed by identity
+    std::string FZP = std::getenv("N2A_FREEZE") ? std::getenv("N2A_FREEZE") : "";
+    const double ID_TOL = std::getenv("N2A_ID_TOL") ? std::atof(std::getenv("N2A_ID_TOL")) : 1e-4;
+    js::Val FZv;
+    bool FZ = false;
+    if (CL && !FZP.empty() && std::ifstream(FZP)) { FZv = js::load(FZP); FZ = true; }
+    struct FzLog { std::string site, frozen, own, margin; int ps; };
+    std::vector<FzLog> FZ_LOG;
+    int PS_ = 0;
+    auto fz_note = [&](const std::string& site, const std::string& frozen, const std::string& own, const std::string& margin) {
+        FZ_LOG.push_back(FzLog{site, frozen, own, margin, PS_});
+        if (frozen != own) std::printf("    [freeze] %s: frozen %s, the point's own %s (margin %s)\n", site.c_str(), frozen.c_str(), own.c_str(), margin.c_str());
+    };
+    auto fmtm = [](double m) { char b[48]; std::snprintf(b, sizeof b, "%.6g", m); return std::string(b); };
+    // this point's decisions (the last pass's; the routings cumulative)
+    std::set<std::string> FZD_steps;
+    std::vector<std::pair<std::string, std::string>> FZD_routed;
+    struct FzClus { std::vector<std::string> members; double key; };
+    std::vector<std::pair<std::string, FzClus>> FZD_clusters;
+    struct FzSp { std::string status; double root; std::string storage; bool has_storage; };
+    std::vector<std::pair<std::string, std::vector<std::pair<std::string, FzSp>>>> FZD_spur;
+    struct FzSt { std::vector<std::string> poles, merged; };
+    std::vector<std::pair<std::string, FzSt>> FZD_storage;
+    std::map<double, std::string> STEPLAB;                          // kf(a stage (ii) step's key) -> the step's identity
+    auto is_spur_ = [](const std::string& l) { return l.rfind("spurious", 0) == 0; };
+    auto bases = [&]() {                                            // the constituents' current positions (pole_label's)
+        std::vector<std::pair<std::string, double>> b;
+        auto put = [&](const std::string& k0, double v) {
+            for (auto& e : b)
+                if (e.first == k0) { e.second = v; return; }
+            b.emplace_back(k0, v);
+        };
+        for (auto* fv : {&fams, &gfams})
+            for (auto& f : *fv) put(f.first, f.second.v);
+        if (FZ)
+            for (auto& kv : FZv.get("roots")->o)
+                if (is_spur_(kv.first)) put(kv.first, kv.second.n);
+        for (auto& sp : SPUR) put(sp.first, sp.second[0]);
+        std::sort(b.begin(), b.end());                              // (Python: sorted(b_) -- by label)
+        return b;
+    };
+    auto pole_label = [&](double c0) -> std::string {               // a registered centre's identity
+        char buf[96];
+        if (std::abs(c0 - std::nearbyint(c0)) < 1e-9) { std::snprintf(buf, sizeof buf, "int %d", int(std::nearbyint(c0))); return buf; }
+        auto b = bases();
+        for (auto& kv : b) {
+            double kk = std::nearbyint(c0 - kv.second);
+            if (std::abs(c0 - kv.second - kk) < 1e-9) {
+                if (kk == 0) return kv.first;
+                std::snprintf(buf, sizeof buf, "%s %+d", kv.first.c_str(), int(kk));
+                return buf;
+            }
+        }
+        int nb_ = int(b.size());
+        for (double tol : {1e-7, ID_TOL})
+            for (int m = 1; m <= 3; m++) {
+                bool have = false;
+                double bdv = 0.0;
+                std::vector<int> bc;
+                int bsh = 0;
+                std::vector<int> idx(m, 0);
+                while (true) {                                      // combinations with replacement, lexicographic (itertools' order)
+                    double sm = 0.0;
+                    for (int q : idx) sm += b[q].second;
+                    double d = c0 - sm, dr = std::abs(d - std::nearbyint(d));
+                    if (dr < tol && (!have || dr < bdv)) { have = true; bdv = dr; bc = idx; bsh = int(std::nearbyint(d)); }
+                    int k = m - 1;
+                    while (k >= 0 && idx[k] == nb_ - 1) k--;
+                    if (k < 0) break;
+                    idx[k]++;
+                    for (int q = k + 1; q < m; q++) idx[q] = idx[k];
+                }
+                if (have) {
+                    std::string t;
+                    std::vector<int> uq = bc;
+                    uq.erase(std::unique(uq.begin(), uq.end()), uq.end());
+                    for (size_t q = 0; q < uq.size(); q++) {
+                        int cnt = int(std::count(bc.begin(), bc.end(), uq[q]));
+                        t += (q ? " + " : "") + (cnt > 1 ? std::to_string(cnt) + " " + b[uq[q]].first : b[uq[q]].first);
+                    }
+                    if (bsh == 0) return t;
+                    std::snprintf(buf, sizeof buf, "%s %+d", t.c_str(), bsh);
+                    return buf;
+                }
+            }
+        std::snprintf(buf, sizeof buf, "x%.9f", c0);
+        return buf;
+    };
+    auto pole_pos = [&](std::string lb) {                           // an identity resolved to its current position
+        if (lb[0] == 'x') return std::stod(lb.substr(1));
+        if (lb.rfind("int ", 0) == 0) return double(std::stoi(lb.substr(4)));
+        auto b = bases();
+        int sh = 0;
+        size_t sp = lb.rfind(' ');
+        if (sp != std::string::npos && (lb[sp + 1] == '+' || lb[sp + 1] == '-') && lb.size() > sp + 2 && std::isdigit(lb[sp + 2])) {
+            sh = std::stoi(lb.substr(sp + 1));
+            lb = lb.substr(0, sp);
+        }
+        double s0 = sh;
+        size_t a0 = 0;
+        while (a0 <= lb.size()) {
+            size_t b0 = lb.find(" + ", a0);
+            std::string t = lb.substr(a0, b0 == std::string::npos ? std::string::npos : b0 - a0);
+            int m = 1;
+            size_t s1 = t.find(' ');
+            if (s1 != std::string::npos && std::all_of(t.begin(), t.begin() + long(s1), ::isdigit) && s1 > 0) { m = std::stoi(t.substr(0, s1)); t = t.substr(s1 + 1); }
+            double v = std::nan("");
+            for (auto& kv : b)
+                if (kv.first == t) v = kv.second;
+            if (std::isnan(v)) throw std::runtime_error("mk: pole_pos: unknown constituent '" + t + "'");
+            s0 += m * v;
+            if (b0 == std::string::npos) break;
+            a0 = b0 + 3;
+        }
+        return s0;
+    };
+    auto fz_pending = [&]() {                                       // the frozen product steps and routings, visited at every point
+        std::vector<Key> o2;
+        if (!FZ || fams.empty()) return o2;
+        std::vector<std::string> ls;
+        for (auto& v : FZv.get("product_steps")->a) ls.push_back(v.s);
+        for (auto& kv : FZv.get("routed")->o) ls.push_back(kv.first);
+        for (auto& lb : ls) {
+            double x = pole_pos(lb);
+            if (c_.gdata < x && x <= c_.gmax + 1e-9) o2.push_back(k_.c.reg_exact(x));
+        }
+        for (auto& kv : FZv.get("routed")->o) ROUTED.insert(kf(pole_pos(kv.second.s)));
+        return o2;
     };
     auto is_spur = [](const std::string& l) { return l.rfind("spurious", 0) == 0; };
     // spec section 28: the cluster's storage poles -- its member roots and every source exponent inside the contour (the square rows' pieces
@@ -472,10 +670,18 @@ inline void Engine::run() {
                 double mx = 0.0;
                 for (auto& z : kv.second.a) mx = std::max(mx, std::abs(z));
                 if (std::abs(sc - g) < Rr && mx > 1e-15) src.insert(std::nearbyint(sc * 1e11) / 1e11);
+                if (std::getenv("MK_SRC_LOG") && std::abs(sc - g) < Rr && mx > 1e-17 && mx < 1e-13)   // diagnostic: sources near the threshold
+                    std::printf("    [src] step %.6f source %.6f (row family %d, column %d): |piece| %.3e%s\n", g, sc, fam, i, mx,
+                                mx > 1e-15 ? " (kept)" : "");
             }
         }
         int nsrc = 0;
         std::vector<double> absb;
+        // research round 1048: the frozen storage of this step (by identity) -- a source whose identity is a frozen pole is a pole, a frozen
+        // merge is merged, a new source takes the rule; a frozen pole with no source here is kept
+        std::string sl = STEPLAB.count(kf(g)) ? STEPLAB[kf(g)] : std::string();
+        const js::Val* fs = (FZ && !sl.empty()) ? FZv.get("storage")->get(sl) : nullptr;
+        size_t nmem = poles.size();
         if (std::getenv("MK_DEBUG_STOR")) {                         // diagnostic: the sources read
             std::printf("    [debug storage %.6f] R %.6f, sources:", g, Rr);
             for (double s0 : src) std::printf(" %.11f", s0);
@@ -485,9 +691,38 @@ inline void Engine::run() {
             double d = 1e300;
             for (double p0 : poles) d = std::min(d, std::abs(s0 - p0));
             if (d < 1e-9) continue;
-            if (d < EPS_S) { absb.push_back(s0); continue; }
+            std::string own = d < EPS_S ? "merged" : "pole";
+            if (fs) {
+                std::string lb = pole_label(s0), fz;
+                for (auto& x : fs->get("poles")->a) if (x.s == lb) fz = "pole";
+                if (fz.empty()) for (auto& x : fs->get("merged")->a) if (x.s == lb) fz = "merged";
+                fz_note("storage " + sl + ": source " + lb, fz.empty() ? "new (the point's rule)" : fz, own, fmtm(d - EPS_S));
+                if (!fz.empty()) own = fz;
+            }
+            if (own == "merged") { absb.push_back(s0); continue; }
             poles.push_back(s0);
             nsrc++;
+        }
+        if (fs)
+            for (auto& x : fs->get("poles")->a) {
+                double xp = pole_pos(x.s);
+                bool far = true;
+                for (double p0 : poles) far = far && std::abs(xp - p0) >= EPS_S;
+                for (double p0 : absb) far = far && std::abs(xp - p0) >= EPS_S;
+                if (far) {
+                    fz_note("storage " + sl + ": source " + x.s, "pole", "absent", "None");
+                    poles.push_back(xp);
+                    nsrc++;
+                }
+            }
+        if (!sl.empty()) {
+            FzSt st_;
+            for (size_t q = nmem; q < poles.size(); q++) st_.poles.push_back(pole_label(poles[q]));
+            for (double a0 : absb) st_.merged.push_back(pole_label(a0));
+            bool have = false;
+            for (auto& e : FZD_storage)
+                if (e.first == sl) { e.second = st_; have = true; }
+            if (!have) FZD_storage.emplace_back(sl, st_);
         }
         std::vector<double> nw;
         for (double p0 : poles) nw.push_back(rkey(p0).v);
@@ -539,6 +774,11 @@ inline void Engine::run() {
         for (int g = c_.gdata + 1; g <= c_.gmax; g++) lat.push_back(Key{double(g), true});
         Q.push(lat);
         Q.push(towers_all());
+        if (CL) {
+            Q.push(fz_pending());
+            PS_ = ps;
+            FZD_steps.clear(); FZD_clusters.clear(); FZD_spur.clear(); FZD_storage.clear();   // (the routings cumulative)
+        }
         std::vector<double> order;
         Key gk;
         while (Q.pop(gk)) {
@@ -584,22 +824,63 @@ inline void Engine::run() {
                     if (!rg.empty())
                         for (double r : rg[0])
                             if (!Q.has(rkey(r).v)) stm.push_back(r);
+                    std::string own = !stm.empty() ? "stored" : !rr0.empty() ? "routed" : "stepped", dec = own;
+                    std::string lbg = pole_label(g);
+                    double r0 = 0.0;
+                    if (!rr0.empty()) {
+                        r0 = rr0[0];
+                        for (double r : rr0)
+                            if (std::abs(r - g) < std::abs(r0 - g)) r0 = r;
+                    }
+                    if (FZ) {
+                        // research round 1048: the frozen decision for this product (by identity)
+                        std::vector<std::string> slz;
+                        for (auto& kv : FZv.get("storage")->o) {
+                            bool in = false;
+                            for (auto& x : kv.second.get("poles")->a) in = in || x.s == lbg;
+                            for (auto& x : kv.second.get("merged")->a) in = in || x.s == lbg;
+                            if (in) slz.push_back(kv.first);
+                        }
+                        bool inst = false;
+                        for (auto& x : FZv.get("product_steps")->a) inst = inst || x.s == lbg;
+                        std::string fz = FZv.get("routed")->has(lbg) ? "routed" : inst ? "stepped" : !slz.empty() ? "stored" : "";
+                        double mg = 1e300;
+                        for (double r : reg_roots()) mg = std::min(mg, std::abs(r - g));
+                        fz_note("product " + lbg + " (" + fmtm(g) + ")", fz.empty() ? "new (the point's rule)" : fz, own, fmtm(mg - R0));
+                        dec = fz.empty() ? own : fz;
+                        if (fz == "routed") r0 = pole_pos(FZv.get("routed")->get(lbg)->s);
+                        else if (fz == "stored") {
+                            const js::Val* fc = FZv.get("clusters")->get(slz[0]);
+                            std::vector<std::string> fm_;
+                            if (fc) for (auto& x : fc->get("members")->a) fm_.push_back(x.s);
+                            else fm_.push_back(slz[0]);
+                            stm.clear();
+                            for (auto& m_ : fm_)
+                                if (!is_spur_(m_) && !Q.has(rkey(pole_pos(m_)).v)) stm.push_back(pole_pos(m_));
+                        }
+                    }
                     Key gp = gk;
-                    if (!stm.empty()) {
+                    if (dec == "stored") {
+                        if (stm.empty()) { Q.mark(g); continue; }
                         Q.push({gp});
                         gk = rkey(*std::min_element(stm.begin(), stm.end()));
                         g = gk.v; isint = gk.isint;
                         Q.remove(g);
-                    } else if (!rr0.empty()) {
-                        double r0 = rr0[0];
-                        for (double r : rr0)
-                            if (std::abs(r - gp.v) < std::abs(r0 - gp.v)) r0 = r;
+                    } else if (dec == "routed") {
+                        if (Q.has(rkey(r0).v)) { Q.mark(g); continue; }
                         std::printf("    [g %.6f] a product exponent within reach of the registered root %.6f (%.4f < R_0 %.4f): stored at that root's step\n",
                                     gp.v, r0, std::abs(r0 - gp.v), R0);
+                        bool have = false;
+                        for (auto& e : FZD_routed)
+                            if (e.first == lbg) { e.second = pole_label(r0); have = true; }
+                        if (!have) FZD_routed.emplace_back(lbg, pole_label(r0));
                         Q.push({gp});
                         ROUTED.insert(kf(r0));
                         gk = rkey(r0); g = gk.v; isint = gk.isint;
                         Q.remove(g);
+                    } else {
+                        FZD_steps.insert(lbg);
+                        STEPLAB[kf(g)] = lbg;
                     }
                 }
                 Q.mark(g);
@@ -634,12 +915,58 @@ inline void Engine::run() {
                             if (!in && near) { mem.push_back(c0); grow = true; }
                         }
                     }
+                    bool have_fkey = false;
+                    double fkey = 0.0;
+                    if (FZ && !kc) {
+                        // research round 1048: the frozen cluster holding g's identity -- its members' identities at this point's positions, its key
+                        // the frozen one; no growth; g alone if no frozen cluster holds it
+                        std::string lbg = pole_label(g);
+                        const js::Val* fc = nullptr;
+                        for (auto& kv : FZv.get("clusters")->o)
+                            for (auto& x : kv.second.get("members")->a)
+                                if (!fc && x.s == lbg) fc = &kv.second;
+                        std::vector<std::string> ownl;
+                        for (double m_ : mem) ownl.push_back(pole_label(m_));
+                        std::sort(ownl.begin(), ownl.end());
+                        std::set<double> ms{g};
+                        std::vector<std::string> frl;
+                        if (fc) {
+                            for (auto& x : fc->get("members")->a)
+                                if (!is_spur_(x.s)) { ms.insert(pole_pos(x.s)); frl.push_back(x.s); }
+                            fkey = fc->get("key")->n;
+                            have_fkey = true;
+                            if (fc->get("members")->a.size() == 1) ROUTED.insert(kf(g));
+                        }
+                        mem.assign(ms.begin(), ms.end());
+                        std::sort(frl.begin(), frl.end());
+                        auto join = [](const std::vector<std::string>& v) { std::string t; for (size_t q = 0; q < v.size(); q++) t += (q ? " | " : "") + v[q]; return t; };
+                        double mg = 1e300;
+                        for (double c0 : cs)
+                            if (std::abs(c0 - g) > 1e-9) mg = std::min(mg, std::abs(c0 - g) - 2 * k_.c.Rm);
+                        fz_note("cluster at " + lbg, fc ? join(frl) : lbg, join(ownl), fmtm(mg));
+                    }
                     if (mem.size() > 1 || ROUTED.count(kf(g))) {
                         std::sort(mem.begin(), mem.end());
                         for (double m_ : mem) Q.mark(rkey(m_).v);
                         double mn = 0.0;
                         for (double m_ : mem) mn += m_;
-                        Key gck = kc ? Key{kck, std::abs(kck - std::nearbyint(kck)) < 1e-9} : k_.c.xkey(mn / mem.size());
+                        Key gck = kc ? Key{kck, std::abs(kck - std::nearbyint(kck)) < 1e-9}
+                                     : (have_fkey && mem.size() > 1) ? k_.c.xkey(fkey) : k_.c.xkey(mn / mem.size());
+                        {
+                            std::vector<std::string> mlab;
+                            for (double m_ : mem) mlab.push_back(pole_label(m_));
+                            if (!STEPLAB.count(kf(gck.v))) {
+                                std::string t = "cluster";
+                                bool first = true;
+                                for (auto& l : mlab)
+                                    if (!is_spur_(l)) { t += (first ? " " : " | ") + l; first = false; }
+                                STEPLAB[kf(gck.v)] = mem.size() == 1 ? mlab[0] : t;
+                            }
+                            bool have = false;
+                            for (auto& e : FZD_clusters)
+                                if (e.first == STEPLAB[kf(gck.v)]) { e.second = FzClus{mlab, gck.v}; have = true; }
+                            if (!have) FZD_clusters.emplace_back(STEPLAB[kf(gck.v)], FzClus{mlab, gck.v});
+                        }
                         std::vector<double> mr;
                         for (double m_ : mem) mr.push_back(std::abs(m_ - std::nearbyint(m_)) < 1e-9 ? std::nearbyint(m_) : m_);
                         Ctx::kv_set(k_.c.clroots, gck.v, mr);
@@ -728,29 +1055,31 @@ inline void Engine::run() {
                         if (k_.c.gauge_reg) {
                             for (auto it = SPUR.begin(); it != SPUR.end();)
                                 it = std::abs(it->second[2] - g) < 1e-9 ? SPUR.erase(it) : std::next(it);
-                            std::vector<cd> evs = ev;
-                            std::sort(evs.begin(), evs.end(), [](const cd& a, const cd& b) { return a.real() < b.real(); });
-                            std::set<std::string> done;
-                            for (auto& e : evs) {
-                                double er = e.real();
-                                if (std::abs(e.imag()) > 1e-9 || std::abs(er - g) > 1.2 * half + R0) continue;
-                                std::string lb = root_label(er);
-                                if (!is_spur(lb)) continue;
-                                if (done.count(lb)) std::printf("    [cluster %.6f] WARNING: two roots named %s (the second %.6f)\n", g, lb.c_str(), er);
-                                done.insert(lb);
-                                double dmn = 1e300;
-                                for (double m_ : mem) dmn = std::min(dmn, std::abs(er - m_));
-                                if (std::abs(er - g) - R0 / 4 >= 1.1 * half && dmn >= R0 / 4) {
-                                    std::printf("    [cluster %.6f] spurious root %.6f (%s, the third family): excluded by the radius\n", g, er, lb.c_str());
-                                    continue;
-                                }
-                                // the member: stored on a member within reg_tol, else at its own exponent (a new pole and member)
+                            // research round 1048: each root named by its identity; with the freeze, each spurious root's decision at this step
+                            // (member / excluded, its storage pole) is the frozen one, a frozen member absent here kept at its frozen position
+                            std::string stl = STEPLAB.count(kf(g)) ? STEPLAB[kf(g)] : std::string();
+                            const js::Val* fsp = nullptr;
+                            js::Val empty_;
+                            empty_.t = js::Val::OBJ;
+                            if (FZ) { fsp = FZv.get("spur")->get(stl); if (!fsp) fsp = &empty_; }
+                            std::vector<std::pair<std::string, FzSp>> rec;
+                            auto spur_member = [&](double er, const std::string& lb) {
                                 double mm = mem[0];
                                 for (double m_ : mem)
                                     if (std::abs(m_ - er) < std::abs(mm - er)) mm = m_;
+                                std::string fst;
+                                bool has_fst = false;
+                                if (fsp && fsp->get(lb) && fsp->get(lb)->get("storage")) { fst = fsp->get(lb)->get("storage")->s; has_fst = true; }
                                 double stm_;
-                                if (std::abs(mm - er) < k_.c.reg_tol) stm_ = mm;
-                                else {
+                                if (std::abs(mm - er) < k_.c.reg_tol || (has_fst && fst != lb)) {
+                                    if (std::abs(mm - er) < k_.c.reg_tol || !has_fst) stm_ = mm;
+                                    else {
+                                        double fp = pole_pos(fst);
+                                        stm_ = mem[0];
+                                        for (double m_ : mem)
+                                            if (std::abs(m_ - fp) < std::abs(stm_ - fp)) stm_ = m_;
+                                    }
+                                } else {
                                     stm_ = k_.c.reg_exact(er).v;
                                     Key xk = k_.c.xkey(stm_);
                                     auto* cr = Ctx::kv_get(k_.c.clroots, g);
@@ -765,9 +1094,49 @@ inline void Engine::run() {
                                     std::sort(mem.begin(), mem.end());
                                 }
                                 SPUR[lb] = {er, stm_, g};
+                                bool own_pole = std::abs(stm_ - er) < 1e-9 && (!has_fst || fst == lb);
+                                rec.emplace_back(lb, FzSp{"member", er, own_pole ? lb : pole_label(stm_), true});
                                 std::printf("    [cluster %.6f] spurious root %.6f (the third family) too close to exclude: member '%s' (amplitude an N3b parameter, "
                                             "datum %.3e), stored at %.6f\n", g, er, lb.c_str(), offl_set.count(lb) ? offl_set[lb] : 0.0, stm_);
+                            };
+                            std::vector<cd> evs = ev;
+                            std::sort(evs.begin(), evs.end(), [](const cd& a, const cd& b) { return a.real() < b.real(); });
+                            std::set<std::string> done;
+                            for (auto& e : evs) {
+                                double er = e.real();
+                                if (std::abs(e.imag()) > 1e-9 || std::abs(er - g) > 1.2 * half + R0) continue;
+                                std::string lb = root_label(er);
+                                if (!is_spur(lb)) continue;
+                                if (done.count(lb)) std::printf("    [cluster %.6f] WARNING: two roots named %s (the second %.6f)\n", g, lb.c_str(), er);
+                                done.insert(lb);
+                                double dmn = 1e300;
+                                for (double m_ : mem) dmn = std::min(dmn, std::abs(er - m_));
+                                std::string own = (std::abs(er - g) - R0 / 4 >= 1.1 * half && dmn >= R0 / 4) ? "excluded" : "member", dec = own;
+                                if (fsp) {
+                                    std::string fz = fsp->get(lb) ? fsp->get(lb)->get("status")->s : "";
+                                    fz_note("spurious " + lb + " (" + fmtm(er) + ") at step " + stl, fz.empty() ? "new (the point's rule)" : fz, own,
+                                            fmtm(std::min(std::abs(er - g) - R0 / 4 - 1.1 * half, dmn - R0 / 4)));
+                                    if (!fz.empty()) dec = fz;
+                                }
+                                if (dec == "excluded") {
+                                    rec.emplace_back(lb, FzSp{"excluded", er, "", false});
+                                    std::printf("    [cluster %.6f] spurious root %.6f (%s, the third family): excluded by the radius\n", g, er, lb.c_str());
+                                    continue;
+                                }
+                                spur_member(er, lb);
                             }
+                            std::vector<std::pair<std::string, js::Val>> fso;
+                            if (fsp) { fso = fsp->o; std::sort(fso.begin(), fso.end(), [](const std::pair<std::string, js::Val>& x, const std::pair<std::string, js::Val>& y) { return x.first < y.first; }); }
+                            if (fsp)
+                                for (auto& kv : fso)
+                                    if (kv.second.get("status")->s == "member" && !done.count(kv.first)) {
+                                        fz_note("spurious " + kv.first + " at step " + stl, "member (its frozen root " + fmtm(kv.second.get("root")->n) + ")", "absent", "None");
+                                        spur_member(kv.second.get("root")->n, kv.first);
+                                    }
+                            bool have = false;
+                            for (auto& e : FZD_spur)
+                                if (e.first == stl) { e.second = rec; have = true; }
+                            if (!have) FZD_spur.emplace_back(stl, rec);
                             half = (mem.back() - mem.front()) / 2;
                         }
                         std::vector<double> spr;
@@ -805,6 +1174,12 @@ inline void Engine::run() {
                         std::stable_sort(evr.begin(), evr.end(), [&](double a, double b) { return std::abs(a - g) < std::abs(b - g); });
                         std::vector<double> memb;
                         std::map<double, std::string> mlab;
+                        std::string stl = STEPLAB.count(kf(g)) ? STEPLAB[kf(g)] : std::string();
+                        const js::Val* fsp = nullptr;
+                        js::Val empty_;
+                        empty_.t = js::Val::OBJ;
+                        if (FZ) { fsp = FZv.get("spur")->get(stl); if (!fsp) fsp = &empty_; }
+                        std::vector<std::pair<std::string, FzSp>> rec;
                         for (double er : evr) {
                             std::string lb = root_label(er);
                             if (!is_spur(lb)) {
@@ -813,12 +1188,33 @@ inline void Engine::run() {
                                             g, er, lb.c_str(), Rcur_);
                                 continue;
                             }
-                            if (std::abs(er - g) - R0 / 4 >= EPS_S) {
+                            std::string own = std::abs(er - g) - R0 / 4 >= EPS_S ? "excluded" : "member", dec = own;
+                            if (fsp) {
+                                std::string fz = fsp->get(lb) ? fsp->get(lb)->get("status")->s : "";
+                                fz_note("spurious " + lb + " (" + fmtm(er) + ") at step " + stl, fz.empty() ? "new (the point's rule)" : fz, own,
+                                        fmtm(std::abs(er - g) - R0 / 4 - EPS_S));
+                                if (!fz.empty()) dec = fz;
+                            }
+                            if (dec == "excluded") {
                                 Rcur_ = std::min(Rcur_, std::max(std::abs(er - g) - R0 / 4, EPS_S));
+                                rec.emplace_back(lb, FzSp{"excluded", er, "", false});
                                 std::printf("    [g %.6f] a root of its operator %.6f (%s) inside the contour: excluded by the radius (%.4f)\n", g, er, lb.c_str(), Rcur_);
                             } else {
                                 memb.push_back(er);
                                 mlab[er] = lb;
+                            }
+                        }
+                        if (fsp) {
+                            std::vector<std::pair<std::string, js::Val>> fso = fsp->o;
+                            std::sort(fso.begin(), fso.end(), [](const std::pair<std::string, js::Val>& x, const std::pair<std::string, js::Val>& y) { return x.first < y.first; });
+                            for (auto& kv : fso) {
+                                bool in = false;
+                                for (auto& ml : mlab) in = in || ml.second == kv.first;
+                                if (kv.second.get("status")->s == "member" && !in) {
+                                    fz_note("spurious " + kv.first + " at step " + stl, "member (its frozen root " + fmtm(kv.second.get("root")->n) + ")", "absent", "None");
+                                    memb.push_back(kv.second.get("root")->n);
+                                    mlab[kv.second.get("root")->n] = kv.first;
+                                }
                             }
                         }
                         if (!memb.empty()) {
@@ -827,6 +1223,8 @@ inline void Engine::run() {
                             std::set<double> sts;
                             for (double er : memb) {
                                 bool at_g = std::abs(er - g) < EPS_S;
+                                if (fsp && fsp->get(mlab[er]) && fsp->get(mlab[er])->get("storage")) at_g = fsp->get(mlab[er])->get("storage")->s == "step";
+                                rec.emplace_back(mlab[er], FzSp{"member", er, at_g ? "step" : mlab[er], true});
                                 double stm_ = at_g ? g : k_.c.reg_exact(er).v;
                                 SPUR[mlab[er]] = {er, stm_, g};
                                 SPUR_SINGLE.insert(kf(er));
@@ -836,6 +1234,7 @@ inline void Engine::run() {
                             }
                             std::vector<double> mr(sts.begin(), sts.end());
                             Ctx::kv_set(k_.c.clroots, g, mr);
+
                             Ctx::kv_set(k_.c.clus, g, mr);
                             iscl = true;
                             mem = mr;
@@ -847,6 +1246,12 @@ inline void Engine::run() {
                             for (double p0 : *Ctx::kv_get(k_.c.clus, g)) Q.mark(rkey(p0).v);
                             if (auto* ab = Ctx::kv_get(k_.c.clabs, g))
                                 for (double p0 : *ab) Q.mark(rkey(p0).v);
+                        }
+                        {
+                            bool have = false;
+                            for (auto& e : FZD_spur)
+                                if (e.first == stl) { e.second = rec; have = true; }
+                            if (!have) FZD_spur.emplace_back(stl, rec);
                         }
                     }
                 }
@@ -909,6 +1314,7 @@ inline void Engine::run() {
                         for (auto& l : L.lapse) fams.emplace_back("lapse l" + std::to_string(l.first), l.second);
                         for (auto& l : L.gauge) gfams.emplace_back("gauge l" + std::to_string(l.first), l.second);
                         Q.push(towers_all());
+                        if (CL) Q.push(fz_pending());
                         Json F;
                         F.open('{');
                         F.kv("block_roots_real", Json::nums(L.evr));
@@ -1458,6 +1864,63 @@ inline void Engine::run() {
     }
     J_.close(']');
     J_.kv("families", families_json);
+    if (CL) {
+        // research round 1048 (spec section 31): the stage (ii) decisions by identity -- with N2A_FREEZE absent, written here (the J step's first
+        // point; also the next J step's N2A_IDENT_PREV: the roots' positions)
+        auto S_ = [](const std::string& x) { return Json::str(x); };
+        auto strs = [&](const std::vector<std::string>& v) { std::string r = "["; for (size_t q = 0; q < v.size(); q++) r += (q ? "," : "") + S_(v[q]); return r + "]"; };
+        std::vector<std::pair<std::string, double>> roots;
+        auto rput = [&](const std::string& k0, double v) {
+            for (auto& e : roots)
+                if (e.first == k0) { e.second = v; return; }
+            roots.emplace_back(k0, v);
+        };
+        for (auto* fv : {&fams, &gfams})
+            for (auto& f : *fv) rput(f.first, f.second.v);
+        for (auto& e : IDLOG)
+            if (is_spur_(e.first)) rput(e.first, e.second.pos);
+        for (auto& sp : SPUR) rput(sp.first, sp.second[0]);
+        std::string d = "{\"J\":" + Json::num(c_.J) + ",\"roots\":{";
+        for (size_t q = 0; q < roots.size(); q++) d += (q ? "," : "") + S_(roots[q].first) + ":" + Json::num(roots[q].second);
+        d += "},\"product_steps\":" + strs(std::vector<std::string>(FZD_steps.begin(), FZD_steps.end())) + ",\"routed\":{";
+        for (size_t q = 0; q < FZD_routed.size(); q++) d += (q ? "," : "") + S_(FZD_routed[q].first) + ":" + S_(FZD_routed[q].second);
+        d += "},\"clusters\":{";
+        for (size_t q = 0; q < FZD_clusters.size(); q++)
+            d += (q ? "," : "") + S_(FZD_clusters[q].first) + ":{\"members\":" + strs(FZD_clusters[q].second.members) + ",\"key\":" + Json::num(FZD_clusters[q].second.key) + "}";
+        d += "},\"spur\":{";
+        bool first = true;
+        for (auto& e : FZD_spur) {
+            if (e.first.empty()) continue;
+            d += (first ? "" : ",") + S_(e.first) + ":{";
+            first = false;
+            for (size_t q = 0; q < e.second.size(); q++) {
+                auto& r = e.second[q].second;
+                d += (q ? "," : "") + S_(e.second[q].first) + ":{\"status\":" + S_(r.status) + ",\"root\":" + Json::num(r.root) +
+                     (r.has_storage ? ",\"storage\":" + S_(r.storage) : std::string()) + "}";
+            }
+            d += "}";
+        }
+        d += "},\"storage\":{";
+        for (size_t q = 0; q < FZD_storage.size(); q++)
+            d += (q ? "," : "") + S_(FZD_storage[q].first) + ":{\"poles\":" + strs(FZD_storage[q].second.poles) + ",\"merged\":" + strs(FZD_storage[q].second.merged) + "}";
+        d += "},\"eps_s\":" + Json::num(EPS_S) + ",\"R0\":" + Json::num(R0) + ",\"identities\":{";
+        for (size_t q = 0; q < IDLOG.size(); q++)
+            d += (q ? "," : "") + S_(IDLOG[q].first) + ":{\"position\":" + Json::num(IDLOG[q].second.pos) + ",\"rule\":" + S_(IDLOG[q].second.rule) +
+                 ",\"margin\":" + (IDLOG[q].second.has_margin ? Json::num(IDLOG[q].second.margin) : std::string("null")) + "}";
+        d += "}}";
+        J_.kv("stage2_decisions", d);
+        int ndiff = 0;
+        for (auto& x : FZ_LOG)
+            if (x.frozen != x.own && (x.ps == PS_ || x.site.rfind("cluster at", 0) == 0)) ndiff++;
+        if (!FZP.empty() && !FZ) {
+            std::string tmp = FZP + ".tmp" + std::to_string(getpid());
+            std::ofstream(tmp) << d;
+            std::rename(tmp.c_str(), FZP.c_str());
+            std::printf("  [freeze] stage (ii) decisions written (by identity): %s\n", FZP.c_str());
+        } else if (FZ)
+            std::printf("  [freeze] stage (ii) decisions replayed from %s: %d decision sites, %d where the point's own differs\n", FZP.c_str(), int(FZ_LOG.size()), ndiff);
+        J_.kv("freeze_differ", std::to_string(ndiff));
+    }
     C_final_ = C;
     fams_ = fams;
     gfams_ = gfams;

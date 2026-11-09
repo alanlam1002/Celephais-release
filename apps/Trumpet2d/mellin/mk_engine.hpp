@@ -528,6 +528,9 @@ inline void Engine::run() {
     // N2A_FREEZE=FILE: absent -- decided at this point (the J step's first) and written; present -- replayed by identity
     std::string FZP = std::getenv("N2A_FREEZE") ? std::getenv("N2A_FREEZE") : "";
     const double ID_TOL = std::getenv("N2A_ID_TOL") ? std::atof(std::getenv("N2A_ID_TOL")) : 1e-4;
+    const bool STOR1059 = std::getenv("N2A_STOR_RULE") && std::string(std::getenv("N2A_STOR_RULE")) == "1059";   // round 1059 rule: opt-in
+    const bool SRC_STRUCT = !(std::getenv("N2A_SRC_STRUCT") && std::string(std::getenv("N2A_SRC_STRUCT")) == "0");   // rule (a) off: 0
+    const double SRC_REL = std::getenv("N2A_SRC_REL") ? std::atof(std::getenv("N2A_SRC_REL")) : 1e-12;   // research round 1059
     js::Val FZv;
     bool FZ = false;
     if (CL && !FZP.empty() && std::ifstream(FZP)) { FZv = js::load(FZP); FZ = true; }
@@ -662,18 +665,35 @@ inline void Engine::run() {
     auto set_storage = [&](const Ser* rr, double g, double Rr) {
         auto* cr = Ctx::kv_get(k_.c.clroots, g);
         std::vector<double> poles = *cr;
-        std::set<double> src;
+        // research round 1059 (the storage rule): every exponent of the stripped rows inside the contour a candidate with its largest piece;
+        // (a) a source derived from a family (a lapse / gauge family or a spurious root, its towers and products, by identity) STRUCTURAL --
+        // a source whatever its magnitude; (b) any other above 1e-12 x the step's largest piece (N2A_SRC_REL); (c) within a J step the pole
+        // set frozen: a source not a frozen pole merged onto the nearest frozen pole, never promoted.  (Was: |piece| > 1e-15 absolute.)
+        std::map<double, double> cand;
         for (int i = 0; i < nn; i++) {
             int fam = P_.gfam[i];
             for (auto& kv : rr[fam].d) {
                 double sc = kv.first.v - ROWOFF1[fam] - P_.dE[i];
+                if (!(std::abs(sc - g) < Rr)) continue;
                 double mx = 0.0;
                 for (auto& z : kv.second.a) mx = std::max(mx, std::abs(z));
-                if (std::abs(sc - g) < Rr && mx > 1e-15) src.insert(std::nearbyint(sc * 1e11) / 1e11);
-                if (std::getenv("MK_SRC_LOG") && std::abs(sc - g) < Rr && mx > 1e-17 && mx < 1e-13)   // diagnostic: sources near the threshold
-                    std::printf("    [src] step %.6f source %.6f (row family %d, column %d): |piece| %.3e%s\n", g, sc, fam, i, mx,
-                                mx > 1e-15 ? " (kept)" : "");
+                double k0 = std::nearbyint(sc * 1e11) / 1e11;
+                auto it = cand.find(k0);
+                if (it == cand.end()) cand[k0] = mx;
+                else it->second = std::max(it->second, mx);
             }
+        }
+        double big = 0.0;
+        for (auto& kv : cand) big = std::max(big, kv.second);
+        std::set<double> src;
+        for (auto& kv : cand) {
+            std::string lb = (STOR1059 || std::getenv("MK_SRC_LOG")) ? pole_label(kv.first) : std::string();
+            bool st = STOR1059 && SRC_STRUCT && !(lb.rfind("int ", 0) == 0 || lb.rfind("x", 0) == 0);
+            bool kept = STOR1059 ? (st || kv.second > SRC_REL * big) : kv.second > 1e-15;   // default: the pre-1059 rule
+            if (kept) src.insert(kv.first);
+            if (std::getenv("MK_SRC_LOG"))                          // diagnostic: every candidate and its rule
+                std::printf("    [src] step %.6f source %.6f (%s): |piece| %.3e of %.3e%s\n", g, kv.first, lb.c_str(), kv.second, big,
+                            st ? " structural" : kept ? " kept" : "");
         }
         int nsrc = 0;
         std::vector<double> absb;
@@ -696,8 +716,11 @@ inline void Engine::run() {
                 std::string lb = pole_label(s0), fz;
                 for (auto& x : fs->get("poles")->a) if (x.s == lb) fz = "pole";
                 if (fz.empty()) for (auto& x : fs->get("merged")->a) if (x.s == lb) fz = "merged";
-                fz_note("storage " + sl + ": source " + lb, fz.empty() ? "new (the point's rule)" : fz, own, fmtm(d - EPS_S));
-                if (!fz.empty()) own = fz;
+                // (a root of the frozen set -- its member decision still to come in this pass -- is not a source: the point's rule)
+                bool rt = FZv.get("roots") && FZv.get("roots")->has(lb);
+                fz_note("storage " + sl + ": source " + lb, !fz.empty() ? fz : !STOR1059 ? "new (the point's rule)" : rt ? "a root (the point's rule)"
+                        : "new (merged onto the nearest frozen pole)", own, fmtm(d - EPS_S));
+                own = !fz.empty() ? fz : (rt || !STOR1059) ? own : "merged";   // research round 1059 (opt-in): never promoted
             }
             if (own == "merged") { absb.push_back(s0); continue; }
             poles.push_back(s0);

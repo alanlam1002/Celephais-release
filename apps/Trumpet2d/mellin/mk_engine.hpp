@@ -1427,6 +1427,9 @@ inline void Engine::run() {
                             std::vector<double> own_r;
                             for (auto& e : own_roots)
                                 if (std::abs(e.imag()) < 1e-9) own_r.push_back(e.real());
+                            if (std::getenv("MK_ROOT_LOG"))                 // (round 1064 diagnostic: the members' roots with their imaginary parts)
+                                for (auto& e : own_roots)
+                                    std::printf("    [cluster %.6f] own root %.12f %+.3e i%s\n", g, e.real(), e.imag(), std::abs(e.imag()) < 1e-9 ? "" : " (dropped: |imag| >= 1e-9)");
                             Vec U_(size_t(NB) * rk);
                             for (int q = 0; q < rk; q++) {
                                 auto t = tgdc(Wq[q]);

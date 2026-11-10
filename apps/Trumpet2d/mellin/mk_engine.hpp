@@ -534,6 +534,9 @@ inline void Engine::run() {
     if (STOR_RULE != "pre1059" && STOR_RULE != "1059" && STOR_RULE != "1060" && STOR_RULE != "1061")
         throw std::runtime_error("N2A_STOR_RULE: 1061 (default), pre1059, 1059 or 1060");
     const bool STOR1059 = STOR_RULE == "1059" || STOR_RULE == "1060" || STOR_RULE == "1061";   // (c) in replay
+    // research round 1062 (option (a)): every labelled cluster root's null component projected to its datum (n2a_nl N2A_ROOT_PROJ: all, the
+    // default; spur -- the spurious roots only, rounds 1049-1061)
+    const bool ROOT_PROJ_ALL = !(std::getenv("N2A_ROOT_PROJ") && std::string(std::getenv("N2A_ROOT_PROJ")) == "spur");
     const bool SRC_STRUCT = !(std::getenv("N2A_SRC_STRUCT") && std::string(std::getenv("N2A_SRC_STRUCT")) == "0");   // rule (a) off: 0
     const double SRC_REL = std::getenv("N2A_SRC_REL") ? std::atof(std::getenv("N2A_SRC_REL")) : 1e-12;   // research round 1059
     js::Val FZv;
@@ -1639,6 +1642,7 @@ inline void Engine::run() {
                         for (size_t i = 0; i < XL.size(); i++) XL[i] += dXL[i];
                     }
                     Vec Fc = project(k_.c, k_.out, g, 1, P_.cfam, P_.cdE, P_.Wc, true);   // the conditions (not imposed), the last rows
+                    std::set<int> projected;
                     if (!spq.empty() && c_.spur_orth) {
                         // research round 1049 (option (c)): the particular solution's component along a spurious member's null direction removed,
                         // the amplitude parameter the whole of it
@@ -1667,6 +1671,34 @@ inline void Engine::run() {
                             std::printf("    [cluster %.6f] %s (pole %.6f): the particular solution's component along the null direction %.3e%+.3ei removed, the "
                                         "amplitude %.3e%+.3ei (the N3b parameter) the whole of it (round 1049)\n", g, lb.c_str(), g + dm[i], (c0 - a0).real(),
                                         (c0 - a0).imag(), a0.real(), a0.imag());
+                            projected.insert(i);
+                        }
+                    }
+                    if (ROOT_PROJ_ALL) {
+                        // research round 1062 (option (a)): every labelled root's null component projected to its datum -- a gauge root to 0, a
+                        // lapse root to its datum (its total amplitude); the spurious roots above
+                        for (auto& lr : per) {
+                            if (lr.label.rfind("spurious", 0) == 0) continue;
+                            int i = 0;
+                            for (size_t ii = 1; ii < dm.size(); ii++)
+                                if (std::abs(g + dm[ii] - lr.root) < std::abs(g + dm[i] - lr.root)) i = int(ii);
+                            if (!info.vhat.count(i) || projected.count(i)) continue;
+                            Vec v = info.vhat[i];
+                            double vn = 0.0;
+                            for (auto& z : v) vn += std::norm(z);
+                            vn = std::sqrt(vn);
+                            for (auto& z : v) z /= vn;
+                            cd c0 = 0.0;
+                            for (int j = 0; j < NB; j++) c0 += std::conj(v[j]) * XL[size_t(i * K) * NB + j];
+                            cd a0 = ampL.count(i) ? ampL[i] : cd(0.0, 0.0);
+                            cd dl0 = info.dl.count(i) ? info.dl[i] : cd(0.0, 0.0);
+                            for (int m = 0; m < K; m++) {
+                                cd f = (a0 - c0) * std::pow(dl0, m);
+                                for (int j = 0; j < NB; j++) XL[size_t(i * K + m) * NB + j] += f * v[j];
+                            }
+                            projected.insert(i);
+                            std::printf("    [cluster %.6f] %s (pole %.6f): its null component %.3e%+.3ei projected to its datum %.3e%+.3ei (round 1062)\n", g,
+                                        lr.label.c_str(), g + dm[i], c0.real(), c0.imag(), a0.real(), a0.imag());
                         }
                     }
                     // the CHECK: the contour solution's moments against the local parts'

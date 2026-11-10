@@ -550,6 +550,34 @@ inline void Engine::run() {
         if (frozen != own) std::printf("    [freeze] %s: frozen %s, the point's own %s (margin %s)\n", site.c_str(), frozen.c_str(), own.c_str(), margin.c_str());
     };
     auto fmtm = [](double m) { char b[48]; std::snprintf(b, sizeof b, "%.6g", m); return std::string(b); };
+    // research round 1065 (spec section 34): an operator root is REAL when |imag| < 1e-6 x its distance to the nearest other root (a complex
+    // pair fails by construction, a simple root's round-off passes); in replay a root the decisions file names keeps its realness, its
+    // imaginary part logged (N2A_REAL_RULE=pre1065: |imag| < 1e-9)
+    const bool REAL_PRE = std::getenv("N2A_REAL_RULE") && std::string(std::getenv("N2A_REAL_RULE")) == "pre1065";
+    auto root_real = [&](size_t i, const std::vector<cd>& all) {
+        cd e = all[i];
+        if (REAL_PRE) return std::abs(e.imag()) < 1e-9;
+        double d = 1e300;
+        for (size_t j = 0; j < all.size(); j++)
+            if (j != i) d = std::min(d, std::abs(e - all[j]));
+        bool own = std::abs(e.imag()) < 1e-6 * d;
+        if (FZ && FZv.get("roots") && !FZv.get("roots")->o.empty()) {
+            std::vector<std::pair<std::string, double>> fr;
+            for (auto& kv : FZv.get("roots")->o) fr.emplace_back(kv.first, kv.second.n);
+            std::stable_sort(fr.begin(), fr.end(), [&](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) {
+                return std::abs(a.second - e.real()) < std::abs(b.second - e.real()); });
+            double sp = 1e300;
+            for (size_t j = 1; j < fr.size(); j++) sp = std::min(sp, std::abs(fr[0].second - fr[j].second));
+            if (std::abs(e.real() - fr[0].second) < sp / 4) {
+                char b[160], m[48];
+                std::snprintf(b, sizeof b, "root realness %s (%.6f)", fr[0].first.c_str(), e.real());
+                std::snprintf(m, sizeof m, "%.1e i", e.imag());
+                fz_note(b, "real", own ? "real" : "complex", m);
+                return true;
+            }
+        }
+        return own;
+    };
     // this point's decisions (the last pass's; the routings cumulative)
     std::set<std::string> FZD_steps;
     std::vector<std::pair<std::string, std::string>> FZD_routed;
@@ -833,6 +861,7 @@ inline void Engine::run() {
             Rcur_ = c_.R;
             std::vector<double> mem;                                // a cluster's member roots (absolute)
             std::vector<cd> own_roots;                              // the cluster operator's roots within R_0 / 4 of a member
+            std::vector<cd> roots_all;                              // (round 1065: the realness test's other roots -- the step operator's all)
             if (CL) {
                 if (SPUR_SINGLE.count(kf(g))) {
                     // spec section 29: a root that is a member of a single product exponent's step is stepped there (stored by it)
@@ -1149,9 +1178,10 @@ inline void Engine::run() {
                             std::vector<cd> evs = ev;
                             std::sort(evs.begin(), evs.end(), [](const cd& a, const cd& b) { return a.real() < b.real(); });
                             std::set<std::string> done;
-                            for (auto& e : evs) {
+                            for (size_t ie = 0; ie < evs.size(); ie++) {
+                                cd e = evs[ie];
                                 double er = e.real();
-                                if (std::abs(e.imag()) > 1e-9 || std::abs(er - g) > 1.2 * half + R0) continue;
+                                if (std::abs(er - g) > 1.2 * half + R0 || !root_real(ie, evs)) continue;
                                 std::string lb = root_label(er);
                                 if (!is_spur(lb)) continue;
                                 if (done.count(lb)) std::printf("    [cluster %.6f] WARNING: two roots named %s (the second %.6f)\n", g, lb.c_str(), er);
@@ -1191,6 +1221,7 @@ inline void Engine::run() {
                             if (std::abs(sp.second[2] - g) < 1e-9) spr.push_back(sp.second[0]);
                         std::vector<cd> oth;
                         own_roots.clear();
+                        roots_all = ev;
                         for (auto& e : ev) {
                             double dmn = 1e300;
                             for (double m_ : mem) dmn = std::min(dmn, std::abs(e - m_));
@@ -1216,8 +1247,8 @@ inline void Engine::run() {
                         // spec section 29: a SINGLE product exponent's step that reaches a root of its operator -- excluded by the radius when a
                         // margin allows (|root - g| - R_0 / 4 >= eps_s), else a member, the step a cluster of that root with g's exponent a pole
                         std::vector<double> evr;
-                        for (auto& e : ev)
-                            if (std::abs(e.imag()) < 1e-9 && std::abs(e - g) < Rcur_) evr.push_back(e.real());
+                        for (size_t ie = 0; ie < ev.size(); ie++)
+                            if (std::abs(ev[ie] - g) < Rcur_ && root_real(ie, ev)) evr.push_back(ev[ie].real());
                         std::stable_sort(evr.begin(), evr.end(), [&](double a, double b) { return std::abs(a - g) < std::abs(b - g); });
                         std::vector<double> memb;
                         std::map<double, std::string> mlab;
@@ -1287,6 +1318,7 @@ inline void Engine::run() {
                             mem = mr;
                             own_roots.clear();
                             for (double er : memb) own_roots.push_back(cd(er, 0.0));
+                            roots_all = own_roots;
                             set_storage(rows_pre, g, Rcur_);
                             S = project(k_.c, rows_pre, g, 1, P_.gfam, P_.dE, P_.W, false);
                             Smax = maxabs(S);
@@ -1425,11 +1457,14 @@ inline void Engine::run() {
                             // each labelled member's datum on the residue combination nearest its null vector at its own root (the cluster's
                             // operator there); the registry's centre moved to the operator's root of that identity (its towers with it)
                             std::vector<double> own_r;
-                            for (auto& e : own_roots)
-                                if (std::abs(e.imag()) < 1e-9) own_r.push_back(e.real());
-                            if (std::getenv("MK_ROOT_LOG"))                 // (round 1064 diagnostic: the members' roots with their imaginary parts)
-                                for (auto& e : own_roots)
-                                    std::printf("    [cluster %.6f] own root %.12f %+.3e i%s\n", g, e.real(), e.imag(), std::abs(e.imag()) < 1e-9 ? "" : " (dropped: |imag| >= 1e-9)");
+                            for (auto& e : own_roots) {
+                                size_t ia = 0;
+                                while (ia < roots_all.size() && roots_all[ia] != e) ia++;
+                                bool re = ia < roots_all.size() ? root_real(ia, roots_all) : std::abs(e.imag()) < 1e-9;
+                                if (re) own_r.push_back(e.real());
+                                if (std::getenv("MK_ROOT_LOG"))             // (round 1064 diagnostic: the members' roots with their imaginary parts)
+                                    std::printf("    [cluster %.6f] own root %.12f %+.3e i%s\n", g, e.real(), e.imag(), re ? "" : " (not real)");
+                            }
                             Vec U_(size_t(NB) * rk);
                             for (int q = 0; q < rk; q++) {
                                 auto t = tgdc(Wq[q]);

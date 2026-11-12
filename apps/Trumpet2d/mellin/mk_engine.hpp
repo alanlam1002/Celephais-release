@@ -169,6 +169,13 @@ inline void load_engine(const std::string& dir, Kernel& k, Proj& P, Setup& S, Cf
     c.passes = B.geti("passes", 1); c.pass_tol = B.getd("pass_tol", 1e-10); c.newton = B.geti("newton", 6); c.defect = B.geti("defect", 8);
     c.condtol = B.getd("condtol", 0.0); c.meff_chunk = B.geti("meff_chunk", 34); c.offl_lmax = B.geti("offl_lmax", 8); c.J = B.getd("J", 0.0);
     c.gauge_steps = B.geti("gauge_steps", 2); c.cond_fit = B.geti("cond_fit", 0); c.notgt = B.geti("notarget", 0);
+    {                                                   // research round 1078: the lapse families' Sturm-Liouville exponents ('4:s4;6:s6;..')
+        std::string ls = gs("lapse_sl");
+        std::stringstream ss(ls);
+        std::string t;
+        while (std::getline(ss, t, ';'))
+            if (t.find(':') != std::string::npos) k.c.lapse_sl[std::stoi(t.substr(0, t.find(':')))] = std::stod(t.substr(t.find(':') + 1));
+    }
     c.cond_full = B.geti("cond_full", 0); c.robust = B.geti("defect_stop_robust", 0); c.offl_auto = gs("offl") == "auto";
     c.meff_mode = gs("meff_mode") == "jvp" ? 1 : 0;
     c.tgt = gs("tgt");

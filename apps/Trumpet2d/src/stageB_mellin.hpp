@@ -429,7 +429,9 @@ class MellinEval {
                 std::vector<double> cs;
                 static const std::regex num("[0-9]+\\.[0-9]{6}");
                 for (const auto& l : lab) {
-                    if (l.rfind("eq ", 0) == 0 && !eqdrop.count(l)) eqlab.push_back(l);
+                    if (l.rfind("eq ", 0) == 0 && !eqdrop.count(l) && !std::any_of(eqdrop.begin(), eqdrop.end(), [&](const std::string& d) {
+                        return !d.empty() && d.back() == '*' && l.rfind(d.substr(0, d.size() - 1), 0) == 0; }))   // (round 1079: 'PREFIX*' released)
+                        eqlab.push_back(l);
                     if (l.rfind("mk ", 0) == 0) mklab.push_back(l);
                     for (auto it = std::sregex_iterator(l.begin(), l.end(), num); it != std::sregex_iterator(); ++it) cs.push_back(std::stod(it->str()));
                 }

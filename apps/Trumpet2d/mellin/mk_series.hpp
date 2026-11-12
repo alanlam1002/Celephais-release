@@ -18,6 +18,7 @@
 #include <complex>
 #include <stdexcept>
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -71,6 +72,7 @@ struct Ctx {
     // exponents; reg() then merges only near-coincidences (< reg_tol, N2A_REG_TOL 1e-3) instead of everything within R_m
     bool gauge_reg = false;
     double reg_tol = 1e-3;
+    std::map<int, double> lapse_sl;              // research round 1078: the lapse families' Sturm-Liouville exponents (config lapse_sl)
     // stage (ii) port, item 2 (spec sections 23-28; n2a_nl CF.clus / clroots / clabs, insertion-ordered as Python's dicts): per cluster key
     // its storage poles (clus: the member roots and the source poles), its member roots (clroots), the exponents merged into its poles (clabs);
     // noclus: the plain readout (meff's perturbations at a cluster key)

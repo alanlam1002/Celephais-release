@@ -28,6 +28,54 @@ constexpr double REAL_ROOT = 1e-6;       // abs(e_.imag) < 1e-6
 constexpr double ROOT_FAR = 0.1;         // abs(sgm - guess) > 0.1: dropped
 constexpr double GUESS_MARGIN = 0.2;     // guess > gmax + 0.2: skipped
 
+// research round 1078 (spinning_trumpet analysis_slicing/SLICING_FAMILIES.md section 3): the lapse families' aligned exponents from the
+// Sturm-Liouville problem on the solved cylinder, d/dx( g (1 - x^2) Y' ) + mu g Y = 0 with g = P^2 e^{-2u} (u, P the cylinder's cos 2j theta
+// modes), in the even-Legendre basis (30 functions, 400 Gauss-Legendre nodes; n2a_nl.lapse_sl_sigma); sigma_l = 1 + (-n + sqrt(n^2 + mu_{l/2})) / n
+inline std::map<int, double> lapse_sl_sigma(const std::vector<double>& u, const std::vector<double>& P, double n, int lmax, int nl = 30, int nq = 400) {
+    std::vector<double> xq(nq), wq(nq);
+    for (int i = 0; i < nq; i++) {                                 // Gauss-Legendre by Newton on P_nq
+        double x = std::cos(M_PI * (i + 0.75) / (nq + 0.5)), dp = 0;
+        for (int it = 0; it < 100; it++) {
+            double p0 = 1, p1 = x;
+            for (int k = 2; k <= nq; k++) { double p2 = ((2 * k - 1) * x * p1 - (k - 1) * p0) / k; p0 = p1; p1 = p2; }
+            dp = nq * (x * p1 - p0) / (x * x - 1);
+            double dx = p1 / dp;
+            x -= dx;
+            if (std::abs(dx) < 1e-16) break;
+        }
+        xq[i] = x; wq[i] = 2 / ((1 - x * x) * dp * dp);
+    }
+    const int L = 2 * nl;
+    std::vector<double> Pv(size_t(nl) * nq), dP(size_t(nl) * nq), g(nq);
+    for (int i = 0; i < nq; i++) {
+        double x = xq[i], th = std::acos(x), uu = 0, pp = 0;
+        for (size_t j = 0; j < u.size(); j++) uu += u[j] * std::cos(2.0 * j * th);
+        for (size_t j = 0; j < P.size(); j++) pp += P[j] * std::cos(2.0 * j * th);
+        g[i] = pp * pp * std::exp(-2 * uu);
+        std::vector<double> pl(L + 1), dl(L + 1);
+        pl[0] = 1; pl[1] = x; dl[0] = 0; dl[1] = 1;
+        for (int k = 2; k <= L; k++) { pl[k] = ((2 * k - 1) * x * pl[k - 1] - (k - 1) * pl[k - 2]) / k; dl[k] = dl[k - 2] + (2 * k - 1) * pl[k - 1]; }
+        for (int a = 0; a < nl; a++) { Pv[size_t(a) * nq + i] = pl[2 * a]; dP[size_t(a) * nq + i] = dl[2 * a]; }
+    }
+    std::vector<cd> A(size_t(nl) * nl), B(size_t(nl) * nl);
+    for (int a = 0; a < nl; a++)
+        for (int b = 0; b < nl; b++) {
+            double sa = 0, sb = 0;
+            for (int i = 0; i < nq; i++) {
+                sa += dP[size_t(a) * nq + i] * dP[size_t(b) * nq + i] * g[i] * (1 - xq[i] * xq[i]) * wq[i];
+                sb += Pv[size_t(a) * nq + i] * Pv[size_t(b) * nq + i] * g[i] * wq[i];
+            }
+            A[size_t(a) * nl + b] = sa; B[size_t(a) * nl + b] = sb;
+        }
+    std::vector<cd> ev = la::eiggen(A, B, nl);
+    std::vector<double> mu;
+    for (auto& e : ev) mu.push_back(e.real());
+    std::sort(mu.begin(), mu.end());
+    std::map<int, double> out;
+    for (int l = 2; l <= lmax && l / 2 < nl; l += 2) out[l] = 1 + (-n + std::sqrt(n * n + mu[l / 2])) / n;
+    return out;
+}
+
 inline double pmaxabs(const Piece& p) {
     double m = 0.0;
     for (auto& z : p.a) m = std::max(m, std::abs(z));
@@ -109,6 +157,15 @@ inline void lapse_roots(Ctx& c, const std::vector<cd>& Ms, int NB, const std::ve
         if (std::isfinite(e.real()) && std::isfinite(e.imag()) && std::abs(e.imag()) < REAL_ROOT) o.evr.push_back(e.real() + g);
     for (int L = 4; L <= lmax; L += 2) {
         double guess = 1 + (-std::sqrt(2.0) + std::sqrt(2.0 + L * (L + 1))) / n;
+        if (c.lapse_sl.count(L)) {                                // research round 1078: the Sturm-Liouville guess on the solved cylinder
+            guess = c.lapse_sl.at(L);
+            if (!o.evr.empty()) {
+                size_t im = 0;
+                for (size_t i = 1; i < o.evr.size(); i++)
+                    if (std::abs(o.evr[i] - guess) < std::abs(o.evr[im] - guess)) im = i;
+                std::printf("    [g 2] lapse l%d: Sturm-Liouville %.9f, six-field root %.9f (%+.1e)\n", L, guess, o.evr[im], o.evr[im] - guess);
+            }
+        }
         o.registry.emplace_back(L, guess);
         if (guess > gmax + GUESS_MARGIN || o.evr.empty()) continue;
         size_t im = 0;

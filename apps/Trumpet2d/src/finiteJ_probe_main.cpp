@@ -722,6 +722,12 @@ static double g_lsq_lm_min = 1e-16;        // --stageB-lsq-lm-min MUMIN: the ada
 // rank: rank 0 runs the native forward and broadcasts) before each residual of the least-squares step, g_sb_prejac (the Jacobian, its columns
 // split across the ranks) before Kadath's column loop; the evaluator's lazy calls then read the caches.  Empty without TRUMPET_STAGEB_MELLIN.
 static std::function<void()> g_sb_pre, g_sb_prejac;
+// code round 463 (research round 1077): the ALPHA-SCAN of the first least-squares step (env TRUMPET_LSQ_ASCAN="a1,a2,..."): before the line
+// search, ||W F|| at the state - a X and at the state + a X for every a, against the linear model F0 - a A X (A the step's own Jacobian);
+// the deviation D(a) = F(-a X) - F0 + a A X, total / matching / imposed, and its symmetric (curvature) and antisymmetric (Jacobian error
+// along X) parts: S(a) = (F(-aX) + F(+aX))/2 - F0, E(a) = (F(+aX) - F(-aX))/(2a) - A X [D = S - a E]; per row group (the equation's label,
+// first token) the largest.  Then the state is restored and the run STOPS (a diagnostic).
+static std::vector<char> g_lsq_ism;
 static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int it, int rank)
 {
     if (g_sb_pre) g_sb_pre();
@@ -823,6 +829,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         }
         std::vector<int> im, ic;
         for (int r = 0; r < m; r++) (ism[r] ? im : ic).push_back(r);
+        g_lsq_ism.assign(ism.begin(), ism.end());                       // (research round 1077: the alpha-scan's row classes)
         const int mm = static_cast<int>(im.size()), p = static_cast<int>(ic.size());
         if (g_lsq_grades >= 0 && it == 0) std::cout << "#  lsq: --stageB-lsq-grades " << g_lsq_grades << ": throat rows of grade >= " << g_lsq_grades << " in the least-squares set\n";
         if (!g_lsq_soft_orth.empty() && it == 0) {
@@ -952,6 +959,168 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         MPI_Bcast(&s, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
         return s;
     };
+    if (std::getenv("TRUMPET_LSQ_ASCAN") && it == 0) {
+        std::vector<double> as;
+        {
+            std::stringstream ss(std::getenv("TRUMPET_LSQ_ASCAN"));
+            std::string t;
+            while (std::getline(ss, t, ',')) if (!t.empty()) as.push_back(std::stod(t));
+        }
+        if (const char* pt = std::getenv("TRUMPET_LSQ_ASCAN_PART")) {   // 'throat' (the numeric unknowns: X's first nvar_double entries) or
+            const int nd = syst.get_nvar_double();                       // 'bulk' (the rest): X restricted to that part, so E splits by columns
+            const bool th = std::string(pt) == "throat";
+            for (int c = 0; c < n; c++) if ((c < nd) != th) X.set(c) = 0.0;
+            if (rank == 0) std::cout << "#  ALPHA-SCAN: X restricted to the " << (th ? "throat (numeric unknowns 0.." : "bulk (columns ") << (th ? nd - 1 : nd) << (th ? ")" : "..)") << "\n";
+        }
+        std::vector<double> AX, F0(m);
+        std::vector<std::string> grp(m, "?");
+        if (rank == 0) {
+            AX.assign(m, 0.0);
+            for (int c = 0; c < n; c++) { const double xc = X(c); const double* col = &A[static_cast<size_t>(c) * m]; for (int r = 0; r < m; r++) AX[r] += col[r] * xc; }
+            for (int r = 0; r < m; r++) F0[r] = sec(r);
+            std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
+            syst.classify_equation_row_metadata(rmeta);
+            const auto& EI = EqListPeek::eqints(syst);
+            const auto& EL = EqListPeek::eqs(syst);
+            for (const auto& rw : rmeta) {
+                if (rw.row < 0 || rw.row >= m || rw.eq_index < 0) continue;
+                std::string nm;
+                if (rw.equation_type == "Eq_int") { if (rw.eq_index < static_cast<int>(EI.size())) nm = std::get<0>(EI[rw.eq_index]); }
+                else if (rw.eq_index < static_cast<int>(EL.size())) nm = std::get<0>(EL[rw.eq_index]) + "@d" + std::to_string(rw.dom);
+                std::string g = nm.substr(0, nm.find(' '));
+                if (g == "SBM" || g == "SBT") { std::stringstream q(nm); std::string a1, a2; q >> a1 >> a2; g = a1 + " " + a2; }
+                grp[rw.row] = g;
+            }
+            std::cout << "#  ALPHA-SCAN (research round 1077): ||W F0|| " << std::setprecision(6) << phi0 << ";  |X| " << [&]{ double x = 0; for (int c = 0; c < n; c++) x += X(c) * X(c); return std::sqrt(x); }()
+                      << ";  ||W A X|| " << [&]{ double x = 0; for (int r = 0; r < m; r++) x += (R0[r] * AX[r]) * (R0[r] * AX[r]); return std::sqrt(x); }() << "\n";
+            std::cout << "#  ALPHA-SCAN columns: a | ||W F(-aX)|| (the step's side) model ||W(F0 - a AX)|| | ||W D|| matching imposed | ||W D||/a ||W D||/a^2 | "
+                         "||W S||/a^2 ||W E|| (E the Jacobian error along X, per unit a) | ||W F(+aX)||\n";
+        }
+        double cur_s = 0.0;
+        auto applyX = [&](double a) {                               // the state at var - a X (apply's sign), from var - cur_s X
+            if (a == cur_s) return;
+            Kadath::Array<double> Y(n);
+            for (int c = 0; c < n; c++) Y.set(c) = (a - cur_s) * X(c);
+            int conte = 0;
+            syst.get_space().xx_to_vars_variable_domains(&syst, Y, conte);
+            syst.xx_to_vars_delta(Y, conte);
+            cur_s = a;
+        };
+        auto Fat = [&](double a, std::vector<double>& F) {
+            applyX(a);
+            if (g_sb_pre) g_sb_pre();
+            const Kadath::Array<double> Fk(syst.sec_member());
+            F.resize(m);
+            for (int r = 0; r < m; r++) F[r] = Fk(r);
+        };
+        for (double a : as) {
+            std::vector<double> Fm, Fp;
+            Fat(a, Fm);                                             // the step's side: var - a X
+            Fat(-a, Fp);
+            if (rank == 0) {
+                double fm = 0, fp = 0, mo = 0, d2 = 0, dm = 0, dc = 0, s2 = 0, e2 = 0;
+                std::map<std::string, std::array<double, 3>> G;    // per group: ||W D||^2, ||W S||^2, ||W E||^2
+                for (int r = 0; r < m; r++) {
+                    const double w = R0[r];
+                    const double D = Fm[r] - F0[r] + a * AX[r];
+                    const double S = 0.5 * (Fm[r] + Fp[r]) - F0[r];
+                    const double E = (Fp[r] - Fm[r]) / (2 * a) - AX[r];         // F(+aX) - F(-aX) ~ 2a J X
+                    fm += w * Fm[r] * w * Fm[r]; fp += w * Fp[r] * w * Fp[r];
+                    mo += w * (F0[r] - a * AX[r]) * w * (F0[r] - a * AX[r]);
+                    d2 += w * D * w * D; (g_lsq_ism.size() == static_cast<size_t>(m) && g_lsq_ism[r] ? dm : dc) += w * D * w * D;
+                    s2 += w * S * w * S; e2 += w * E * w * E;
+                    auto& g = G[grp[r]]; g[0] += w * D * w * D; g[1] += w * S * w * S; g[2] += w * E * w * E;
+                }
+                std::cout << "#  ALPHA-SCAN a " << std::setprecision(3) << a << " | " << std::setprecision(6) << std::sqrt(fm) << " " << std::sqrt(mo) << " | "
+                          << std::sqrt(d2) << " " << std::sqrt(dm) << " " << std::sqrt(dc) << " | " << std::sqrt(d2) / a << " " << std::sqrt(d2) / (a * a)
+                          << " | " << std::sqrt(s2) / (a * a) << " " << std::sqrt(e2) << " | " << std::sqrt(fp) << "\n";
+                std::vector<std::pair<double, std::string>> gs;
+                for (auto& kv : G) gs.push_back({kv.second[0], kv.first});
+                std::sort(gs.rbegin(), gs.rend());
+                std::cout << "#  ALPHA-SCAN a " << std::setprecision(3) << a << " groups (||W D||, ||W S||/a^2, ||W E||):";
+                for (size_t q = 0; q < std::min<size_t>(8, gs.size()); q++) {
+                    const auto& g = G[gs[q].second];
+                    std::cout << "  [" << gs[q].second << "] " << std::setprecision(3) << std::sqrt(g[0]) << " " << std::sqrt(g[1]) / (a * a) << " " << std::sqrt(g[2]);
+                }
+                std::cout << "\n" << std::flush;
+            }
+        }
+        applyX(0.0);
+        // TRUMPET_LSQ_ASCAN_COLS="h1,h2" (with the scan): the numeric unknowns' columns (SB000.., Kadath's var_double, the first columns)
+        // one at a time against central differences at the absolute steps h1, h2: ||W (FD_c - A e_c)|| / ||W A e_c||, and the row groups of
+        // the largest error -- which of X's columns carry the Jacobian error E
+        if (std::getenv("TRUMPET_LSQ_ASCAN_COLS")) {
+            std::vector<double> hs;
+            {
+                std::stringstream ss(std::getenv("TRUMPET_LSQ_ASCAN_COLS"));
+                std::string t;
+                while (std::getline(ss, t, ',')) if (!t.empty()) hs.push_back(std::stod(t));
+            }
+            const int nd = syst.get_nvar_double();
+            if (rank == 0) std::cout << "#  ASCAN-COLS: " << nd << " numeric unknowns (columns 0.." << nd - 1 << "); per column: |X_c|, ||W A e_c||, then per h: ||W E_c|| / ||W A e_c|| [largest group]\n";
+            auto mv = [&](int c, double d) {
+                Kadath::Array<double> Y(n);
+                Y = 0.0;
+                Y.set(c) = d;
+                int conte = 0;
+                syst.get_space().xx_to_vars_variable_domains(&syst, Y, conte);
+                syst.xx_to_vars_delta(Y, conte);
+            };
+            auto Fnow = [&](std::vector<double>& F) {
+                if (g_sb_pre) g_sb_pre();
+                const Kadath::Array<double> Fk(syst.sec_member());
+                F.resize(m);
+                for (int r = 0; r < m; r++) F[r] = Fk(r);
+            };
+            std::vector<int> cols;                                     // TRUMPET_LSQ_ASCAN_COLS_TOP=K: only the K columns carrying the step most
+            {                                                          // (|X_c| ||W A e_c||), largest first; default all
+                std::vector<std::pair<double, int>> wt;
+                if (rank == 0)
+                    for (int c = 0; c < nd; c++) {
+                        double an = 0;
+                        for (int r = 0; r < m; r++) { const double w = R0[r] * A[static_cast<size_t>(c) * m + r]; an += w * w; }
+                        wt.push_back({-std::fabs(X(c)) * std::sqrt(an), c});
+                    }
+                std::sort(wt.begin(), wt.end());
+                int K = std::getenv("TRUMPET_LSQ_ASCAN_COLS_TOP") ? std::atoi(std::getenv("TRUMPET_LSQ_ASCAN_COLS_TOP")) : nd;
+                std::vector<int> cv(nd);
+                if (rank == 0) for (int q = 0; q < nd; q++) cv[q] = wt[q].second;
+                MPI_Bcast(cv.data(), nd, MPI_INT, 0, MPI_COMM_WORLD);
+                cols.assign(cv.begin(), cv.begin() + std::min(K, nd));
+            }
+            for (int c : cols) {
+                std::ostringstream line;
+                double an = 0;
+                if (rank == 0) {
+                    for (int r = 0; r < m; r++) { const double w = R0[r] * A[static_cast<size_t>(c) * m + r]; an += w * w; }
+                    an = std::sqrt(an);
+                    line << "#  ASCAN-COL " << c << " |X_c| " << std::setprecision(3) << std::fabs(X(c)) << " ||W A e_c|| " << an;
+                }
+                for (double h : hs) {
+                    std::vector<double> Fp, Fm;
+                    mv(c, -h); Fnow(Fp);                           // (xx_to_vars_delta subtracts: var + h)
+                    mv(c, 2 * h); Fnow(Fm);                        // var - h
+                    mv(c, -h);
+                    if (rank == 0) {
+                        double e2 = 0;
+                        std::map<std::string, double> G;
+                        for (int r = 0; r < m; r++) {
+                            const double E = R0[r] * ((Fp[r] - Fm[r]) / (2 * h) - A[static_cast<size_t>(c) * m + r]);
+                            e2 += E * E;
+                            G[grp[r]] += E * E;
+                        }
+                        std::string gb; double gv = -1;
+                        for (auto& kv : G) if (kv.second > gv) { gv = kv.second; gb = kv.first; }
+                        line << " | h " << h << ": " << std::sqrt(e2) / std::max(an, 1e-300) << " [" << gb << " " << std::sqrt(gv) << "]";
+                    }
+                }
+                if (rank == 0) std::cout << line.str() << "\n" << std::flush;
+            }
+        }
+        if (g_sb_pre) g_sb_pre();
+        if (rank == 0) std::cout << "#  ALPHA-SCAN: the state restored; the run stops (a diagnostic)\n" << std::flush;
+        return true;
+    }
     const double al[4] = {1.0, 0.5, 0.25, 0.125};
     double cur = 0.0, ph[4] = {0, 0, 0, 0};
     int acc = -1;

@@ -1222,7 +1222,16 @@ int mk_bundle_at(const char* base, const char* cyl, double K, const char* out, c
                 if (k_ == "n") o << "n " << rp(C.n) << "\n";
                 else if (k_ == "bnorm") o << "bnorm " << rp(C.c) << "\n";
                 else if (k_ == "Ph") o << "Ph " << rp(K) << "\n";
+                else if (k_ == "lapse_sl") continue;
                 else o << line << "\n";
+            }
+            // research round 1078 (N2A_LAPSE_GUESS=sl): the lapse families' Sturm-Liouville exponents on THIS cylinder
+            if (const char* lg = std::getenv("N2A_LAPSE_GUESS"); lg && std::string(lg) == "sl") {
+                auto sl = mk::fm::lapse_sl_sigma(C.u, C.P, C.n, 12);
+                o << "lapse_sl ";
+                bool first = true;
+                for (auto& kv : sl) { if (kv.first < 4) continue; char b_[40]; std::snprintf(b_, sizeof b_, "%.17g", kv.second); o << (first ? "" : ";") << kv.first << ":" << b_; first = false; }
+                o << "\n";
             }
             std::ofstream(od + "/config.txt") << o.str();
         }

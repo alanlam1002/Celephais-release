@@ -1007,7 +1007,15 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
     if (fail) throw std::runtime_error("--stageB-lsq: the least-squares step failed");
     MPI_Bcast(X.set_data(), n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Bcast(R0.data(), m, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    if (g_lsq_echeck < 0 || ep_ > 0) break;
+    // research round 1091: no E-check on a FLOOR step (the least-squares step's own linear prediction cannot reduce the matching residual:
+    // ||W (A X - F)||_m > 0.5 ||W F||_m) -- the step is noise-sized there and E / ||W A X|| is meaningless (0.40: 45.7 at ||W A X|| 2e-12)
+    double fr_ = g_lsq_floor_ratio;
+    MPI_Bcast(&fr_, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    if (g_lsq_echeck < 0 || ep_ > 0 || fr_ > 0.5) {
+        if (rank == 0 && g_lsq_echeck >= 0 && ep_ == 0 && fr_ > 0.5)
+            std::cout << "#  lsq step " << it << ": E-check skipped (a floor step: linear ratio " << std::setprecision(4) << fr_ << ")\n";
+        break;
+    }
     {                                                               // research round 1088: the Jacobian check along the step
         const double a = g_lsq_echeck_a;
         auto shiftX = [&](double d) {                               // var -= d X

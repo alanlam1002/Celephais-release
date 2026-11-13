@@ -172,6 +172,7 @@ inline void lapse_roots(Ctx& c, const std::vector<cd>& Ms, int NB, const std::ve
         for (size_t i = 1; i < o.evr.size(); i++)
             if (std::abs(o.evr[i] - guess) < std::abs(o.evr[im] - guess)) im = i;
         double sgm = o.evr[im];
+        if (c.lapse_sl.count(L)) sgm = guess;                       // research round 1088: registered AT the SL exponent (the block root logged)
         if (std::abs(sgm - guess) > ROOT_FAR || sgm > gmax) continue;
         if (const char* ff = std::getenv("MK_FAM_FORCE")) {       // diagnostic (round 1028): a family's centre forced ('L:value;...')
             std::string fs = std::string(";") + ff + ";", k = ";" + std::to_string(L) + ":";

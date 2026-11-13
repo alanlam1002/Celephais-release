@@ -728,6 +728,17 @@ static std::function<void()> g_sb_pre, g_sb_prejac;
 // along X) parts: S(a) = (F(-aX) + F(+aX))/2 - F0, E(a) = (F(+aX) - F(-aX))/(2a) - A X [D = S - a E]; per row group (the equation's label,
 // first token) the largest.  Then the state is restored and the run STOPS (a diagnostic).
 static std::vector<char> g_lsq_ism;
+// code round 463 (research round 1088, the tangent error): --stageB-lsq-fd-cols NAMES (comma-separated numeric unknowns, SB###): those columns
+// of every assembled Jacobian replaced by central differences of the forward (abs. step --stageB-lsq-fdh, default 1e-6);
+// --stageB-lsq-echeck THR: before the line search, E = (F(+aX) - F(-aX)) / (2a) - A X at a = --stageB-lsq-echeck-a (1e-2); if ||W E|| > THR ||W A X||
+// the --stageB-lsq-echeck-ncols (12) numeric columns carrying the step (|X_c| ||W A e_c||) are replaced by central differences and the step
+// re-solved (once); --stageB-lsq-ls-min AMIN: the line search halves down to AMIN (the last trial AMIN itself; default 0.125, as before)
+static std::vector<std::string> g_lsq_fd_names;
+static double g_lsq_fdh = 1e-6, g_lsq_echeck = -1.0, g_lsq_echeck_a = 1e-2, g_lsq_ls_min = 0.125;
+static int g_lsq_echeck_ncols = 12;
+struct VarDoublePeek : Kadath::System_of_eqs {
+    static const std::vector<std::string>& names(const Kadath::System_of_eqs& s) { return s.*(&VarDoublePeek::names_var_double); }
+};
 static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int it, int rank)
 {
     if (g_sb_pre) g_sb_pre();
@@ -777,10 +788,53 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
     }
     if (g_lsq_jac_reuse && rank == 0 && !reuse) A_keep = A;
     const double tasm = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    // research round 1088: numeric columns by central differences of the forward (collective; rank 0's A updated)
+    auto fd_column = [&](int c, double h) {
+        auto mvc = [&](double d) {                                  // var -= d e_c
+            Kadath::Array<double> Y(n);
+            Y = 0.0;
+            Y.set(c) = d;
+            int conte = 0;
+            syst.get_space().xx_to_vars_variable_domains(&syst, Y, conte);
+            syst.xx_to_vars_delta(Y, conte);
+        };
+        auto Fnow = [&](std::vector<double>& Fv) {
+            if (g_sb_pre) g_sb_pre();
+            const Kadath::Array<double> Fk(syst.sec_member());
+            Fv.resize(m);
+            for (int r = 0; r < m; r++) Fv[r] = Fk(r);
+        };
+        std::vector<double> Fp, Fm;
+        mvc(-h); Fnow(Fp);
+        mvc(2 * h); Fnow(Fm);
+        mvc(-h);
+        if (rank == 0) for (int r = 0; r < m; r++) A[static_cast<size_t>(c) * m + r] = (Fp[r] - Fm[r]) / (2 * h);
+    };
+    const int nvd = syst.get_nvar_double();
+    if (!g_lsq_fd_names.empty() && !reuse) {
+        const auto& vn = VarDoublePeek::names(syst);
+        std::string done_;
+        for (const auto& nm : g_lsq_fd_names) {
+            int c = -1;
+            for (int q = 0; q < static_cast<int>(vn.size()); q++) {   // (Kadath normalises names: a trailing space)
+                std::string t_ = vn[q];
+                while (!t_.empty() && t_.back() == ' ') t_.pop_back();
+                if (t_ == nm) c = q;
+            }
+            if (c < 0 || c >= nvd) throw std::runtime_error("--stageB-lsq-fd-cols: no numeric unknown " + nm);
+            fd_column(c, g_lsq_fdh);
+            done_ += " " + nm;
+        }
+        if (g_sb_pre) g_sb_pre();
+        if (rank == 0) std::cout << "#  lsq step " << it << ": columns by central differences (h " << g_lsq_fdh << "):" << done_ << "\n";
+    }
     Kadath::Array<double> X(n);
     std::vector<double> R0(m, 1.0);
     double phi0 = 0;
     int fail = 0;
+    for (int ep_ = 0;; ep_++) {
+    phi0 = 0;
+    fail = 0;
     if (rank == 0) {
         const auto t1 = std::chrono::steady_clock::now();
         auto Aat = [&](int r, int c) -> double { return A[static_cast<size_t>(c) * m + r]; };
@@ -933,14 +987,69 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
     }
     MPI_Bcast(&fail, 1, MPI_INT, 0, MPI_COMM_WORLD);
     if (fail) throw std::runtime_error("--stageB-lsq: the least-squares step failed");
+    MPI_Bcast(X.set_data(), n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(R0.data(), m, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    if (g_lsq_echeck < 0 || ep_ > 0) break;
+    {                                                               // research round 1088: the Jacobian check along the step
+        const double a = g_lsq_echeck_a;
+        auto shiftX = [&](double d) {                               // var -= d X
+            Kadath::Array<double> Y(n);
+            for (int c = 0; c < n; c++) Y.set(c) = d * X(c);
+            int conte = 0;
+            syst.get_space().xx_to_vars_variable_domains(&syst, Y, conte);
+            syst.xx_to_vars_delta(Y, conte);
+        };
+        auto Fnow = [&](std::vector<double>& Fv) {
+            if (g_sb_pre) g_sb_pre();
+            const Kadath::Array<double> Fk(syst.sec_member());
+            Fv.resize(m);
+            for (int r = 0; r < m; r++) Fv[r] = Fk(r);
+        };
+        std::vector<double> Fm, Fp;
+        shiftX(a); Fnow(Fm);                                        // var - a X
+        shiftX(-2 * a); Fnow(Fp);                                   // var + a X
+        shiftX(a);
+        if (g_sb_pre) g_sb_pre();
+        double ratio = 0, en = 0, axn = 0;
+        std::vector<int> pick(std::max(g_lsq_echeck_ncols, 1), -1);
+        if (rank == 0) {
+            std::vector<double> AX(m, 0.0);
+            for (int c = 0; c < n; c++) { const double xc = X(c); const double* col = &A[static_cast<size_t>(c) * m]; for (int r = 0; r < m; r++) AX[r] += col[r] * xc; }
+            for (int r = 0; r < m; r++) {
+                const double E = (Fp[r] - Fm[r]) / (2 * a) - AX[r];
+                en += (R0[r] * E) * (R0[r] * E);
+                axn += (R0[r] * AX[r]) * (R0[r] * AX[r]);
+            }
+            en = std::sqrt(en); axn = std::sqrt(axn);
+            ratio = axn > 0 ? en / axn : 0.0;
+            std::vector<std::pair<double, int>> wt;
+            for (int c = 0; c < nvd; c++) {
+                double an = 0;
+                for (int r = 0; r < m; r++) { const double w = R0[r] * A[static_cast<size_t>(c) * m + r]; an += w * w; }
+                wt.push_back({-std::fabs(X(c)) * std::sqrt(an), c});
+            }
+            std::sort(wt.begin(), wt.end());
+            for (int q = 0; q < static_cast<int>(pick.size()) && q < static_cast<int>(wt.size()); q++) pick[q] = wt[q].second;
+            std::cout << "#  lsq step " << it << ": E-check a " << a << ": ||W E|| " << std::setprecision(4) << en << " / ||W A X|| " << axn
+                      << " = " << ratio << (ratio > g_lsq_echeck ? " > " : " <= ") << g_lsq_echeck << "\n";
+        }
+        MPI_Bcast(&ratio, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        if (ratio <= g_lsq_echeck) break;
+        MPI_Bcast(pick.data(), static_cast<int>(pick.size()), MPI_INT, 0, MPI_COMM_WORLD);
+        const auto& vn = VarDoublePeek::names(syst);
+        std::string done_;
+        for (int c : pick) if (c >= 0) { fd_column(c, g_lsq_fdh); done_ += " " + (c < static_cast<int>(vn.size()) ? vn[c] : std::to_string(c)); }
+        if (g_sb_pre) g_sb_pre();
+        if (rank == 0) std::cout << "#  lsq step " << it << ": E-check failed: columns carrying the step by central differences (h " << g_lsq_fdh
+                                 << "):" << done_ << "; the step re-solved\n";
+    }
+    }
     if (g_lsq_floor_w > 0 || g_lsq_jac_reuse) {
         MPI_Bcast(&g_lsq_floor_ratio, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
         floor_run = g_lsq_floor_ratio > 0.5 ? floor_run + 1 : 0;
         if (rank == 0) std::cout << "#  lsq step " << it << ": floor test ||W (A X - F)||_m / ||W F||_m " << std::setprecision(4)
                                  << g_lsq_floor_ratio << " -> consecutive floor steps " << floor_run << " of " << g_lsq_floor_w << "\n";
     }
-    MPI_Bcast(X.set_data(), n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    MPI_Bcast(R0.data(), m, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     // line search on ||W F||
     auto apply = [&](double a) {
         if (a == 0.0) return;
@@ -1121,10 +1230,14 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         if (rank == 0) std::cout << "#  ALPHA-SCAN: the state restored; the run stops (a diagnostic)\n" << std::flush;
         return true;
     }
-    const double al[4] = {1.0, 0.5, 0.25, 0.125};
-    double cur = 0.0, ph[4] = {0, 0, 0, 0};
+    std::vector<double> al = {1.0};                                  // halving down to --stageB-lsq-ls-min (research round 1088: 0.01), the last
+    while (al.back() / 2 > g_lsq_ls_min * (1 + 1e-12)) al.push_back(al.back() / 2);   // trial the minimum itself
+    if (al.back() > g_lsq_ls_min * (1 + 1e-12)) al.push_back(g_lsq_ls_min);
+    const int nal = static_cast<int>(al.size());
+    double cur = 0.0;
+    std::vector<double> ph(nal, 0.0);
     int acc = -1;
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < nal; k++) {
         apply(al[k] - cur); cur = al[k];
         ph[k] = phi();
         double ok = (ph[k] < phi0) ? 1.0 : 0.0;
@@ -1139,7 +1252,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
 #endif
     if (rank == 0) {
         std::cout << "#  lsq step " << it << ": line search ||W F||: " << std::setprecision(6) << phi0 << " ->";
-        for (int k = 0; k < 4 && (acc < 0 || k <= acc); k++) std::cout << " (a " << al[k] << ") " << ph[k];
+        for (int k = 0; k < nal && (acc < 0 || k <= acc); k++) std::cout << " (a " << al[k] << ") " << ph[k];
         std::cout << ";  " << (acc >= 0 ? "accepted a " : "NO DECREASE, step rejected: a ") << cur << "\n";
     }
     if (g_lsq_floor_w > 0 && floor_run >= g_lsq_floor_w) {      // round 419: W consecutive steps at the floor -- stop (the window)
@@ -2007,6 +2120,12 @@ int main(int argc, char** argv)
         else if (k == "--stageB-lsq-impose-qb") g_lsq_impose_qb = true;
         else if (k == "--stageB-lsq-grades") g_lsq_grades = std::atoi(argv[++i]);
         else if (k == "--stageB-lsq-floor-stop") g_lsq_floor_w = std::atoi(argv[++i]);
+        else if (k == "--stageB-lsq-fd-cols") { std::stringstream ss_(argv[++i]); std::string t_; while (std::getline(ss_, t_, ',')) if (!t_.empty()) g_lsq_fd_names.push_back(t_); }
+        else if (k == "--stageB-lsq-fdh") g_lsq_fdh = std::atof(argv[++i]);
+        else if (k == "--stageB-lsq-echeck") g_lsq_echeck = std::atof(argv[++i]);
+        else if (k == "--stageB-lsq-echeck-a") g_lsq_echeck_a = std::atof(argv[++i]);
+        else if (k == "--stageB-lsq-echeck-ncols") g_lsq_echeck_ncols = std::atoi(argv[++i]);
+        else if (k == "--stageB-lsq-ls-min") g_lsq_ls_min = std::atof(argv[++i]);
         else if (k == "--stageB-lsq-jac-reuse") g_lsq_jac_reuse = true;
         else if (k == "--apply-step") { applystep = argv[++i]; applyeps = std::stod(argv[++i]); }
 #ifdef TRUMPET_LSQ_LM

@@ -717,7 +717,12 @@ static double g_lsq_rm = 0.0;              // r_m (the stage-B export's RM)
 // points are Gauss-Newton's (X = 0 there); the damping only changes the path.  Its own binary (finiteJ_probe_bulk2_v2_ng8_ts_lm).
 static double g_lsq_lm_mu = -1.0;          // < 0: off
 static double g_lsq_lm_min = 1e-16;        // --stageB-lsq-lm-min MUMIN: the adaptation's floor (round 461: the drift resumes when mu falls back)
+static double g_lsq_lm_max = 1e-2;         // code round 463 (research round 1089): --stageB-lsq-lm-max MUMAX, the adaptation's ceiling (1e-2 as before)
 #endif
+// code round 463 (research round 1089, M4): --stageB-lsq-wfix -- the row weights W FIXED for the solve (one continuation step): taken from its
+// first assembled Jacobian and kept at every later step, so ||W F|| is one norm across the steps (row max recomputed per Jacobian moved some
+// rows' W x50 between steps at 0.40).  Default off: W from each Jacobian, as before.
+static bool g_lsq_wfix = false;
 // code round 463 M4d (research round 1040): the throat's COLLECTIVE evaluation points -- g_sb_pre (the values at the current unknowns, every
 // rank: rank 0 runs the native forward and broadcasts) before each residual of the least-squares step, g_sb_prejac (the Jacobian, its columns
 // split across the ranks) before Kadath's column loop; the evaluator's lazy calls then read the caches.  Empty without TRUMPET_STAGEB_MELLIN.
@@ -915,6 +920,19 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
             int nd1 = 0;
             for (int r = 0; r < m; r++) if (ism[r] == 2) { R0[r] *= g_lsq_wd1; nd1++; }
             if (it == 0) std::cout << "#  lsq: --stageB-lsq-wd1 " << g_lsq_wd1 << ": " << nd1 << " matching d1 rows reweighted\n";
+        }
+        if (g_lsq_wfix) {                                              // research round 1089: W from the solve's first Jacobian
+            static std::vector<double> R0_fix;
+            if (R0_fix.size() != static_cast<size_t>(m)) {
+                R0_fix = R0;
+                std::cout << "#  lsq step " << it << ": --stageB-lsq-wfix: W fixed from this Jacobian for the solve\n";
+            } else {
+                double mx = 1.0, mn = 1.0;
+                for (int r = 0; r < m; r++) if (R0_fix[r] > 0 && R0[r] > 0) { mx = std::max(mx, R0[r] / R0_fix[r]); mn = std::min(mn, R0[r] / R0_fix[r]); }
+                std::cout << "#  lsq step " << it << ": --stageB-lsq-wfix: W kept (this Jacobian's own row max would differ x" << std::setprecision(3)
+                          << mn << " .. x" << mx << ")\n";
+                R0 = R0_fix;
+            }
         }
         std::vector<double> Cs(n, 0.0);
         for (int c = 0; c < n; c++) {
@@ -1247,7 +1265,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
     if (acc < 0) { apply(-cur); cur = 0.0; }                       // no decrease: the step is rejected (the floor)
 #ifdef TRUMPET_LSQ_LM
     if (g_lsq_lm_mu > 0) {                                          // round 461: the damping's adaptation (every rank alike)
-        g_lsq_lm_mu = (acc == 0) ? std::max(g_lsq_lm_mu / 3.0, g_lsq_lm_min) : std::min(g_lsq_lm_mu * 4.0, 1e-2);
+        g_lsq_lm_mu = (acc == 0) ? std::max(g_lsq_lm_mu / 3.0, g_lsq_lm_min) : std::min(g_lsq_lm_mu * 4.0, g_lsq_lm_max);
     }
 #endif
     if (rank == 0) {
@@ -2126,10 +2144,12 @@ int main(int argc, char** argv)
         else if (k == "--stageB-lsq-echeck-a") g_lsq_echeck_a = std::atof(argv[++i]);
         else if (k == "--stageB-lsq-echeck-ncols") g_lsq_echeck_ncols = std::atoi(argv[++i]);
         else if (k == "--stageB-lsq-ls-min") g_lsq_ls_min = std::atof(argv[++i]);
+        else if (k == "--stageB-lsq-wfix") g_lsq_wfix = true;
         else if (k == "--stageB-lsq-jac-reuse") g_lsq_jac_reuse = true;
         else if (k == "--apply-step") { applystep = argv[++i]; applyeps = std::stod(argv[++i]); }
 #ifdef TRUMPET_LSQ_LM
         else if (k == "--stageB-lsq-lm") g_lsq_lm_mu = std::stod(argv[++i]);
+        else if (k == "--stageB-lsq-lm-max") g_lsq_lm_max = std::stod(argv[++i]);
         else if (k == "--stageB-lsq-lm-min") g_lsq_lm_min = std::stod(argv[++i]);
 #endif
         else if (k == "--stageB-lsq-w") { const std::string w_ = argv[++i]; if (w_ == "scalefree") g_lsq_wmode = 1; else if (w_ != "rowmax") { std::cerr << "FATAL: --stageB-lsq-w rowmax|scalefree\n"; return 1; } }

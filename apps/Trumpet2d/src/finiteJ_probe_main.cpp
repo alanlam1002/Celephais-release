@@ -1256,6 +1256,39 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
         if (rank == 0) std::cout << "#  ALPHA-SCAN: the state restored; the run stops (a diagnostic)\n" << std::flush;
         return true;
     }
+    // research round 1094 (spec section 48): the residual BY ROW GROUP at the start and at each trial point (the x68 rise, light instrumentation;
+    // TRUMPET_LSQ_TRIAL_GROUPS=0 off) -- ||W F|| per group (the equation's name: SBM / SBT and its sub-label, else the first word), the 6 largest
+    const bool tg_on = !(std::getenv("TRUMPET_LSQ_TRIAL_GROUPS") && std::string(std::getenv("TRUMPET_LSQ_TRIAL_GROUPS")) == "0");
+    std::vector<std::string> tgrp;
+    if (tg_on && rank == 0) {
+        tgrp.assign(m, "?");
+        std::vector<Kadath::System_of_eqs::RowMetadata> rmeta;
+        syst.classify_equation_row_metadata(rmeta);
+        const auto& EI = EqListPeek::eqints(syst);
+        const auto& EL = EqListPeek::eqs(syst);
+        for (const auto& rw : rmeta) {
+            if (rw.row < 0 || rw.row >= m || rw.eq_index < 0) continue;
+            std::string nm;
+            if (rw.equation_type == "Eq_int") { if (rw.eq_index < static_cast<int>(EI.size())) nm = std::get<0>(EI[rw.eq_index]); }
+            else if (rw.eq_index < static_cast<int>(EL.size())) nm = std::get<0>(EL[rw.eq_index]) + "@d" + std::to_string(rw.dom);
+            std::string g = nm.substr(0, nm.find(' '));
+            if (g == "SBM" || g == "SBT") { std::stringstream q(nm); std::string a1, a2; q >> a1 >> a2; g = a1 + " " + a2; }
+            tgrp[rw.row] = g;
+        }
+    }
+    auto trial_groups = [&](const std::string& tag) {
+        if (!tg_on || rank != 0) return;
+        const Kadath::Array<double> F(syst.sec_member());
+        std::map<std::string, double> G;
+        for (int r = 0; r < m; r++) G[tgrp[r]] += (R0[r] * F(r)) * (R0[r] * F(r));
+        std::vector<std::pair<double, std::string>> v;
+        for (auto& kv : G) v.emplace_back(std::sqrt(kv.second), kv.first);
+        std::sort(v.rbegin(), v.rend());
+        std::cout << "#  lsq step " << it << ": groups at " << tag << ":";
+        for (size_t q = 0; q < v.size() && q < 6; q++) std::cout << " [" << v[q].second << " " << std::setprecision(3) << v[q].first << "]";
+        std::cout << "\n" << std::flush;
+    };
+    trial_groups("the start");
     std::vector<double> al = {1.0};                                  // halving down to --stageB-lsq-ls-min (research round 1088: 0.01), the last
     while (al.back() / 2 > g_lsq_ls_min * (1 + 1e-12)) al.push_back(al.back() / 2);   // trial the minimum itself
     if (al.back() > g_lsq_ls_min * (1 + 1e-12)) al.push_back(g_lsq_ls_min);
@@ -1266,6 +1299,7 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
     for (int k = 0; k < nal; k++) {
         apply(al[k] - cur); cur = al[k];
         ph[k] = phi();
+        trial_groups("a " + std::to_string(al[k]));
         double ok = (ph[k] < phi0) ? 1.0 : 0.0;
         MPI_Bcast(&ok, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
         if (ok > 0.5) { acc = k; break; }

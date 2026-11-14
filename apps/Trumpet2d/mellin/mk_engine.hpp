@@ -1161,6 +1161,40 @@ inline void Engine::run() {
                     recentre(mref_s, Ms, nm, g - mref_g);
                     recentre(mref_c, Mc, nmc, g - mref_g);
                 }
+                // research round 1094 (spec section 48): THE FAMILY'S OWN CONTOUR -- at a lapse family's own centre (off-integer, outside a cluster)
+                // the radius is min(R, half the distance to the nearest other root of the step operator, spurious roots included), so that its
+                // residue has rank 1; a gap below N2A_OWN_RMIN (default 1e-3) would need the pair clustered (the datum on the family's own root
+                // direction): not on this route -- an error.  N2A_OWN_CONTOUR=0: the pre-1094 radius
+                if (newt == 0 && !isint && !iscl && !(std::getenv("N2A_OWN_CONTOUR") && std::string(std::getenv("N2A_OWN_CONTOUR")) == "0")) {
+                    std::string flab;
+                    for (auto& f : fams)
+                        if (keq(f.second, gk) && f.first.rfind("lapse", 0) == 0) { flab = f.first; break; }
+                    if (!flab.empty()) {
+                        std::vector<int> iax;
+                        {
+                            auto ac = ct::active(g, P_.kofs);
+                            for (int j = 0; j < NB; j++)
+                                if (ac[j]) iax.push_back(j);
+                        }
+                        Vec ev = cl::pencil_roots(Ms, NB, iax, S_.rw, S_.cw);
+                        size_t io = 0;                                       // the family's own root: the one nearest its centre
+                        for (size_t q = 1; q < ev.size(); q++)
+                            if (std::abs(ev[q]) < std::abs(ev[io])) io = q;
+                        double dn = 1e300, dr = 0.0;
+                        for (size_t q = 0; q < ev.size(); q++)
+                            if (q != io && std::abs(ev[q]) < dn) { dn = std::abs(ev[q]); dr = ev[q].real(); }
+                        const double rmin = std::getenv("N2A_OWN_RMIN") ? std::atof(std::getenv("N2A_OWN_RMIN")) : 1e-3;
+                        if (dn / 2 < Rcur_) {
+                            if (dn / 2 < rmin)
+                                throw std::runtime_error("own contour: " + flab + "'s nearest other root " + std::to_string(g + dr) + " is " + std::to_string(dn) +
+                                                         " away -- the pair must be clustered (not on this route)");
+                            std::printf("    [own contour %s %.6f] own root %+.2e; the nearest other root %.6f (distance %.4f) -> contour radius %.4f (was %.4f)\n",
+                                        flab.c_str(), g, std::abs(ev[io]), g + dr, dn, dn / 2, Rcur_);
+                            Rcur_ = dn / 2;
+                            if (rp_match) rp_.R = Rcur_;
+                        }
+                    }
+                }
                 if (CL && newt == 0 && (iscl || (!isint && !is_root(g)))) {
                     std::vector<int> iax;
                     {

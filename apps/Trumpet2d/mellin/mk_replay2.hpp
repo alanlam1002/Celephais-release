@@ -14,6 +14,61 @@
 namespace mk {
 namespace en {
 
+// research round 1094 (spec section 48, stage 2 part 3): the EXACT tangent of the forward's own operator.  With meff's finite-difference mode
+// (production: Ms[., ., col] = (R(C + h e_col) - R(C - h e_col)) / 2h, e_col the unit at the block column's moment 2) its derivative along dC
+// is (R'(C + h e_col)[dC] - R'(C - h e_col)[dC]) / 2h -- the kernel's exact linear response at the two perturbed series, on meff's own batch;
+// no second-order response is needed (the operator IS a difference).  Only dMs (the conditions' Mc is not differentiated).
+inline void meff_dual(Kernel& kr, const Proj& P, const std::vector<Entry>& Cx, const std::vector<Entry>& dCx, double g, double top, double h, int chunk,
+                      std::vector<cd>& dMs) {
+    Ctx& c = kr.c;
+    int K = c.K, nn = P.nn, NB = P.nb * nn;
+    dMs.assign(size_t(3) * NB * NB, 0.0);
+    std::vector<std::pair<int, Key>> colsb;
+    for (int j = 0; j < nn; j++) colsb.emplace_back(j, ckey(c, g + P.kofs[j]));
+    for (size_t c0 = 0; c0 < colsb.size(); c0 += size_t(chunk)) {
+        size_t c1 = std::min(colsb.size(), c0 + size_t(chunk));
+        int nq = int(c1 - c0), Bt = 2 * nq;
+        std::vector<Entry> Cp = Cx;
+        for (int q = 0; q < nq; q++) {
+            int j = colsb[c0 + q].first;
+            const Key& t = colsb[c0 + q].second;
+            int at = -1;
+            for (size_t e = 0; e < Cp.size(); e++)
+                if (Cp[e].j == j && keq(Cp[e].t, t)) { at = int(e); break; }
+            if (at < 0) { Cp.push_back(Entry{j, t, 1, std::vector<cd>(K, 0.0)}); at = int(Cp.size()) - 1; }
+            Entry& en = Cp[at];
+            if (en.nb == 1) {
+                std::vector<cd> arr(size_t(Bt) * K);
+                for (int b = 0; b < Bt; b++)
+                    for (int k = 0; k < K; k++) arr[size_t(b) * K + k] = en.m[k];
+                en.m = std::move(arr);
+                en.nb = Bt;
+            }
+            en.m[size_t(2 * q) * K + 2] += h;
+            en.m[size_t(2 * q + 1) * K + 2] -= h;
+        }
+        // the tangent broadcast to the batch (every batch member moves along the same dC)
+        std::vector<Entry> dCb;
+        for (auto& e : dCx) {
+            if (e.nb != 1) throw std::runtime_error("meff_dual: a batched tangent");
+            std::vector<cd> arr(size_t(Bt) * K);
+            for (int b = 0; b < Bt; b++)
+                for (int k = 0; k < K && k < int(e.m.size()); k++) arr[size_t(b) * K + k] = e.m[k];
+            dCb.push_back(Entry{e.j, e.t, Bt, std::move(arr)});
+        }
+        kr.run(Cp, &dCb, top);
+        auto dRg = project(c, kr.dout, g, Bt, P.gfam, P.dE, P.W, false);
+        for (int q = 0; q < nq; q++) {
+            int col = colsb[c0 + q].first;
+            for (int i = 0; i < nn; i++)
+                for (int m = 0; m < 3; m++) {
+                    size_t ap = (size_t(2 * q) * K + (2 - m)) * nn + i, am = (size_t(2 * q + 1) * K + (2 - m)) * nn + i;
+                    dMs[(size_t(m) * NB + i) * NB + col] = (dRg[ap] - dRg[am]) / (2 * h);
+                }
+        }
+    }
+}
+
 inline void Engine::tan_init(std::vector<Entry>& C) {
     const char* e = std::getenv("MK_TAN");
     if (!e) return;
@@ -66,6 +121,12 @@ inline void Engine::tan_step(double g) {
         meff(k_, P_, Cx, g, top, c_.meff_mode, c_.meff_h, c_.meff_chunk, Ms, Mc);
         double dn = maxabs_entries(dCx);
         dMs.assign(Ms.size(), 0.0);
+        // research round 1094: the exact tangent of meff's finite-difference operator (MK_TAN_MEFF=fd: the round-1093 central difference)
+        static const bool OP_FD = std::getenv("MK_TAN_MEFF") && std::string(std::getenv("MK_TAN_MEFF")) == "fd";
+        if (dn > 0 && c_.meff_mode == 0 && !OP_FD) {
+            meff_dual(k_, P_, Cx, dCx, g, top, c_.meff_h, c_.meff_chunk, dMs);
+            dn = 0.0;
+        }
         if (dn > 0) {
             static const double HM = std::getenv("MK_TAN_MEFF_H") ? std::atof(std::getenv("MK_TAN_MEFF_H")) : 1e-4;   // (the operator's FD step, relative: meff is itself a finite difference -- 1e-6 round-off-limited, 2.6e-5 on the PS2 gate; 1e-4 at the gate's own noise 4e-6; the exact tangent is stage 2 part 3)
             double hm = HM * std::max(1.0, maxabs_entries(Cx)) / dn;

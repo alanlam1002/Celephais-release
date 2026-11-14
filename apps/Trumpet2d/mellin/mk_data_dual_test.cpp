@@ -85,6 +85,56 @@ int main() {
             std::printf("  rank %d  %-18s rel. error  h 1e-5: %.2e   h 1e-6: %.2e   %s\n", rk, nm[i], w[i][0], w[i][1], ok ? "ok" : "FAIL");
         }
     }
+    // research round 1093: the off-integer start (dt::offl_start, --cond-fit) on duals, the datum moved too
+    for (int rk = 1; rk <= 2; rk++) {
+        Vec e1(N);
+        for (int k = 0; k < N; k++) e1[k] = std::polar(1.0, 2 * M_PI * (k + 0.5) / N);
+        Vec X0 = rnd(size_t(N) * NB, 0.1);
+        std::vector<Vec> W(rk);
+        for (int r = 0; r < rk; r++) W[r] = rnd(size_t(N) * NB, 3.0);
+        double datum = 0.37;
+        dt::Eval ev;
+        ev.cond = [](const Vec&) { return Vec(4, 0.0); };
+        ev.gate = [](const Vec*, double) { return 0.0; };
+        std::vector<Vec> Wq;
+        Vec Xg;
+        bool hf = false;
+        cd amp;
+        dt::offl_start(X0, W, nn, NB, e1, 0.06, true, datum, true, ev, Wq, Xg, hf, amp);
+        std::vector<Vec> dX0(ND);
+        std::vector<std::vector<Vec>> dW(ND, std::vector<Vec>(rk));
+        std::vector<double> dd(ND);
+        for (int q = 0; q < ND; q++) {
+            dX0[q] = rnd(X0.size(), 0.1);
+            for (int r = 0; r < rk; r++) dW[q][r] = rnd(W[r].size(), 0.5);
+            dd[q] = 0.3 + q;
+        }
+        ddl::OfflT t;
+        ddl::offl_start_t(X0, W, nn, NB, e1, 0.06, true, datum, dX0, dW, dd, ND, Wq, t);
+        double w1[2] = {0, 0}, w2[2] = {0, 0};
+        const double hs[2] = {1e-5, 1e-6};
+        for (int q = 0; q < ND; q++)
+            for (int ih = 0; ih < 2; ih++) {
+                double h = hs[ih];
+                auto at = [&](double s, std::vector<Vec>& Wo, Vec& Xo) {
+                    std::vector<Vec> W2(rk);
+                    for (int r = 0; r < rk; r++) W2[r] = axpy(W[r], s, dW[q][r]);
+                    bool h2; cd a2;
+                    dt::offl_start(axpy(X0, s, dX0[q]), W2, nn, NB, e1, 0.06, true, datum + s * dd[q], true, ev, Wo, Xo, h2, a2);
+                };
+                std::vector<Vec> Wp, Wm;
+                Vec Xp, Xm;
+                at(h, Wp, Xp);
+                at(-h, Wm, Xm);
+                auto fd = [&](const Vec& a, const Vec& b) { Vec r = axpy(a, -1.0, b); for (auto& z : r) z /= 2 * h; return r; };
+                w1[ih] = std::max(w1[ih], rel(t.dXg[q], fd(Xp, Xm)));
+                for (int r = 0; r < rk; r++) w2[ih] = std::max(w2[ih], rel(t.dWq[q][r], fd(Wp[r], Wm[r])));
+            }
+        bool ok1 = std::min(w1[0], w1[1]) < 1e-7, ok2 = std::min(w2[0], w2[1]) < 1e-7;
+        fails += !ok1 + !ok2;
+        std::printf("  rank %d  %-18s rel. error  h 1e-5: %.2e   h 1e-6: %.2e   %s\n", rk, "offl start Xg", w1[0], w1[1], ok1 ? "ok" : "FAIL");
+        std::printf("  rank %d  %-18s rel. error  h 1e-5: %.2e   h 1e-6: %.2e   %s\n", rk, "offl directions", w2[0], w2[1], ok2 ? "ok" : "FAIL");
+    }
     std::printf("%s\n", fails ? "FAILURES" : "all ok");
     return fails ? 1 : 0;
 }

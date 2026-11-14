@@ -232,6 +232,7 @@ inline void Engine::step_hook(double g) {
         size_t a = s.find(':'), b = s.find(':', a + 1), c = s.find(':', b + 1);
         replay_step(g, s.substr(b + 1, c - b - 1), s.substr(c + 1));
     }
+    if (tn_.on) tan_step(g);                                       // (research round 1093: the whole forward on duals, mk_replay2.hpp)
 }
 
 }  // namespace en

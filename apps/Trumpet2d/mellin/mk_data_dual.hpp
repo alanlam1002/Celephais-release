@@ -126,5 +126,54 @@ inline Vec data_fix_t(const Vec& X, const std::vector<Vec>& dX, const dt::DataIn
     return out;
 }
 
+// research round 1093 (the replay's stage 2, part 1): the OFF-INTEGER START (dt::offl_start, --cond-fit: nothing fixed by the conditions) on
+// duals.  Each direction normalised (nu = ||tg(W)[:NB]||) and phased (ph = exp(-i arg t_im), im = the largest |tg(w)_j|, j < nn: a decision,
+// the value's), the start Xg = X0 + datum Wq_0:
+//   dw = dW / nu - W dnu / nu^2;  d arg t = Im(dt / t);  dph = -i ph d arg t;  dWq = dw ph + w dph;  dXg = dX0 + ddatum Wq_0 + datum dWq_0
+// Wq / Xg (the value) from dt::offl_start (called by the caller); here the tangents.  Unit-tested against central differences of it.
+struct OfflT {
+    std::vector<std::vector<Vec>> dWq;    // [q][r]
+    std::vector<Vec> dXg;                 // [q]
+};
+inline void offl_start_t(const Vec& X0, const std::vector<Vec>& Wq_raw, int nn, int NB, const Vec& e1, double R, bool labelled, double datum,
+                         const std::vector<Vec>& dX0, const std::vector<std::vector<Vec>>& dW, const std::vector<double>& ddatum, int ND,
+                         const std::vector<Vec>& Wq, OfflT& t) {
+    const int rk = int(Wq_raw.size());
+    t = OfflT();
+    t.dWq.assign(ND, std::vector<Vec>(rk));
+    t.dXg.assign(ND, Vec());
+    for (int q = 0; q < ND; q++) {
+        for (int r = 0; r < rk; r++) {
+            Vec tr = dt::tg(Wq_raw[r], NB, e1, R);
+            double nu = 0.0;
+            for (int j = 0; j < NB; j++) nu += std::norm(tr[j]);
+            nu = std::sqrt(nu);
+            Vec dWr = (q < int(dW.size()) && r < int(dW[q].size()) && !dW[q][r].empty()) ? dW[q][r] : Vec(Wq_raw[r].size(), 0.0);
+            Vec dtr = dt::tg(dWr, NB, e1, R);
+            double dnu = 0.0;
+            for (int j = 0; j < NB; j++) dnu += (std::conj(tr[j]) * dtr[j]).real();
+            dnu /= nu;
+            Vec w(Wq_raw[r].size()), dw(Wq_raw[r].size());
+            for (size_t i = 0; i < w.size(); i++) { w[i] = Wq_raw[r][i] / nu; dw[i] = dWr[i] / nu - Wq_raw[r][i] * (dnu / (nu * nu)); }
+            Vec t2 = dt::tg(w, NB, e1, R), dt2 = dt::tg(dw, NB, e1, R);
+            int im = 0;
+            for (int j = 1; j < nn; j++)
+                if (std::abs(t2[j]) > std::abs(t2[im])) im = j;
+            cd ph = std::exp(cd(0.0, -1.0) * std::atan2(t2[im].imag(), t2[im].real()));
+            double darg = (dt2[im] / t2[im]).imag();
+            cd dph = cd(0.0, -1.0) * ph * darg;
+            Vec o(w.size());
+            for (size_t i = 0; i < w.size(); i++) o[i] = dw[i] * ph + w[i] * dph;
+            t.dWq[q][r] = std::move(o);
+        }
+        Vec X = (q < int(dX0.size()) && !dX0[q].empty()) ? dX0[q] : Vec(X0.size(), 0.0);
+        if (rk) {
+            double cval = labelled ? datum : 0.0, dc = (labelled && q < int(ddatum.size())) ? ddatum[q] : 0.0;
+            for (size_t i = 0; i < X.size(); i++) X[i] += dc * Wq[0][i] + cval * t.dWq[q][0][i];
+        }
+        t.dXg[q] = std::move(X);
+    }
+}
+
 }  // namespace ddl
 }  // namespace mk

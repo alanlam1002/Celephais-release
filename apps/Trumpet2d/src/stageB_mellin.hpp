@@ -32,6 +32,8 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -252,6 +254,24 @@ class MellinEval {
         need("END");
         if (!in) throw std::runtime_error("mellin: truncated config " + path);
         mkdir(work.c_str(), 0755);
+        // research round 1093 (spec section 47): MELLIN_FREEZE=1 -- the engine's stage (ii) decisions FROZEN for the solve (one continuation step),
+        // as the Python loop's J step: decided at the first evaluation (u0) and replayed by identity at every later forward, FD column and trial
+        // point (N2A_FREEZE=WORK/m4_decisions_<hash of u0>.json; the engine applies it on the cluster route, N2A_CLUSTER=1 at the bundle)
+        if (std::getenv("MELLIN_FREEZE") && std::string(std::getenv("MELLIN_FREEZE")) == "1") {
+            unsigned long long hsh = 1469598103934665603ULL;
+            for (double v : u0) {
+                unsigned char b[sizeof(double)];
+                std::memcpy(b, &v, sizeof v);
+                for (unsigned char c : b) { hsh ^= c; hsh *= 1099511628211ULL; }
+            }
+            char nm[64];
+            std::snprintf(nm, sizeof nm, "/m4_decisions_%016llx.json", hsh);
+            const std::string fz = work + nm;
+            setenv("N2A_FREEZE", fz.c_str(), 1);
+            if (mpirank == 0)
+                std::cout << "#  mellin: MELLIN_FREEZE -- the engine's decisions frozen for this solve: " << fz
+                          << (std::ifstream(fz) ? " (replayed: written by an earlier launch from the same u0)" : " (decided at u0)") << "\n" << std::flush;
+        }
         eqs.resize(2);
         eqs[0].name = "MELLIN"; eqs[1].name = "TIK";
         for (auto& e : eqs) { e.c0 = e.c1 = e.nth = e.nb = 0; }

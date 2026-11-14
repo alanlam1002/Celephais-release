@@ -364,7 +364,24 @@ class Engine {
         int nits = 0;
         Vec Xg;
         double Smax = 0.0, R = 0.0;
+        std::vector<Vec> Xits, X0its, Msits;                         // (research round 1093: per Newton iteration -- the start, the operator, the result)
+        bool offint = false;                                        // (research round 1093: an off-integer centre's family label and datum)
+        std::string lab;
+        double datum = 0.0;
     } rp_;
+    // research round 1093 (the replay's stage 2): the whole forward on duals (mk_replay2.hpp; MK_TAN)
+    struct TanMode {
+        bool on = false, seeded = false, have_mref = false;
+        std::string kind, name;
+        std::vector<Entry> dC;
+        std::map<double, std::pair<Vec, Vec>> cache;
+        double mref_g = 0.0, worst_val = 0.0;
+        Vec mref_s, dmref_s;
+        int steps = 0;
+    } tn_;
+    void tan_init(std::vector<Entry>& C);
+    void tan_step(double g);
+    void tan_finish(const std::vector<Entry>& C);
     static bool step_match(double g, int ps) {
         const char* e = std::getenv("MK_STEP_DUMP");
         if (!e) e = std::getenv("MK_STEP_REPLAY");
@@ -394,6 +411,7 @@ inline void Engine::run() {
     int nn = P_.nn, K = k_.c.K, N = c_.N, NB = nn, nc = P_.nc;
     size_t nm = size_t(NB) * NB, nmc = size_t(nc) * NB;
     std::vector<Entry> C = S_.C0;
+    tan_init(C);                                                    // (research round 1093: MK_TAN, the whole forward on duals)
     std::map<double, std::pair<Vec, Vec>> cache;                    // meff_cache: the converged operator per integer centre
     std::map<double, double> nfloor;                                // --newton-floor-memo: per centre, the floor a futile Newton step found
     std::vector<double> rel_hist;                                   // --pass-stop: the pass changes relative to the series' scale
@@ -1096,7 +1114,7 @@ inline void Engine::run() {
             J_.kv("passno", std::to_string(ps));
             // the sources: the rows of the series stripped at g
             std::vector<Entry> Cs = strip(C, g);
-            const bool rp_match = step_match(g, ps);              // (research round 1092: the replay's capture)
+            const bool rp_match = step_match(g, ps) || tn_.on;   // (research round 1092: the replay's capture; 1093: every step in MK_TAN)
             if (rp_match) { rp_ = RpCap(); rp_.on = true; rp_.Cs = Cs; rp_.isint = isint; rp_.iscl = iscl; rp_.R = Rcur_; }
             k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " sources";
             k_.run(Cs, nullptr, c_.top);
@@ -1834,6 +1852,7 @@ inline void Engine::run() {
                     st::DefectOut d;
                     st::defect_off(Xs, o.Minv, Wn, K, NB, S_.e1, Rcur_, std::max(c_.defect, 4), c_.robust, rowsfn(Cs, g), d);
                     C = with_grade(k_.c, C, d.X, g, P_.kofs, S_.e1, Rcur_);
+                    if (rp_match) { rp_.offint = true; rp_.lab = lab; rp_.datum = datum; rp_.Xg = d.X; rp_.nits = 1; if (tn_.on) tan_step(g); }
                     stc.Wq = Wn;
                     stc.X = d.X;
                     stc.has_label = !lab.empty();
@@ -1934,8 +1953,10 @@ inline void Engine::run() {
                 }
                 k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " defect";
                 st::DefectOut d;
+                if (rp_match) { rp_.X0its.push_back(Xg); rp_.Msits.push_back(Ms); }
                 st::defect_int(Xg, o.Minv, Wn, act, Smax, K, NB, S_.e1, Rcur_, c_.defect, c_.robust, dfix, rowsfn(Cs, g), d);
                 Xg = d.X;
+                if (rp_match) rp_.Xits.push_back(Xg);
                 if (rp_match) rp_.nits = newt + 1;
                 stc.X = Xg;
                 newton_hist.push_back(d.rows_after);
@@ -2010,6 +2031,7 @@ inline void Engine::run() {
         }
     }
     J_.close(']');
+    tan_finish(C);                                                  // (research round 1093: MK_TAN_OUT / MK_SERIES_OUT, before the gauge flow)
     J_.kv("families", families_json);
     if (CL) {
         // research round 1048 (spec section 31): the stage (ii) decisions by identity -- with N2A_FREEZE absent, written here (the J step's first
@@ -2807,3 +2829,4 @@ inline void Engine::tangents(const TanOpt& T) {
 }  // namespace mk
 
 #include "mk_replay1.hpp"
+#include "mk_replay2.hpp"

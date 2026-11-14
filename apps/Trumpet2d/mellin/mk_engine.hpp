@@ -355,6 +355,26 @@ class Engine {
         };
         return r;
     }
+    // research round 1092 (the forward-mode replay, stage 1(c)): one step's capture (MK_STEP_DUMP / MK_STEP_REPLAY at centre G, pass PASS)
+    struct RpCap {
+        bool on = false, isint = false, iscl = false, from_cache = false, have_din = false;
+        std::vector<Entry> Cs;
+        dt::DataIn din;
+        std::vector<int> rks;
+        int nits = 0;
+        Vec Xg;
+        double Smax = 0.0, R = 0.0;
+    } rp_;
+    static bool step_match(double g, int ps) {
+        const char* e = std::getenv("MK_STEP_DUMP");
+        if (!e) e = std::getenv("MK_STEP_REPLAY");
+        if (!e) return false;
+        std::string s(e);
+        size_t a = s.find(':'), b = s.find(':', a + 1);
+        return std::abs(g - std::atof(s.substr(0, a).c_str())) < 1e-9 && ps == std::atoi(s.substr(a + 1, b - a - 1).c_str());
+    }
+    void replay_step(double g, const std::string& dcs_path, const std::string& outp);
+    void step_hook(double g);
     std::vector<int> xrows_;
     double Rcur_ = 0.0;                                             // stage (ii): the current step's contour radius (a cluster's larger)
     // M3: the forward's last pass -- each centre's step state, the centre order, the final series, the families
@@ -1076,6 +1096,8 @@ inline void Engine::run() {
             J_.kv("passno", std::to_string(ps));
             // the sources: the rows of the series stripped at g
             std::vector<Entry> Cs = strip(C, g);
+            const bool rp_match = step_match(g, ps);              // (research round 1092: the replay's capture)
+            if (rp_match) { rp_ = RpCap(); rp_.on = true; rp_.Cs = Cs; rp_.isint = isint; rp_.iscl = iscl; rp_.R = Rcur_; }
             k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " sources";
             k_.run(Cs, nullptr, c_.top);
             Ser rows_pre[6];                                        // stage (ii): the stripped series' rows (the storage's sources, re-read)
@@ -1356,6 +1378,7 @@ inline void Engine::run() {
                 ct::contour(Ms, NB, S_.rw, S_.cw, S_.e1, Rcur_, act, Sn, rk_fix.count(kf) ? rk_fix[kf] : -1, o);
                 if (!rk_fix.count(kf)) rk_fix[kf] = o.rk_thr;
                 int rk = o.rk;
+                if (rp_match) { rp_.rks.push_back(rk); if (newt == 0) rp_.from_cache = from_cache; }
                 stc.Minv = o.Minv;
                 stc.act = act;
                 stc.rk = rk;
@@ -1860,6 +1883,7 @@ inline void Engine::run() {
                     din.warm = c_warm.count(kf) && int(c_warm[kf].size()) == rk;
                     if (din.warm) din.cwarm = c_warm[kf];
                     dt::data_rule(din, eval(C, g), dout);
+                    if (rp_match && !rp_.have_din) { rp_.din = din; rp_.have_din = true; }
                     c_warm[kf] = dout.c;
                     Xg = dout.Xg;
                     Wn = dout.Wq;
@@ -1912,6 +1936,7 @@ inline void Engine::run() {
                 st::DefectOut d;
                 st::defect_int(Xg, o.Minv, Wn, act, Smax, K, NB, S_.e1, Rcur_, c_.defect, c_.robust, dfix, rowsfn(Cs, g), d);
                 Xg = d.X;
+                if (rp_match) rp_.nits = newt + 1;
                 stc.X = Xg;
                 newton_hist.push_back(d.rows_after);
                 J_.kv("defect", Json::nums(d.hist));
@@ -1939,6 +1964,7 @@ inline void Engine::run() {
                 break;
             }
             steps_[std::nearbyint(g * 1e9) / 1e9] = stc;
+            if (rp_match && !offint_done) { rp_.Xg = Xg; rp_.Smax = Smax; step_hook(g); }
             if (!offint_done) {
                 J_.close(']');
                 C = with_grade(k_.c, C, Xg, g, P_.kofs, S_.e1, Rcur_);
@@ -2779,3 +2805,5 @@ inline void Engine::tangents(const TanOpt& T) {
 
 }  // namespace en
 }  // namespace mk
+
+#include "mk_replay1.hpp"

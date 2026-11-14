@@ -6,7 +6,14 @@
 // earlier pass's, its tangent cached with it), or re-centred from the last integer centre's (its tangent re-centred, linear).
 // The decisions are the forward's, captured per step (RpCap: the residue rank per Newton iteration, their number, the cache, the data rule's
 // input, the family's label and datum); each step's replayed value is checked against the forward's block.
-//   MK_TAN=data:NAME@tT | offl:FAMILY    the direction: a datum of the series (set_data's entry, moment 0) or an off-lattice family's datum
+//   MK_TAN=data:NAME@tT | offl:FAMILY | cyl:KEY    the direction: a datum of the series (set_data's entry, moment 0), an off-lattice family's
+//                                        datum, or a cylinder parameter (research round 1095: KEY uJ, P_shapeJ, qJ, QJ, bJ, btJ, c, n, K as
+//                                        --opbuild-dtheta / --bundle-at perturb=; the kernel's run2 response d2 beside the series' d1)
+// A cylinder direction moves the lapse families' centres (their Sturm-Liouville exponents on the cylinder).  The replay keeps every centre at
+// its key and carries the motion as a moment shift there (research round 1095, spec section 49: d(c x^sigma) = dc x^sigma + c dsigma ln x
+// x^sigma; for a tangent only the first-order term exists): the forward's step at a key is covariant under the shift (its contour and its
+// residues are those of the same s-plane function about either centre), so the fixed-key replay yields the shifted tangent itself; the moving
+// centre enters only the finite-difference gate, whose two forwards' series are shifted back to the base keys.
 //   MK_TAN_OUT=FILE                      the final series (before the gauge flow) and its tangent (entries: value, tangent)
 //   MK_SERIES_OUT=FILE                   the final series alone (the finite-difference gate's two forwards)
 #pragma once
@@ -19,7 +26,7 @@ namespace en {
 // is (R'(C + h e_col)[dC] - R'(C - h e_col)[dC]) / 2h -- the kernel's exact linear response at the two perturbed series, on meff's own batch;
 // no second-order response is needed (the operator IS a difference).  Only dMs (the conditions' Mc is not differentiated).
 inline void meff_dual(Kernel& kr, const Proj& P, const std::vector<Entry>& Cx, const std::vector<Entry>& dCx, double g, double top, double h, int chunk,
-                      std::vector<cd>& dMs) {
+                      std::vector<cd>& dMs, const Kernel::DCyl* dcy = nullptr) {
     Ctx& c = kr.c;
     int K = c.K, nn = P.nn, NB = P.nb * nn;
     dMs.assign(size_t(3) * NB * NB, 0.0);
@@ -58,6 +65,11 @@ inline void meff_dual(Kernel& kr, const Proj& P, const std::vector<Entry>& Cx, c
         }
         kr.run(Cp, &dCb, top);
         auto dRg = project(c, kr.dout, g, Bt, P.gfam, P.dE, P.W, false);
+        if (dcy) {                                                   // research round 1095: the cylinder's response at each batch member
+            kr.run2(Cp, dCb, *dcy, top);
+            auto d2g = project(c, kr.d2out, g, Bt, P.gfam, P.dE, P.W, false);
+            for (size_t i = 0; i < dRg.size() && i < d2g.size(); i++) dRg[i] += d2g[i];
+        }
         for (int q = 0; q < nq; q++) {
             int col = colsb[c0 + q].first;
             for (int i = 0; i < nn; i++)
@@ -92,8 +104,31 @@ inline void Engine::tan_init(std::vector<Entry>& C) {
                 found = true;
             }
         if (!found) throw std::runtime_error("MK_TAN: no series entry " + tn_.name);
+    } else if (tn_.kind == "cyl") {
+        // research round 1095: the cylinder's derivative in KEY on the bundle's theta grid (mk_kernel.cpp --opbuild-dtheta's rule); no series seed
+        const std::string& key = tn_.name;
+        auto grid = [&](auto f) { std::vector<double> v(S_.TH.size()); for (size_t q = 0; q < v.size(); q++) v[q] = f(S_.TH[q]); return v; };
+        Kernel::DCyl& d = tn_.dcy;
+        if (key == "n") d.dn = 1.0;
+        else if (key == "K") d.dK = 1.0;
+        else if (key == "c") { d.b = grid([](double) { return 1.0; }); d.dbnorm = 1.0; }
+        else {
+            size_t dg = key.find_first_of("0123456789");
+            if (dg == std::string::npos) throw std::runtime_error("MK_TAN: cyl:" + key);
+            std::string fam = key.substr(0, dg);
+            double j = std::stod(key.substr(dg));
+            if (fam == "u") d.U = grid([&](double x) { return std::cos(2.0 * j * x); });
+            else if (fam == "P_shape") d.P = grid([&](double x) { return std::cos(2.0 * j * x); });
+            else if (fam == "q") d.q = grid([&](double x) { double s_ = std::sin(x); return s_ * s_ * std::cos(2.0 * j * x); });
+            else if (fam == "Q") d.Qb = grid([&](double x) { double s_ = std::sin(x); return s_ * s_ * s_ * s_ * std::cos((2.0 * j + 1.0) * x); });
+            else if (fam == "b") d.b = grid([&](double x) { return std::cos(2.0 * j * x); });
+            else if (fam == "bt") d.bt = grid([&](double x) { return std::sin(2.0 * (j + 1.0) * x); });
+            else throw std::runtime_error("MK_TAN: cyl:" + key);
+        }
+        tn_.cyl = true;
+        tn_.seeded = true;
     } else if (tn_.kind != "offl")
-        throw std::runtime_error("MK_TAN: data:NAME@tT or offl:FAMILY");
+        throw std::runtime_error("MK_TAN: data:NAME@tT, offl:FAMILY or cyl:KEY");
     std::printf("  [tangent] the whole forward on duals along %s:%s (research round 1093, stage 2)\n", tn_.kind.c_str(), tn_.name.c_str());
 }
 
@@ -113,6 +148,11 @@ inline void Engine::tan_step(double g) {
     auto rows_lin = [&](const std::vector<Entry>& Cx, const std::vector<Entry>& dCx, Vec& dR) {
         k_.run(Cx, &dCx, top);
         dR = project(k_.c, k_.dout, g, 1, P_.gfam, P_.dE, P_.W, false);
+        if (tn_.cyl) {                                               // research round 1095: + the cylinder's response (run2's d2)
+            k_.run2(Cx, dCx, tn_.dcy, top);
+            Vec d2 = project(k_.c, k_.d2out, g, 1, P_.gfam, P_.dE, P_.W, false);
+            for (size_t i = 0; i < dR.size() && i < d2.size(); i++) dR[i] += d2[i];
+        }
         k_.run(Cx, nullptr, top);
         return project(k_.c, k_.out, g, 1, P_.gfam, P_.dE, P_.W, false);
     };
@@ -123,10 +163,11 @@ inline void Engine::tan_step(double g) {
         dMs.assign(Ms.size(), 0.0);
         // research round 1094: the exact tangent of meff's finite-difference operator (MK_TAN_MEFF=fd: the round-1093 central difference)
         static const bool OP_FD = std::getenv("MK_TAN_MEFF") && std::string(std::getenv("MK_TAN_MEFF")) == "fd";
-        if (dn > 0 && c_.meff_mode == 0 && !OP_FD) {
-            meff_dual(k_, P_, Cx, dCx, g, top, c_.meff_h, c_.meff_chunk, dMs);
+        if ((dn > 0 || tn_.cyl) && c_.meff_mode == 0 && !OP_FD) {
+            meff_dual(k_, P_, Cx, dCx, g, top, c_.meff_h, c_.meff_chunk, dMs, tn_.cyl ? &tn_.dcy : nullptr);
             dn = 0.0;
-        }
+        } else if (tn_.cyl)
+            throw std::runtime_error("mk tangent: a cylinder direction needs the exact operator tangent (meff mode 0, MK_TAN_MEFF unset)");
         if (dn > 0) {
             static const double HM = std::getenv("MK_TAN_MEFF_H") ? std::atof(std::getenv("MK_TAN_MEFF_H")) : 1e-4;   // (the operator's FD step, relative: meff is itself a finite difference -- 1e-6 round-off-limited, 2.6e-5 on the PS2 gate; 1e-4 at the gate's own noise 4e-6; the exact tangent is stage 2 part 3)
             double hm = HM * std::max(1.0, maxabs_entries(Cx)) / dn;

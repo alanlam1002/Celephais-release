@@ -378,6 +378,8 @@ class Engine {
         double mref_g = 0.0, worst_val = 0.0;
         Vec mref_s, dmref_s;
         int steps = 0;
+        bool cyl = false;                          // research round 1095: a cylinder direction (MK_TAN=cyl:KEY), the kernel's run2 response
+        Kernel::DCyl dcy;
     } tn_;
     void tan_init(std::vector<Entry>& C);
     void tan_step(double g);
@@ -1186,8 +1188,9 @@ inline void Engine::run() {
                         const double rmin = std::getenv("N2A_OWN_RMIN") ? std::atof(std::getenv("N2A_OWN_RMIN")) : 1e-3;
                         if (dn / 2 < Rcur_) {
                             if (dn / 2 < rmin)
-                                throw std::runtime_error("own contour: " + flab + "'s nearest other root " + std::to_string(g + dr) + " is " + std::to_string(dn) +
-                                                         " away -- the pair must be clustered (not on this route)");
+                                throw std::runtime_error("own contour: " + flab + " at " + std::to_string(g) + ": another operator root (real part " +
+                                                         std::to_string(g + dr) + ") " + std::to_string(dn) + " from the centre (own root " +
+                                                         std::to_string(std::abs(ev[io])) + " from it) -- the pair must be clustered (not on this route)");
                             std::printf("    [own contour %s %.6f] own root %+.2e; the nearest other root %.6f (distance %.4f) -> contour radius %.4f (was %.4f)\n",
                                         flab.c_str(), g, std::abs(ev[io]), g + dr, dn, dn / 2, Rcur_);
                             Rcur_ = dn / 2;

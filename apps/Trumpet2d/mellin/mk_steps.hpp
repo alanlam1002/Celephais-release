@@ -39,7 +39,13 @@ struct DefectOut {
 // components along the residue directions removed (d - sum a_q Wq[q], a = lstsq(A_hold[:nh], tg_dc(d)[:nh]))
 Vec tg_dc(const Vec& X, int NB, const Vec& e1, double R);
 Vec correction(const Vec& rows, const std::vector<Vec>& Minv, int K, int NB, const Vec& e1, double R);
-void hold(Vec& d, const std::vector<Vec>& Wq, int nh, int NB, const Vec& e1, double R);
+void hold(Vec& d, const std::vector<Vec>& Wq, int nh, int NB, const Vec& e1, double R, int Kp = 0);
+// research round 1098 (spec section 51): the hold's amplitude AT THE ROOT'S OWN EXPONENT -- tg_root(X) = (R / N) sum e1^(Kp + 1) X, the contour
+// integral of z^Kp X: it kills the step's own pole (order <= K at the centre) and keeps the residues at the roots off the centre;
+// hold_root_K: Kp = K when N2A_HOLD_ROOT=1 and every residue direction's root lies off the centre (|delta| > 1e-2 R, delta = t1 / t0 of its own
+// moments), else 0 (the moment-0 functional about the centre, the pre-1098 rule)
+Vec tg_root(const Vec& X, int NB, const Vec& e1, double R, int Kp);
+int hold_root_K(const std::vector<Vec>& Wq, int NB, const Vec& e1, double R, int K);
 
 // integer centre.  Minv: N x (NB x NB); Wq: the data rule's normalised directions (rk); act: NB; dfix: --cond-fit's data fix or empty
 void defect_int(const Vec& X0, const std::vector<Vec>& Minv, const std::vector<Vec>& Wq, const std::vector<char>& act, double Smax, int K,

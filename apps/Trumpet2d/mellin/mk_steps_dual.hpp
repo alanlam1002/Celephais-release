@@ -62,12 +62,13 @@ inline Vec correction_t(const Vec& rows, const Tv& drows, const std::vector<Vec>
 }
 
 // the hold and its tangent (in place): d -= sum a_q Wq_q, a = lstsq(A, tg_dc(d)[:nh]); dWq[q][r]: the tangent of Wq_r along direction q
-inline void hold_t(Vec& d, Tv& dd, const std::vector<Vec>& Wq, const std::vector<Tv>& dWq, int nh, int NB, const Vec& e1, double R, int ND) {
+inline void hold_t(Vec& d, Tv& dd, const std::vector<Vec>& Wq, const std::vector<Tv>& dWq, int nh, int NB, const Vec& e1, double R, int ND, int Kp = 0) {
     int rk = int(Wq.size());
     if (!rk) return;
-    Vec A(size_t(nh) * rk), t = st::tg_dc(d, NB, e1, R);
+    auto fn = [&](const Vec& X) { return Kp ? st::tg_root(X, NB, e1, R, Kp) : st::tg_dc(X, NB, e1, R); };   // (research round 1098)
+    Vec A(size_t(nh) * rk), t = fn(d);
     for (int r = 0; r < rk; r++) {
-        Vec tr = st::tg_dc(Wq[r], NB, e1, R);
+        Vec tr = fn(Wq[r]);
         for (int i = 0; i < nh; i++) A[size_t(i) * rk + r] = tr[i];
     }
     ad::Tans dA(ND), dB(ND);
@@ -75,10 +76,10 @@ inline void hold_t(Vec& d, Tv& dd, const std::vector<Vec>& Wq, const std::vector
         dA[q].assign(size_t(nh) * rk, 0.0);
         for (int r = 0; r < rk; r++) {
             if (size_t(q) >= dWq.size() || dWq[q].empty() || dWq[q][r].empty()) continue;
-            Vec tr = st::tg_dc(dWq[q][r], NB, e1, R);
+            Vec tr = fn(dWq[q][r]);
             for (int i = 0; i < nh; i++) dA[q][size_t(i) * rk + r] = tr[i];
         }
-        Vec td = st::tg_dc(dd[q], NB, e1, R);
+        Vec td = fn(dd[q]);
         dB[q] = Vec(td.begin(), td.begin() + nh);
     }
     ad::Tans da;
@@ -162,7 +163,7 @@ inline void defect_off_t(const Vec& X0, const Tv& dX0, const std::vector<Vec>& M
         if (robust && o.hist.size() > 1 && o.hist.back() > st::HALVE * o.hist[o.hist.size() - 2]) break;
         Tv dd;
         Vec d = correction_t(Rr, dR, Minv, dMinv, K, NB, e1, R, ND, dd);
-        hold_t(d, dd, Wq, dWq, NB, NB, e1, R, ND);
+        hold_t(d, dd, Wq, dWq, NB, NB, e1, R, ND, st::hold_root_K(Wq, NB, e1, R, K));   // (research round 1098)
         X = addv(X, d);
         for (int q = 0; q < ND; q++) dX[q] = addv(dX[q], dd[q]);
         o.corrections++;

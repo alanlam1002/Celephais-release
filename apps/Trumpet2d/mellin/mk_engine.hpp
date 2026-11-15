@@ -544,6 +544,24 @@ inline void Engine::run() {
             if (e.first == k0) { e.second = r; return; }
         IDLOG.emplace_back(k0, r);
     };
+    // research round 1098 (spec section 51 (i)-(ii)): identities ONE-TO-ONE -- a label is held by the first root it names (the same root again
+    // within N2A_ID_TOL across passes); another root within the label's reach is AMBIGUOUS (recorded; the J step is to be halved) and takes no
+    // held label.  With no ambiguity every label has one candidate, so this is the assignment of least total distance.
+    std::map<std::string, double> HOLDER;
+    std::vector<std::string> AMBIG;
+    const double ID_SAME = std::getenv("N2A_ID_TOL") ? std::atof(std::getenv("N2A_ID_TOL")) : 1e-4;
+    auto held_by_other = [&](const std::string& lb, double er) {
+        auto it = HOLDER.find(lb);
+        if (it == HOLDER.end()) return false;
+        if (std::abs(it->second - er) <= ID_SAME) return false;
+        char b[200];
+        std::snprintf(b, sizeof b, "%s: held by %.9f, also %.9f", lb.c_str(), it->second, er);
+        if (std::find(AMBIG.begin(), AMBIG.end(), std::string(b)) == AMBIG.end()) {
+            AMBIG.push_back(b);
+            std::printf("    [identity] AMBIGUOUS %s (round 1098: the J step to be halved)\n", b);
+        }
+        return true;
+    };
     auto root_label = [&](double er) {                              // spec section 31: a root of a step's operator named
         if (!PRED.empty()) {
             size_t ib = 0;
@@ -552,7 +570,8 @@ inline void Engine::run() {
             double sp = 1e300;
             for (size_t i = 0; i < PRED.size(); i++)
                 if (i != ib) sp = std::min(sp, std::abs(PRED[ib].second - PRED[i].second));
-            if (std::abs(er - PRED[ib].second) < sp / 4) {
+            if (std::abs(er - PRED[ib].second) < sp / 4 && !held_by_other(PRED[ib].first, er)) {
+                HOLDER.emplace(PRED[ib].first, er);
                 idlog_set(PRED[ib].first, IdRec{er, "continued", true, sp / 4 - std::abs(er - PRED[ib].second)});
                 return PRED[ib].first;
             }
@@ -565,7 +584,8 @@ inline void Engine::run() {
         for (auto* fv : {&fams, &gfams})
             for (auto& f : *fv)
                 if (std::abs(f.second.v - er) < bd) { bd = std::abs(f.second.v - er); bk = f.first; bp = f.second.v; }
-        if (bd < R0 / 4) {
+        if (bd < R0 / 4 && !held_by_other(bk, er)) {
+            HOLDER.emplace(bk, er);
             idlog_set(bk, IdRec{er, rl, true, R0 / 4 - std::abs(er - bp)});
             return bk;
         }
@@ -618,7 +638,9 @@ inline void Engine::run() {
             for (size_t j = 1; j < fr.size(); j++) sp = std::min(sp, std::abs(fr[0].second - fr[j].second));
             // research round 1096: the frozen realness only for the root the file names THERE (within R0 / 4, the identity rule's own reach, as
             // well as a quarter of the spacing) -- D0 0.02: gauge l6 - 1's root 3.2429 took lapse l4's (3.3168) 'real' against its own 'complex'
-            if (std::abs(e.real() - fr[0].second) < std::min(sp / 4, R0 / 4)) {
+            // (round 1098: and only for the root its label is held by)
+            if (std::abs(e.real() - fr[0].second) < std::min(sp / 4, R0 / 4) && !held_by_other(fr[0].first, e.real())) {
+                HOLDER.emplace(fr[0].first, e.real());
                 char b[160], m[48];
                 std::snprintf(b, sizeof b, "root realness %s (%.6f)", fr[0].first.c_str(), e.real());
                 std::snprintf(m, sizeof m, "%.1e i", e.imag());
@@ -2182,6 +2204,12 @@ inline void Engine::run() {
                         FZP.c_str(), int(FZ_LOG.size()), ndiff, UNNAMED);
         J_.kv("freeze_differ", std::to_string(ndiff));
         J_.kv("unnamed_keys", std::to_string(UNNAMED));
+        {
+            std::string a_ = "[";
+            for (size_t q = 0; q < AMBIG.size(); q++) a_ += (q ? "," : "") + Json::str(AMBIG[q]);
+            J_.kv("ambiguous", a_ + "]");
+            if (!AMBIG.empty()) std::printf("  [identity] %d ambiguous label(s) (round 1098: halve the J step)\n", int(AMBIG.size()));
+        }
     }
     C_final_ = C;
     fams_ = fams;

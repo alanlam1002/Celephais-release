@@ -1,4 +1,6 @@
 // Mellin throat recursion, M2d (code round 463): the nonlinear steps (mk_steps.hpp).  Compiled with -ffp-contract=off.
+#include <cstdlib>
+#include <string>
 #include "mk_steps.hpp"
 
 #include <mkl_cblas.h>
@@ -47,12 +49,39 @@ Vec correction(const Vec& rows, const std::vector<Vec>& Minv, int K, int NB, con
     return out;
 }
 // d - sum(a[q] * Wq[q]) with a = lstsq(A_hold, tg_dc(d)[:nh]): the components along the residue directions removed
-void hold(Vec& d, const std::vector<Vec>& Wq, int nh, int NB, const Vec& e1, double R) {
+Vec tg_root(const Vec& X, int NB, const Vec& e1, double R, int Kp) {
+    int N = int(e1.size());
+    Vec o(NB, cd(0.0, 0.0));
+    for (int k = 0; k < N; k++) {
+        cd s = rc(R / N) * std::pow(e1[k], Kp + 1);
+        for (int j = 0; j < NB; j++) o[j] += s * X[size_t(k) * NB + j];
+    }
+    return o;
+}
+int hold_root_K(const std::vector<Vec>& Wq, int NB, const Vec& e1, double R, int K) {
+    static const bool on = std::getenv("N2A_HOLD_ROOT") && std::string(std::getenv("N2A_HOLD_ROOT")) == "1";
+    if (!on || Wq.empty()) return 0;
+    int N = int(e1.size());
+    for (auto& W : Wq) {
+        cd n01(0.0, 0.0), n00(0.0, 0.0);
+        Vec t0(NB, cd(0.0, 0.0)), t1(NB, cd(0.0, 0.0));
+        for (int k = 0; k < N; k++) {
+            cd s0 = rc(R / N) * e1[k], s1 = rc(R * R / N) * e1[k] * e1[k];
+            for (int j = 0; j < NB; j++) { t0[j] += s0 * W[size_t(k) * NB + j]; t1[j] += s1 * W[size_t(k) * NB + j]; }
+        }
+        for (int j = 0; j < NB; j++) { n01 += std::conj(t0[j]) * t1[j]; n00 += std::conj(t0[j]) * t0[j]; }
+        if (std::abs(n00) == 0.0 || std::abs(n01 / n00) < 1e-2 * R) return 0;
+    }
+    return K;
+}
+
+void hold(Vec& d, const std::vector<Vec>& Wq, int nh, int NB, const Vec& e1, double R, int Kp) {
     int rk = int(Wq.size());
     if (!rk) return;
-    Vec A(size_t(nh) * rk), t = tg_dc(d, NB, e1, R);
+    auto fn = [&](const Vec& X) { return Kp ? tg_root(X, NB, e1, R, Kp) : tg_dc(X, NB, e1, R); };
+    Vec A(size_t(nh) * rk), t = fn(d);
     for (int q = 0; q < rk; q++) {
-        Vec tq = tg_dc(Wq[q], NB, e1, R);
+        Vec tq = fn(Wq[q]);
         for (int i = 0; i < nh; i++) A[size_t(i) * rk + q] = tq[i];
     }
     Vec a = la::lstsq(A, nh, rk, Vec(t.begin(), t.begin() + nh), 1);
@@ -108,7 +137,7 @@ void defect_off(const Vec& X0, const std::vector<Vec>& Minv, const std::vector<V
         if (o.hist.back() < OFF_STOP || it == ndef) break;
         if (robust && o.hist.size() > 1 && o.hist.back() > HALVE * o.hist[o.hist.size() - 2]) break;
         Vec dX = correction(Rr, Minv, K, NB, e1, R);
-        hold(dX, Wq, NB, NB, e1, R);
+        hold(dX, Wq, NB, NB, e1, R, hold_root_K(Wq, NB, e1, R, K));   // research round 1098: at the root's own exponent (N2A_HOLD_ROOT=1)
         for (size_t i = 0; i < Xg.size(); i++) Xg[i] = Xg[i] + dX[i];
     }
     o.conditions = rows.stored(Xg);

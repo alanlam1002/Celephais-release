@@ -146,8 +146,11 @@ inline std::vector<cd> project(Ctx& c, const Ser rows[6], double g, int B, const
 }
 
 // the operator at a centre: Ms (3, NB, NB), Mc (3, nc, NB), row-major [m][row][col]
+inline double g_meff_secs = 0.0;                                  // research round 1096: the operator builds' wall time and calls
+inline long g_meff_calls = 0;
 inline void meff(Kernel& kr, const Proj& P, const std::vector<Entry>& Cx, double g, double top, int mode, double h, int chunk,
                  std::vector<cd>& Ms, std::vector<cd>& Mc) {
+    Kernel::RunTimer tm_{g_meff_secs, g_meff_calls};
     Ctx& c = kr.c;
     int K = c.K, nn = P.nn, nc = P.nc, NB = P.nb * nn;
     if (P.nb != 1) throw std::runtime_error("mk: the block recursion (nb = 2) is not ported");

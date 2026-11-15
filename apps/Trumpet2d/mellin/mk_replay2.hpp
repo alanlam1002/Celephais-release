@@ -14,6 +14,11 @@
 // x^sigma; for a tangent only the first-order term exists): the forward's step at a key is covariant under the shift (its contour and its
 // residues are those of the same s-plane function about either centre), so the fixed-key replay yields the shifted tangent itself; the moving
 // centre enters only the finite-difference gate, whose two forwards' series are shifted back to the base keys.
+// CORRECTION (research round 1096, spec section 50): the moment shift alone is exact only where the coefficient does not depend on the centre; a
+// family's descendant steps (sigma + 1, + 2, ..: -M(sigma)^-1 S, a root inside their contour) do.  Each off-integer step's centre is carried as a
+// dual: MK_TAN_DSIG=c0:ds,... (a base centre and its motion; a step at n c0 + k, n = 1..3, moves by n ds): the operator, quadratic about its
+// centre, dMs += dg (Ms1, 2 Ms2, 0); the rows projected at the moving key, dR -= dg k R_(k-1); the block entered at its fixed key, dX += dg k X_(k-1)
+// (moments of ln^k x / k!).
 //   MK_TAN_OUT=FILE                      the final series (before the gauge flow) and its tangent (entries: value, tangent)
 //   MK_SERIES_OUT=FILE                   the final series alone (the finite-difference gate's two forwards)
 #pragma once
@@ -129,6 +134,19 @@ inline void Engine::tan_init(std::vector<Entry>& C) {
         tn_.seeded = true;
     } else if (tn_.kind != "offl")
         throw std::runtime_error("MK_TAN: data:NAME@tT, offl:FAMILY or cyl:KEY");
+    if (const char* ds = std::getenv("MK_TAN_DSIG")) {              // research round 1096: the centres' motion along the direction
+        std::string t(ds);
+        size_t p0 = 0;
+        while (p0 < t.size()) {
+            size_t p1 = t.find(',', p0);
+            if (p1 == std::string::npos) p1 = t.size();
+            std::string it = t.substr(p0, p1 - p0);
+            size_t c_ = it.find(':');
+            if (c_ != std::string::npos) tn_.dsig.emplace_back(std::atof(it.substr(0, c_).c_str()), std::atof(it.substr(c_ + 1).c_str()));
+            p0 = p1 + 1;
+        }
+        std::printf("  [tangent] %d moving centre(s) carried as duals (research round 1096)\n", int(tn_.dsig.size()));
+    }
     std::printf("  [tangent] the whole forward on duals along %s:%s (research round 1093, stage 2)\n", tn_.kind.c_str(), tn_.name.c_str());
 }
 
@@ -143,6 +161,35 @@ inline void Engine::tan_step(double g) {
     const std::vector<Entry> dCs = strip(tn_.dC, g);
     auto act = ct::active(g, P_.kofs);
     auto tan_at = [&](const Vec* dX, double Rw) { return dX ? with_grade(k_.c, dCs, *dX, g, P_.kofs, e1, Rw) : dCs; };
+    // research round 1096: this step's centre motion dg (0 at integer centres and centres not moving)
+    double dg = 0.0;
+    if (!r.isint)
+        for (auto& cd_ : tn_.dsig) {
+            for (int n_ = 1; n_ <= 3 && dg == 0.0; n_++) {
+                double k_r = g - n_ * cd_.first;
+                if (k_r > -1e-7 && std::abs(k_r - std::nearbyint(k_r)) < 1e-7) dg = n_ * cd_.second;
+            }
+            if (dg != 0.0) break;
+        }
+    auto mshift = [&](const Vec& M) {                                // D: moment k <- k x moment k - 1 (layout [k][i])
+        Vec D(M.size(), 0.0);
+        for (int k = 1; k < K; k++)
+            for (int i = 0; i < NB; i++) D[size_t(k) * NB + i] = double(k) * M[size_t(k - 1) * NB + i];
+        return D;
+    };
+    auto nshift = [&](const Vec& Xn, double Rw) { return ct::nodes_of(mshift(ct::moments_of(Xn, K, NB, e1, Rw)), K, NB, e1, Rw); };
+    auto fixd = [&](const Vec& X, const Vec& dX, double Rw) {        // the block's tangent at its FIXED key: dX + dg D(X)
+        if (dg == 0.0) return dX;
+        Vec o = dX, sh = nshift(X, Rw);
+        for (size_t i = 0; i < o.size(); i++) o[i] += dg * sh[i];
+        return o;
+    };
+    auto rows_dg = [&](const Vec& v, Vec& dR) {                       // the rows projected at the MOVING key: dR - dg D(R)
+        if (dg == 0.0) return;
+        Vec sh = mshift(v);
+        for (size_t i = 0; i < dR.size() && i < sh.size(); i++) dR[i] -= dg * sh[i];
+    };
+    if (dg != 0.0) std::printf("    [tangent g %.6f] the centre moves: %+.6e (research round 1096)\n", g, dg);
     // the value by the forward's own evaluation (bit for bit: a step amplifies round-off by up to ~1e10 at the rank-2 integer centre 2 in later
     // passes), the tangent by the kernel's exact linear response
     auto rows_lin = [&](const std::vector<Entry>& Cx, const std::vector<Entry>& dCx, Vec& dR) {
@@ -180,7 +227,9 @@ inline void Engine::tan_step(double g) {
     };
     sd::RowsT rowsT = [&](const Vec& X, const sd::Tv& dX, sd::Tv& dR) {
         Vec d;
-        Vec v = rows_lin(with_grade(k_.c, r.Cs, X, g, P_.kofs, e1, R), tan_at(&dX[0], R), d);
+        const Vec dXf = fixd(X, dX[0], R);
+        Vec v = rows_lin(with_grade(k_.c, r.Cs, X, g, P_.kofs, e1, R), tan_at(&dXf, R), d);
+        rows_dg(v, d);
         dR.assign(1, d);
         return v;
     };
@@ -199,7 +248,8 @@ inline void Engine::tan_step(double g) {
                 Ms = meff_t(r.Cs, dCs, dMs);
                 tn_.cache[kf] = {Ms, dMs};
             } else {
-                Ms = meff_t(with_grade(k_.c, r.Cs, Xk, g, P_.kofs, e1, c_.R), tan_at(&dXk, c_.R), dMs);
+                const Vec dXf = fixd(Xk, dXk, c_.R);
+                Ms = meff_t(with_grade(k_.c, r.Cs, Xk, g, P_.kofs, e1, c_.R), tan_at(&dXf, c_.R), dMs);
             }
             tn_.have_mref = true;
             tn_.mref_g = g;
@@ -209,16 +259,21 @@ inline void Engine::tan_step(double g) {
             recentre(tn_.mref_s, Ms, nm, g - tn_.mref_g);
             recentre(tn_.dmref_s, dMs, nm, g - tn_.mref_g);
         }
+        if (dg != 0.0)                                               // research round 1096: the operator about the moving centre (quadratic: exact)
+            for (size_t a = 0; a < nm; a++) { dMs[a] += dg * Ms[nm + a]; dMs[nm + a] += dg * 2.0 * Ms[2 * nm + a]; }
         Ms_last = Ms;
         dMs_last = dMs;
         // the sources at the nodes and their tangent
         Vec Sn, dSn(size_t(N) * NB);
         if (it == 0) {
             Vec dS, S = rows_lin(r.Cs, dCs, dS);
+            rows_dg(S, dS);
             Sn = ct::nodes_of(S, K, NB, e1, R);
             dSn = ct::nodes_of(dS, K, NB, e1, R);
         } else {
-            Vec dr, rr = rows_lin(with_grade(k_.c, r.Cs, Xk, g, P_.kofs, e1, R), tan_at(&dXk, R), dr);
+            const Vec dXf = fixd(Xk, dXk, R);
+            Vec dr, rr = rows_lin(with_grade(k_.c, r.Cs, Xk, g, P_.kofs, e1, R), tan_at(&dXf, R), dr);
+            rows_dg(rr, dr);
             Vec nd = ct::nodes_of(rr, K, NB, e1, R), dnd = ct::nodes_of(dr, K, NB, e1, R);
             const Vec Sn_fwd = st::newton_sources(Xk, Ms, K, NB, e1, R, rowsfn(r.Cs, g));   // (the value: the forward's own)
             Sn.assign(size_t(N) * NB, 0.0);
@@ -316,7 +371,7 @@ inline void Engine::tan_step(double g) {
     const double rel = std::sqrt(num / std::max(den, 1e-300));
     tn_.worst_val = std::max(tn_.worst_val, rel);
     tn_.steps++;
-    tn_.dC = with_grade(k_.c, dCs, dXk, g, P_.kofs, e1, R);
+    tn_.dC = with_grade(k_.c, dCs, fixd(Xk, dXk, R), g, P_.kofs, e1, R);
     double dn = 0.0;
     for (auto& z : dXk) dn = std::max(dn, std::abs(z));
     std::printf("    [tangent g %.6f%s] %d iteration(s); the value against the forward's block %.2e; |d block| %.3e\n", g, r.offint ? " off" : "",

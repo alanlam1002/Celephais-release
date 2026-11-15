@@ -10,6 +10,7 @@
 #pragma once
 #include "mk_series.hpp"
 
+#include <chrono>
 #include <climits>
 #include <cstring>
 #include <map>
@@ -199,7 +200,15 @@ struct Kernel {
             }
         }
     }
+    // research round 1096: the kernel's wall time and calls (the forward's time by centre: mk_engine's declog 'secs_kernel')
+    double t_run = 0.0;
+    long n_run = 0;
+    struct RunTimer {
+        double& t; long& n; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        ~RunTimer() { t += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); n++; }
+    };
     void run(const std::vector<Entry>& C, const std::vector<Entry>* dC, double top) {
+        RunTimer tm_{t_run, n_run};
         Ser F[6], dF[6], U2, dU2;
         if (use_fin) {
             for (int k = 0; k < 6; k++) F[k] = Fin[k];

@@ -380,6 +380,7 @@ class Engine {
         int steps = 0;
         bool cyl = false;                          // research round 1095: a cylinder direction (MK_TAN=cyl:KEY), the kernel's run2 response
         Kernel::DCyl dcy;
+        std::vector<std::pair<double, double>> dsig;   // research round 1096: the centres' motion (MK_TAN_DSIG=centre:dsigma,...): a step at n c + k moves by n dsigma
     } tn_;
     void tan_init(std::vector<Entry>& C);
     void tan_step(double g);
@@ -615,7 +616,9 @@ inline void Engine::run() {
                 return std::abs(a.second - e.real()) < std::abs(b.second - e.real()); });
             double sp = 1e300;
             for (size_t j = 1; j < fr.size(); j++) sp = std::min(sp, std::abs(fr[0].second - fr[j].second));
-            if (std::abs(e.real() - fr[0].second) < sp / 4) {
+            // research round 1096: the frozen realness only for the root the file names THERE (within R0 / 4, the identity rule's own reach, as
+            // well as a quarter of the spacing) -- D0 0.02: gauge l6 - 1's root 3.2429 took lapse l4's (3.3168) 'real' against its own 'complex'
+            if (std::abs(e.real() - fr[0].second) < std::min(sp / 4, R0 / 4)) {
                 char b[160], m[48];
                 std::snprintf(b, sizeof b, "root realness %s (%.6f)", fr[0].first.c_str(), e.real());
                 std::snprintf(m, sizeof m, "%.1e i", e.imag());
@@ -636,6 +639,11 @@ inline void Engine::run() {
     std::vector<std::pair<std::string, FzSt>> FZD_storage;
     std::map<double, std::string> STEPLAB;                          // kf(a stage (ii) step's key) -> the step's identity
     auto is_spur_ = [](const std::string& l) { return l.rfind("spurious", 0) == 0; };
+    // research round 1096 (spec section 50 (b)): a family with its own contour (section 48: a lapse family, the rule on) is never routed
+    // through the cluster route by a frozen decision; (a) the keys the frozen file does not name are counted (declog 'unnamed_keys')
+    const bool OWN_C = !(std::getenv("N2A_OWN_CONTOUR") && std::string(std::getenv("N2A_OWN_CONTOUR")) == "0");
+    auto own_fam_ = [&](const std::string& l) { return OWN_C && l.rfind("lapse", 0) == 0; };
+    int UNNAMED = 0;
     auto bases = [&]() {                                            // the constituents' current positions (pole_label's)
         std::vector<std::pair<std::string, double>> b;
         auto put = [&](const std::string& k0, double v) {
@@ -962,14 +970,24 @@ inline void Engine::run() {
                         for (double r : reg_roots()) mg = std::min(mg, std::abs(r - g));
                         fz_note("product " + lbg + " (" + fmtm(g) + ")", fz.empty() ? "new (the point's rule)" : fz, own, fmtm(mg - R0));
                         dec = fz.empty() ? own : fz;
+                        if (fz.empty()) UNNAMED++;
                         if (fz.empty() && STOR_RULE == "1061" && own == "stepped" && !reg_roots().empty()) {
                             // research round 1061: (c) for the product steps -- new within the J step: routed to the nearest registered root
                             auto rr = reg_roots();
                             r0 = rr[0];
                             for (double r : rr)
                                 if (std::abs(r - g) < std::abs(r0 - g)) r0 = r;
-                            dec = "routed";
-                            fz_note("product " + lbg + " (" + fmtm(g) + "): new, routed to " + pole_label(r0) + " (never stepped; round 1061)", "routed", own, "None");
+                            if (own_fam_(pole_label(r0))) {
+                                fz_note("product " + lbg + " (" + fmtm(g) + "): new, NOT routed to " + pole_label(r0) + " (its own contour; round 1096)", own, own, "None");
+                            } else {
+                                dec = "routed";
+                                fz_note("product " + lbg + " (" + fmtm(g) + "): new, routed to " + pole_label(r0) + " (never stepped; round 1061)", "routed", own, "None");
+                            }
+                        }
+                        if (fz == "routed" && own_fam_(FZv.get("routed")->get(lbg)->s)) {
+                            fz_note("product " + lbg + " (" + fmtm(g) + "): frozen routed to " + FZv.get("routed")->get(lbg)->s + ", NOT (its own contour; round 1096)", own, own, "None");
+                            dec = own;
+                            fz = "";
                         }
                         if (fz == "routed") r0 = pole_pos(FZv.get("routed")->get(lbg)->s);
                         else if (fz == "stored") {
@@ -977,9 +995,16 @@ inline void Engine::run() {
                             std::vector<std::string> fm_;
                             if (fc) for (auto& x : fc->get("members")->a) fm_.push_back(x.s);
                             else fm_.push_back(slz[0]);
-                            stm.clear();
-                            for (auto& m_ : fm_)
-                                if (!is_spur_(m_) && !Q.has(rkey(pole_pos(m_)).v)) stm.push_back(pole_pos(m_));
+                            bool ownm_ = false;                              // research round 1096 (b): not stored at an own-contour family's step
+                            for (auto& m_ : fm_) ownm_ = ownm_ || own_fam_(m_);
+                            if (ownm_) {
+                                fz_note("product " + lbg + " (" + fmtm(g) + "): frozen stored at " + slz[0] + ", NOT (its own contour; round 1096)", own, own, "None");
+                                dec = own;
+                            } else {
+                                stm.clear();
+                                for (auto& m_ : fm_)
+                                    if (!is_spur_(m_) && !Q.has(rkey(pole_pos(m_)).v)) stm.push_back(pole_pos(m_));
+                            }
                         }
                     }
                     Key gp = gk;
@@ -1048,6 +1073,10 @@ inline void Engine::run() {
                         for (auto& kv : FZv.get("clusters")->o)
                             for (auto& x : kv.second.get("members")->a)
                                 if (!fc && x.s == lbg) fc = &kv.second;
+                        if (fc && own_fam_(lbg)) {                           // research round 1096 (b): its own contour, not the frozen cluster
+                            fz_note("cluster at " + lbg + " (its own contour; round 1096)", "own contour", "own contour", "None");
+                            fc = nullptr;
+                        }
                         std::vector<std::string> ownl;
                         for (double m_ : mem) ownl.push_back(pole_label(m_));
                         std::sort(ownl.begin(), ownl.end());
@@ -1058,7 +1087,7 @@ inline void Engine::run() {
                                 if (!is_spur_(x.s)) { ms.insert(pole_pos(x.s)); frl.push_back(x.s); }
                             fkey = fc->get("key")->n;
                             have_fkey = true;
-                            if (fc->get("members")->a.size() == 1) ROUTED.insert(kf(g));
+                            if (fc->get("members")->a.size() == 1 && !own_fam_(lbg)) ROUTED.insert(kf(g));
                         }
                         mem.assign(ms.begin(), ms.end());
                         std::sort(frl.begin(), frl.end());
@@ -1109,6 +1138,10 @@ inline void Engine::run() {
                 }
             }
             order.push_back(g);
+            // research round 1096: the centre's wall time, its kernel and operator-build shares (declog 'secs', 'secs_kernel', 'secs_meff')
+            const auto tc0_ = std::chrono::steady_clock::now();
+            const double tk0_ = k_.t_run, tm0_ = g_meff_secs;
+            const long nk0_ = k_.n_run, nm0_ = g_meff_calls;
             J_.sep();
             J_.open('{');
             J_.kv("g", Json::num(g));
@@ -1185,6 +1218,16 @@ inline void Engine::run() {
                         double dn = 1e300, dr = 0.0;
                         for (size_t q = 0; q < ev.size(); q++)
                             if (q != io && std::abs(ev[q]) < dn) { dn = std::abs(ev[q]); dr = ev[q].real(); }
+                        if (std::getenv("MK_OWN_DEBUG")) {                    // research round 1096: the roots nearest the centre
+                            std::vector<cd> sv(ev.begin(), ev.end());
+                            std::sort(sv.begin(), sv.end(), [](cd a_, cd b_) { return std::abs(a_) < std::abs(b_); });
+                            double mx_ = 0.0;
+                            for (auto& z_ : Ms) mx_ = std::max(mx_, std::abs(z_));
+                            std::printf("    [own contour debug %s %.9f pass %d] operator %s (reference g %.6f, |Ms| %.3e, %zu entries, %zu active); %zu roots; nearest:",
+                                        flab.c_str(), g, ps, opname.c_str(), mref_g, mx_, Ms.size(), iax.size(), ev.size());
+                            for (size_t q = 0; q < sv.size() && q < 6; q++) std::printf(" (%+.3e %+.3e)", sv[q].real(), sv[q].imag());
+                            std::printf("\n");
+                        }
                         const double rmin = std::getenv("N2A_OWN_RMIN") ? std::atof(std::getenv("N2A_OWN_RMIN")) : 1e-3;
                         if (dn / 2 < Rcur_) {
                             if (dn / 2 < rmin)
@@ -2040,6 +2083,17 @@ inline void Engine::run() {
                 J_.kv("cent_after", cent());
                 J_.kv("pending_after", Json::nums(Q.after()));
             }
+            {
+                const double sc_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - tc0_).count();
+                J_.kv("secs", Json::num(sc_));
+                J_.kv("secs_kernel", Json::num(k_.t_run - tk0_));
+                J_.kv("kernel_calls", std::to_string(k_.n_run - nk0_));
+                J_.kv("secs_meff", Json::num(g_meff_secs - tm0_));
+                J_.kv("meff_calls", std::to_string(g_meff_calls - nm0_));
+                if (std::getenv("MK_TIMING"))
+                    std::printf("    [timing pass %d g %.6f%s] %.1f s (kernel %.1f s in %ld calls, of which the operator %.1f s in %ld builds)\n", ps, g,
+                                iscl ? " cluster" : "", sc_, k_.t_run - tk0_, k_.n_run - nk0_, g_meff_secs - tm0_, g_meff_calls - nm0_);
+            }
             J_.close('}');
         }
         J_.close(']');
@@ -2124,8 +2178,10 @@ inline void Engine::run() {
             std::rename(tmp.c_str(), FZP.c_str());
             std::printf("  [freeze] stage (ii) decisions written (by identity): %s\n", FZP.c_str());
         } else if (FZ)
-            std::printf("  [freeze] stage (ii) decisions replayed from %s: %d decision sites, %d where the point's own differs\n", FZP.c_str(), int(FZ_LOG.size()), ndiff);
+            std::printf("  [freeze] stage (ii) decisions replayed from %s: %d decision sites, %d where the point's own differs; %d keys the file does not name (round 1096)\n",
+                        FZP.c_str(), int(FZ_LOG.size()), ndiff, UNNAMED);
         J_.kv("freeze_differ", std::to_string(ndiff));
+        J_.kv("unnamed_keys", std::to_string(UNNAMED));
     }
     C_final_ = C;
     fams_ = fams;

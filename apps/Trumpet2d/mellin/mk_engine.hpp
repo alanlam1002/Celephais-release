@@ -549,8 +549,12 @@ inline void Engine::run() {
     // held label.  With no ambiguity every label has one candidate, so this is the assignment of least total distance.
     std::map<std::string, double> HOLDER;
     std::vector<std::string> AMBIG;
+    // (research round 1100, checklist C6: the identity changes of rounds 1096-1099 -- the realness at R0 / 4, one-to-one holding, the
+    // assignment -- behind N2A_ID_RULE=1099; the default the pre-1096 identity code)
+    const bool ID_NEW = std::getenv("N2A_ID_RULE") && std::string(std::getenv("N2A_ID_RULE")) == "1099";
     const double ID_SAME = std::getenv("N2A_ID_TOL") ? std::atof(std::getenv("N2A_ID_TOL")) : 1e-4;
     auto held_by_other = [&](const std::string& lb, double er) {
+        if (!ID_NEW) return false;
         auto it = HOLDER.find(lb);
         if (it == HOLDER.end()) return false;
         if (std::abs(it->second - er) <= ID_SAME) return false;
@@ -568,9 +572,24 @@ inline void Engine::run() {
     // from its recorded position to the nearest OTHER current root, so a label has at most one candidate root; each root takes the nearest
     // candidate that claims it (the least total distance: one root one label).  set_roots() before a step's labelling; root_label reads it.
     std::vector<std::pair<double, std::string>> ASSIGN;
+    // research round 1101 (spec section 54): N2A_ID_RULE=1101 -- identities decided ONCE PER POINT from the union of the step operators' real
+    // roots, each tagged by the grade (the step's key) it came from, then fixed for all steps.  The step operators are built step by step from
+    // the series so far, so the union is complete only after a pass: pass 0 labels by the pre-1096 rule and collects every labelling site's real
+    // roots; at the start of pass 1 the union (roots within N2A_ID_TOL merged) is assigned once -- the candidates the predicted identities (or
+    // the families) at integer offsets -3..+3, each reaching at most its old reach and half the gap to the next distinct root OF THE UNION, each
+    // distinct root its nearest claiming candidate -- and that assignment is used from pass 1 on (declog 'id_union')
+    const bool ID_GLOBAL = std::getenv("N2A_ID_RULE") && std::string(std::getenv("N2A_ID_RULE")) == "1101";
+    std::vector<std::pair<double, double>> UNION;                  // (root, grade)
+    std::vector<std::pair<double, std::string>> GASSIGN;           // distinct root -> label (fixed from pass 1)
+    bool GASSIGNED = false;
+    std::string ID_UNION_JSON = "null";
+    int CUR_PS = 0;
+    double CUR_G = 0.0;
     auto set_roots = [&](const std::vector<double>& rr) {
         ASSIGN.clear();
-        if (rr.empty()) return;
+        if (ID_GLOBAL && CUR_PS == 0)
+            for (double r_ : rr) UNION.emplace_back(r_, CUR_G);
+        if (rr.empty() || !ID_NEW) return;
         struct Cand { std::string lab; double q, reach; };
         std::vector<Cand> cands;
         auto addc = [&](const std::string& lb, double q, double reach) {
@@ -607,7 +626,21 @@ inline void Engine::run() {
         }
         for (auto& kv : best) ASSIGN.emplace_back(rr[kv.first], kv.second.second);
     };
+    auto taken_g = [&](const std::string& lb) {                     // (round 1101: a label the union gave to another root is not reused)
+        if (!(ID_GLOBAL && GASSIGNED)) return false;
+        for (auto& a_ : GASSIGN)
+            if (a_.second == lb) return true;
+        return false;
+    };
     auto root_label = [&](double er) {                              // spec section 31: a root of a step's operator named
+        if (ID_GLOBAL && GASSIGNED) {                                 // (round 1101: the point's fixed assignment)
+            const double tol_ = std::getenv("N2A_ID_TOL") ? std::atof(std::getenv("N2A_ID_TOL")) : 1e-4;
+            for (auto& a_ : GASSIGN)
+                if (std::abs(a_.first - er) <= tol_) {
+                    idlog_set(a_.second, IdRec{er, "assigned (union)", true, 0.0});
+                    return a_.second;
+                }
+        }
         for (auto& a_ : ASSIGN)                                       // (round 1099: the step's assignment first)
             if (std::abs(a_.first - er) < 1e-9 && !held_by_other(a_.second, er)) {
                 HOLDER.emplace(a_.second, er);
@@ -621,7 +654,7 @@ inline void Engine::run() {
             double sp = 1e300;
             for (size_t i = 0; i < PRED.size(); i++)
                 if (i != ib) sp = std::min(sp, std::abs(PRED[ib].second - PRED[i].second));
-            if (std::abs(er - PRED[ib].second) < sp / 4 && !held_by_other(PRED[ib].first, er)) {
+            if (std::abs(er - PRED[ib].second) < sp / 4 && !held_by_other(PRED[ib].first, er) && !taken_g(PRED[ib].first)) {
                 HOLDER.emplace(PRED[ib].first, er);
                 idlog_set(PRED[ib].first, IdRec{er, "continued", true, sp / 4 - std::abs(er - PRED[ib].second)});
                 return PRED[ib].first;
@@ -635,7 +668,7 @@ inline void Engine::run() {
         for (auto* fv : {&fams, &gfams})
             for (auto& f : *fv)
                 if (std::abs(f.second.v - er) < bd) { bd = std::abs(f.second.v - er); bk = f.first; bp = f.second.v; }
-        if (bd < R0 / 4 && !held_by_other(bk, er)) {
+        if (bd < R0 / 4 && !held_by_other(bk, er) && !taken_g(bk)) {
             HOLDER.emplace(bk, er);
             idlog_set(bk, IdRec{er, rl, true, R0 / 4 - std::abs(er - bp)});
             return bk;
@@ -690,7 +723,7 @@ inline void Engine::run() {
             // research round 1096: the frozen realness only for the root the file names THERE (within R0 / 4, the identity rule's own reach, as
             // well as a quarter of the spacing) -- D0 0.02: gauge l6 - 1's root 3.2429 took lapse l4's (3.3168) 'real' against its own 'complex'
             // (round 1098: and only for the root its label is held by)
-            if (std::abs(e.real() - fr[0].second) < std::min(sp / 4, R0 / 4) && !held_by_other(fr[0].first, e.real())) {
+            if (std::abs(e.real() - fr[0].second) < (ID_NEW ? std::min(sp / 4, R0 / 4) : sp / 4) && !held_by_other(fr[0].first, e.real())) {
                 HOLDER.emplace(fr[0].first, e.real());
                 char b[160], m[48];
                 std::snprintf(b, sizeof b, "root realness %s (%.6f)", fr[0].first.c_str(), e.real());
@@ -956,6 +989,65 @@ inline void Engine::run() {
     std::string families_json = "null";
     int ps = 0;
     for (ps = 0; ps < c_.passes; ps++) {
+        CUR_PS = ps;
+        if (ID_GLOBAL && ps == 1 && !GASSIGNED) {
+            // round 1101: the union's distinct roots (merged within N2A_ID_TOL), then the one assignment
+            const double tol_ = std::getenv("N2A_ID_TOL") ? std::atof(std::getenv("N2A_ID_TOL")) : 1e-4;
+            std::sort(UNION.begin(), UNION.end());
+            std::vector<double> dr_;
+            std::vector<std::vector<double>> gr_;
+            for (auto& u_ : UNION) {
+                if (!dr_.empty() && u_.first - dr_.back() <= tol_) { gr_.back().push_back(u_.second); continue; }
+                dr_.push_back(u_.first); gr_.push_back({u_.second});
+            }
+            struct Cand { std::string lab; double q, reach; };
+            std::vector<Cand> cands;
+            auto addc = [&](const std::string& lb, double q, double reach) {
+                for (int k = -3; k <= 3; k++) {
+                    char b_[160];
+                    if (k) std::snprintf(b_, sizeof b_, "%s %+d", lb.c_str(), k);
+                    cands.push_back(Cand{k ? std::string(b_) : lb, q + k, reach});
+                }
+            };
+            if (!PRED.empty())
+                for (size_t i = 0; i < PRED.size(); i++) {
+                    double sp = 1e300;
+                    for (size_t j = 0; j < PRED.size(); j++)
+                        if (j != i) sp = std::min(sp, std::abs(PRED[i].second - PRED[j].second));
+                    addc(PRED[i].first, PRED[i].second, sp / 4);
+                }
+            else
+                for (auto* fv : {&fams, &gfams})
+                    for (auto& f : *fv) addc(f.first, f.second.v, R0 / 4);
+            std::map<size_t, std::pair<double, std::string>> best;
+            for (auto& c : cands) {
+                size_t i1 = 0;
+                double d1 = 1e300, d2 = 1e300;
+                for (size_t i = 0; i < dr_.size(); i++) {
+                    double d = std::abs(dr_[i] - c.q);
+                    if (d < d1) { d2 = d1; d1 = d; i1 = i; }
+                    else if (d < d2) d2 = d;
+                }
+                if (d1 < std::min(c.reach, d2 / 2)) {
+                    auto it = best.find(i1);
+                    if (it == best.end() || d1 < it->second.first) best[i1] = {d1, c.lab};
+                }
+            }
+            std::string js_ = "[";
+            for (size_t i = 0; i < dr_.size(); i++) {
+                auto it = best.find(i);
+                if (it != best.end()) GASSIGN.emplace_back(dr_[i], it->second.second);
+                char b_[96];
+                std::snprintf(b_, sizeof b_, "%.9f", dr_[i]);
+                js_ += std::string(i ? "," : "") + "{\"root\":" + b_ + ",\"label\":" + (it != best.end() ? Json::str(it->second.second) : std::string("null")) +
+                       ",\"grades\":" + Json::nums(gr_[i]) + "}";
+            }
+            ID_UNION_JSON = js_ + "]";
+            GASSIGNED = true;
+            std::printf("  [identity] the union (round 1101): %zu roots from %zu step operators' real roots, %zu labelled; fixed from pass 1\n",
+                        dr_.size(), UNION.size(), GASSIGN.size());
+            for (auto& a_ : GASSIGN) std::printf("    [identity] %.9f -> %s\n", a_.first, a_.second.c_str());
+        }
         std::vector<Entry> Cprev = C;
         J_.sep();
         J_.open('{');
@@ -1382,7 +1474,7 @@ inline void Engine::run() {
                                 std::vector<double> rr_;                      // (round 1099: the step's real roots, assigned together)
                                 for (size_t ie = 0; ie < evs.size(); ie++)
                                     if (root_real(ie, evs)) rr_.push_back(evs[ie].real());
-                                set_roots(rr_);
+                                CUR_G = g; set_roots(rr_);
                             }
                             for (size_t ie = 0; ie < evs.size(); ie++) {
                                 cd e = evs[ie];
@@ -1468,7 +1560,7 @@ inline void Engine::run() {
                             std::vector<double> rr_;                          // (round 1099: the step's real roots, assigned together)
                             for (size_t ie = 0; ie < ev.size(); ie++)
                                 if (root_real(ie, ev)) rr_.push_back(ev[ie].real());
-                            set_roots(rr_);
+                            CUR_G = g; set_roots(rr_);
                         }
                         for (double er : evr) {
                             std::string lb = root_label(er);
@@ -1697,7 +1789,7 @@ inline void Engine::run() {
                                         if (f.first == lb) { sf = f.second.v; regk = &f.second; }
                                 if (!own_r.empty() && !sp) {
                                     std::vector<double> idr;
-                                    set_roots(own_r);                         // (round 1099)
+                                    CUR_G = g; set_roots(own_r);                         // (round 1099)
                                     for (double e : own_r)
                                         if (root_label(e) == lb) idr.push_back(e);
                                     double rt = sf;
@@ -2272,6 +2364,7 @@ inline void Engine::run() {
             std::string a_ = "[";
             for (size_t q = 0; q < AMBIG.size(); q++) a_ += (q ? "," : "") + Json::str(AMBIG[q]);
             J_.kv("ambiguous", a_ + "]");
+            J_.kv("id_union", ID_UNION_JSON);
             if (!AMBIG.empty()) std::printf("  [identity] %d ambiguous label(s) (round 1098: halve the J step)\n", int(AMBIG.size()));
         }
     }
@@ -2688,6 +2781,52 @@ inline void Engine::tangents(const TanOpt& T) {
     bool outputs = !S_.rwc.empty();
     if (outputs) {
         for (auto& z : fvec(k_, C_final_, c_.gauge, cents)) { base.push_back(z.real()); base_imag = std::max(base_imag, std::abs(z.imag())); }
+    }
+    // research round 1101 (spec section 54): THE REPLAY INTO THE JACOBIAN (behind MK_TAN, no production use) -- the outputs' derivative along
+    // the replay's exact series tangent (tn_.dC, before the gauge flow, as C_final_), by the same four-point stencil of fvec the tangent mode
+    // uses; written OUT/replay_column.json beside fit.json (its labels' order).  A cylinder direction's column lacks the outputs' DIRECT
+    // dependence on the cylinder (fvec's kernel rows): written, marked partial.
+    if (outputs && tn_.on) {
+        double mx = 0.0;
+        for (auto& d : tn_.dC)
+            for (auto& z : d.m) mx = std::max(mx, std::abs(z));
+        std::vector<double> dv;
+        double dvi = 0.0, h = 0.0;
+        if (mx > 0) {
+            h = T.h / mx;
+            auto f = [&](double e) {
+                std::vector<Entry> Cx = C_final_;
+                for (auto& d : tn_.dC) {
+                    int at = -1;
+                    for (size_t q = 0; q < Cx.size(); q++)
+                        if (Cx[q].j == d.j && keq(Cx[q].t, d.t)) { at = int(q); break; }
+                    std::vector<cd> m(K);
+                    for (int k = 0; k < K; k++) m[k] = (at >= 0 ? Cx[at].m[k] : cd(0.0, 0.0)) + ct::mul(cd(e, 0.0), k < int(d.m.size()) ? d.m[k] : cd(0.0, 0.0));
+                    if (at >= 0) Cx[at].m = m;
+                    else Cx.push_back(Entry{d.j, d.t, 1, m});
+                }
+                std::vector<std::pair<int, double>> ga(c_.gauge.begin(), c_.gauge.end());
+                return fvec(k_, Cx, ga, cents);
+            };
+            auto v1 = f(h), v2 = f(-h), v3 = f(2 * h), v4 = f(-2 * h);
+            for (size_t q = 0; q < v1.size(); q++) {
+                cd z = ct::div(ct::mul(cd(8.0, 0.0), v1[q] - v2[q]) - (v3[q] - v4[q]), cd(12 * h, 0.0));
+                dv.push_back(z.real());
+                dvi = std::max(dvi, std::abs(z.imag()));
+            }
+        } else
+            dv.assign(base.size(), 0.0);
+        Json R;
+        R.open('{');
+        R.kv("direction", Json::str(tn_.kind + ":" + tn_.name));
+        R.kv("partial", tn_.cyl ? "true" : "false");
+        R.kv("h", Json::num(h));
+        R.kv("dv_imag", Json::num(dvi));
+        R.kv("dv", Json::nums(dv));
+        R.close('}');
+        std::ofstream(out_ + "/replay_column.json") << R.s.str();
+        std::printf("  [tangent] the outputs' column along %s:%s written (replay_column.json, %zu outputs%s)\n", tn_.kind.c_str(), tn_.name.c_str(), dv.size(),
+                    tn_.cyl ? "; PARTIAL: the cylinder's direct dependence absent" : "");
     }
     struct Res {
         std::vector<Entry> dC;

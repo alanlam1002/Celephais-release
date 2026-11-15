@@ -562,8 +562,59 @@ inline void Engine::run() {
         }
         return true;
     };
-    auto root_label = [&](double er) {                              // spec section 31: a root of a step's operator named
+    // research round 1099 (spec section 52, amending 51 (i)-(iii)): THE ASSIGNMENT -- per step, over the operator's current real roots: the
+    // candidate labels are the predicted identities and the families, each also at integer offsets -3..+3 (a root at a parent's exponent shifted
+    // by an integer carries the parent's label with that offset: 'lapse l4 -1'); a candidate's reach is its old reach and at most half the gap
+    // from its recorded position to the nearest OTHER current root, so a label has at most one candidate root; each root takes the nearest
+    // candidate that claims it (the least total distance: one root one label).  set_roots() before a step's labelling; root_label reads it.
+    std::vector<std::pair<double, std::string>> ASSIGN;
+    auto set_roots = [&](const std::vector<double>& rr) {
+        ASSIGN.clear();
+        if (rr.empty()) return;
+        struct Cand { std::string lab; double q, reach; };
+        std::vector<Cand> cands;
+        auto addc = [&](const std::string& lb, double q, double reach) {
+            for (int k = -3; k <= 3; k++) {
+                char b_[160];
+                if (k) std::snprintf(b_, sizeof b_, "%s %+d", lb.c_str(), k);
+                cands.push_back(Cand{k ? std::string(b_) : lb, q + k, reach});
+            }
+        };
         if (!PRED.empty()) {
+            for (size_t i = 0; i < PRED.size(); i++) {
+                double sp = 1e300;
+                for (size_t j = 0; j < PRED.size(); j++)
+                    if (j != i) sp = std::min(sp, std::abs(PRED[i].second - PRED[j].second));
+                addc(PRED[i].first, PRED[i].second, sp / 4);
+            }
+        } else {
+            for (auto* fv : {&fams, &gfams})
+                for (auto& f : *fv) addc(f.first, f.second.v, R0 / 4);
+        }
+        std::map<size_t, std::pair<double, std::string>> best;   // root index -> (distance, label)
+        for (auto& c : cands) {
+            size_t i1 = 0;
+            double d1 = 1e300, d2 = 1e300;
+            for (size_t i = 0; i < rr.size(); i++) {
+                double d = std::abs(rr[i] - c.q);
+                if (d < d1) { d2 = d1; d1 = d; i1 = i; }
+                else if (d < d2) d2 = d;
+            }
+            if (d1 < std::min(c.reach, d2 / 2)) {
+                auto it = best.find(i1);
+                if (it == best.end() || d1 < it->second.first) best[i1] = {d1, c.lab};
+            }
+        }
+        for (auto& kv : best) ASSIGN.emplace_back(rr[kv.first], kv.second.second);
+    };
+    auto root_label = [&](double er) {                              // spec section 31: a root of a step's operator named
+        for (auto& a_ : ASSIGN)                                       // (round 1099: the step's assignment first)
+            if (std::abs(a_.first - er) < 1e-9 && !held_by_other(a_.second, er)) {
+                HOLDER.emplace(a_.second, er);
+                idlog_set(a_.second, IdRec{er, "assigned", true, 0.0});
+                return a_.second;
+            }
+        if (!PRED.empty() && ASSIGN.empty()) {
             size_t ib = 0;
             for (size_t i = 1; i < PRED.size(); i++)
                 if (std::abs(PRED[i].second - er) < std::abs(PRED[ib].second - er)) ib = i;
@@ -1327,6 +1378,12 @@ inline void Engine::run() {
                             std::vector<cd> evs = ev;
                             std::sort(evs.begin(), evs.end(), [](const cd& a, const cd& b) { return a.real() < b.real(); });
                             std::set<std::string> done;
+                            {
+                                std::vector<double> rr_;                      // (round 1099: the step's real roots, assigned together)
+                                for (size_t ie = 0; ie < evs.size(); ie++)
+                                    if (root_real(ie, evs)) rr_.push_back(evs[ie].real());
+                                set_roots(rr_);
+                            }
                             for (size_t ie = 0; ie < evs.size(); ie++) {
                                 cd e = evs[ie];
                                 double er = e.real();
@@ -1407,6 +1464,12 @@ inline void Engine::run() {
                         empty_.t = js::Val::OBJ;
                         if (FZ) { fsp = FZv.get("spur")->get(stl); if (!fsp) fsp = &empty_; }
                         std::vector<std::pair<std::string, FzSp>> rec;
+                        {
+                            std::vector<double> rr_;                          // (round 1099: the step's real roots, assigned together)
+                            for (size_t ie = 0; ie < ev.size(); ie++)
+                                if (root_real(ie, ev)) rr_.push_back(ev[ie].real());
+                            set_roots(rr_);
+                        }
                         for (double er : evr) {
                             std::string lb = root_label(er);
                             if (!is_spur(lb)) {
@@ -1634,6 +1697,7 @@ inline void Engine::run() {
                                         if (f.first == lb) { sf = f.second.v; regk = &f.second; }
                                 if (!own_r.empty() && !sp) {
                                     std::vector<double> idr;
+                                    set_roots(own_r);                         // (round 1099)
                                     for (double e : own_r)
                                         if (root_label(e) == lb) idr.push_back(e);
                                     double rt = sf;

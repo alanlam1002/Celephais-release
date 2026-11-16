@@ -934,6 +934,38 @@ static bool app_lsq(Kadath::System_of_eqs& syst, double prec, double& err, int i
                 R0 = R0_fix;
             }
         }
+        // code round 463 (research round 1109, K-X): STAGEB_LSQ_W_DUMP=FILE -- the least-squares rows' weights W as this step uses them, with
+        // each row's max |A| over the numeric unknowns (columns < nvar_double: the linear throat's parameters) and over the field coefficients
+        // (the bulk), and the numeric unknowns' names; one block per lsq step.  Default (unset): nothing written.
+        if (rank == 0 && std::getenv("STAGEB_LSQ_W_DUMP")) {
+            std::ofstream fw(std::getenv("STAGEB_LSQ_W_DUMP"), it == 0 ? std::ios::out : std::ios::app);
+            const int nvd_ = syst.get_nvar_double();
+            if (it == 0) {
+                const auto& vn = VarDoublePeek::names(syst);
+                fw << "NVD " << nvd_ << "\n";
+                for (int q = 0; q < nvd_ && q < static_cast<int>(vn.size()); q++) fw << "VD " << q << " " << vn[q] << "\n";
+            }
+            std::vector<Kadath::System_of_eqs::RowMetadata> rmeta_;
+            syst.classify_equation_row_metadata(rmeta_);
+            const auto& EI_ = EqListPeek::eqints(syst);
+            std::vector<std::string> lab_(m);
+            for (const auto& rw : rmeta_)
+                if (rw.equation_type == "Eq_int" && rw.eq_index >= 0 && rw.eq_index < static_cast<int>(EI_.size()) && rw.row >= 0 && rw.row < m)
+                    lab_[rw.row] = std::get<0>(EI_[rw.eq_index]);
+            fw << "STEP " << it << " " << m << " " << n << "\n";
+            fw << std::setprecision(17);
+            for (int r = 0; r < m; r++) {
+                if (!ism[r]) continue;
+                double mn_ = 0.0, mb_ = 0.0;
+                int cn_ = -1, cb_ = -1;
+                for (int c = 0; c < n; c++) {
+                    const double v_ = std::fabs(Aat(r, c));
+                    if (c < nvd_) { if (v_ > mn_) { mn_ = v_; cn_ = c; } }
+                    else if (v_ > mb_) { mb_ = v_; cb_ = c; }
+                }
+                fw << "W " << r << " " << int(ism[r]) << " " << R0[r] << " " << mn_ << " " << cn_ << " " << mb_ << " " << cb_ << " " << lab_[r] << "\n";
+            }
+        }
         std::vector<double> Cs(n, 0.0);
         for (int c = 0; c < n; c++) {
             for (int r = 0; r < m; r++) Cs[c] = std::max(Cs[c], std::fabs(R0[r] * Aat(r, c)));

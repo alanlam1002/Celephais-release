@@ -702,6 +702,26 @@ inline void Engine::run() {
         if (frozen != own) std::printf("    [freeze] %s: frozen %s, the point's own %s (margin %s)\n", site.c_str(), frozen.c_str(), own.c_str(), margin.c_str());
     };
     auto fmtm = [](double m) { char b[48]; std::snprintf(b, sizeof b, "%.6g", m); return std::string(b); };
+    // research round 1118 (K-X (b'')): MK_ANNOUNCE_FREEZE=FILE -- the off-lattice ANNOUNCEMENT frozen per export (unset: the engine as before).
+    // A candidate centre is registered when its piece's magnitude exceeds ANNOUNCE_MIN (1e-15); at (b'')'s point the candidate lapse l6 - 1
+    // (3.838471) carries 2.3e-15, so the base registers it and a run at +-h need not.  FILE absent: this run decides as the engine does and
+    // writes, per site (the pass, the popped key's index in it), each distinct candidate position's identity (pole_label) and decision;
+    // present: each position takes the decision of the site's recorded position nearest it (within MK_ANNOUNCE_ID_TOL, default 1e-2, and a
+    // quarter of that site's spacing), else of its identity wherever recorded, else its own (counted, 'unnamed').  Where the frozen decision
+    // equals the point's own the engine's own per-entry registration is used unchanged (so the deciding point's replay is the engine's run)
+    const std::string AFP = std::getenv("MK_ANNOUNCE_FREEZE") ? std::getenv("MK_ANNOUNCE_FREEZE") : "";
+    const double AF_TOL = std::getenv("MK_ANNOUNCE_ID_TOL") ? std::atof(std::getenv("MK_ANNOUNCE_ID_TOL")) : 1e-2;
+    struct AfRec { double pos; std::string lab; int dec; };
+    std::map<std::string, std::vector<AfRec>> AF_SITES;            // decide: written; replay: read
+    std::map<std::string, int> AF_LABS;                            // an identity's decision (1: registered at any site)
+    const bool AF = !AFP.empty() && bool(std::ifstream(AFP));
+    if (AF) {
+        js::Val v_ = js::load(AFP);
+        for (auto& kv : v_.get("sites")->o)
+            for (auto& e : kv.second.a) AF_SITES[kv.first].push_back(AfRec{e.a[0].n, e.a[1].s, int(e.a[2].n)});
+        for (auto& kv : v_.get("labels")->o) AF_LABS[kv.first] = int(kv.second.n);
+    }
+    int AF_UNNAMED = 0, AF_DIFFER = 0, AF_N = 0, AF_STEP = 0;
     // research round 1065 (spec section 34): an operator root is REAL when |imag| < 1e-6 x its distance to the nearest other root (a complex
     // pair fails by construction, a simple root's round-off passes); in replay a root the decisions file names keeps its realness, its
     // imaginary part logged (N2A_REAL_RULE=pre1065: |imag| < 1e-9)
@@ -1067,7 +1087,9 @@ inline void Engine::run() {
         }
         std::vector<double> order;
         Key gk;
+        AF_STEP = 0;                                                // (round 1118: the announcement sites' index)
         while (Q.pop(gk)) {
+            AF_STEP++;
             double g = gk.v;
             bool isint = gk.isint;
             if (k_.c.gauge_reg && !isint) {                         // spec section 26: a tower moved with its family (no longer registered)
@@ -1687,7 +1709,60 @@ inline void Engine::run() {
                 std::vector<Key> add;
                 if (c_.offl_auto) {
                     std::vector<fm::Ann> ann;
-                    fm::announce_register(k_.c, cand, ann, add);
+                    if (AFP.empty()) fm::announce_register(k_.c, cand, ann, add);
+                    else {
+                        // research round 1118: the announcement frozen per export (MK_ANNOUNCE_FREEZE) -- per distinct position (fm's rounding)
+                        const std::string site = std::to_string(ps) + "|" + std::to_string(AF_STEP);
+                        std::map<double, double> a_;
+                        for (auto& cm : cand) {
+                            double r = std::nearbyint(cm.first * 1e9) / 1e9;
+                            a_[r] = std::max(a_.count(r) ? a_[r] : 0.0, cm.second);
+                        }
+                        const bool rec_ = !AF && !AF_SITES.count(site);   // (decide: the site's first call; its Newton repeats see the same rows)
+                        const std::vector<AfRec>* rs_ = AF && AF_SITES.count(site) ? &AF_SITES[site] : nullptr;
+                        std::map<double, int> fdec;                     // per position: 2 x the frozen decision + the point's own
+                        for (auto& kv : a_) {
+                            const int own = kv.second > fm::ANNOUNCE_MIN ? 1 : 0;
+                            const std::string lb = pole_label(kv.first);
+                            int d = own;
+                            if (rec_) {
+                                AF_SITES[site].push_back(AfRec{kv.first, lb, own});
+                                AF_LABS[lb] = std::max(AF_LABS.count(lb) ? AF_LABS[lb] : 0, own);
+                            } else if (AF) {
+                                bool hit = false;
+                                if (rs_ && !rs_->empty()) {
+                                    double sp = 1e300, bd = 1e300;
+                                    const AfRec* best = nullptr;
+                                    for (size_t q = 0; q < rs_->size(); q++) {
+                                        for (size_t w = q + 1; w < rs_->size(); w++) sp = std::min(sp, std::abs((*rs_)[q].pos - (*rs_)[w].pos));
+                                        if (std::abs((*rs_)[q].pos - kv.first) < bd) { bd = std::abs((*rs_)[q].pos - kv.first); best = &(*rs_)[q]; }
+                                    }
+                                    if (best && bd < std::min(AF_TOL, sp / 4)) { d = best->dec; hit = true; }
+                                }
+                                if (!hit && AF_LABS.count(lb)) { d = AF_LABS[lb]; hit = true; }
+                                if (!hit) AF_UNNAMED++;
+                                if (d != own) {
+                                    AF_DIFFER++;
+                                    std::printf("    [announce-freeze] site %s %s (%.9f): frozen %s, the point's own %s (magnitude %.3g)\n", site.c_str(),
+                                                lb.c_str(), kv.first, d ? "registered" : "not registered", own ? "registered" : "not registered", kv.second);
+                                }
+                            }
+                            fdec[kv.first] = d * 2 + own;
+                            AF_N++;
+                        }
+                        std::set<double> done_;
+                        for (auto& cm : cand) {
+                            const double r = std::nearbyint(cm.first * 1e9) / 1e9;
+                            const int fo = fdec[r];
+                            if (fo == 3 || fo == 0) {                      // frozen = own: the engine's own per-entry rule
+                                if (cm.second > fm::ANNOUNCE_MIN) add.push_back(k_.c.reg(cm.first));
+                            } else if (fo == 2 && !done_.count(r)) {        // frozen registered, own not: at its first entry
+                                add.push_back(k_.c.reg(cm.first));
+                                done_.insert(r);
+                            }                                              // (frozen not registered, own registered: none)
+                        }
+                        for (auto& kv : a_) ann.push_back(fm::Ann{kv.first, kv.second});
+                    }
                     std::string an = "[";
                     for (size_t q = 0; q < ann.size(); q++) an += (q ? "," : "") + std::string("[") + Json::num(ann[q].key) + "," + Json::num(ann[q].mag) + "]";
                     J_.kv("announce", an + "]");
@@ -2302,6 +2377,32 @@ inline void Engine::run() {
     J_.close(']');
     tan_finish(C);                                                  // (research round 1093: MK_TAN_OUT / MK_SERIES_OUT, before the gauge flow)
     J_.kv("families", families_json);
+    if (!AFP.empty()) {
+        // research round 1118: the announcement decisions (MK_ANNOUNCE_FREEZE) -- written by the deciding run, a summary from a replaying one
+        if (!AF) {
+            std::string d = "{\"sites\":{";
+            bool f0 = true;
+            for (auto& kv : AF_SITES) {
+                d += (f0 ? "" : ",") + Json::str(kv.first) + ":[";
+                f0 = false;
+                for (size_t q = 0; q < kv.second.size(); q++)
+                    d += (q ? "," : "") + std::string("[") + Json::num(kv.second[q].pos) + "," + Json::str(kv.second[q].lab) + "," + std::to_string(kv.second[q].dec) + "]";
+                d += "]";
+            }
+            d += "},\"labels\":{";
+            f0 = true;
+            for (auto& kv : AF_LABS) { d += (f0 ? "" : ",") + Json::str(kv.first) + ":" + std::to_string(kv.second); f0 = false; }
+            d += "}}";
+            std::string tmp = AFP + ".tmp" + std::to_string(getpid());
+            std::ofstream(tmp) << d;
+            std::rename(tmp.c_str(), AFP.c_str());
+            std::printf("  [announce-freeze] decisions written: %s (%d sites, %d positions)\n", AFP.c_str(), int(AF_SITES.size()), AF_N);
+        } else
+            std::printf("  [announce-freeze] decisions replayed from %s: %d positions, %d where the point's own differs; %d the file does not name\n",
+                        AFP.c_str(), AF_N, AF_DIFFER, AF_UNNAMED);
+        J_.kv("announce_freeze", "{\"replayed\":" + std::string(AF ? "true" : "false") + ",\"positions\":" + std::to_string(AF_N) + ",\"differ\":" +
+                                     std::to_string(AF_DIFFER) + ",\"unnamed\":" + std::to_string(AF_UNNAMED) + "}");
+    }
     if (CL) {
         // research round 1048 (spec section 31): the stage (ii) decisions by identity -- with N2A_FREEZE absent, written here (the J step's first
         // point; also the next J step's N2A_IDENT_PREV: the roots' positions)

@@ -722,6 +722,11 @@ inline void Engine::run() {
         for (auto& kv : v_.get("labels")->o) AF_LABS[kv.first] = int(kv.second.n);
     }
     int AF_UNNAMED = 0, AF_DIFFER = 0, AF_N = 0, AF_STEP = 0;
+    // research round 1119: MK_ANNOUNCE_REL=EPS -- the announcement threshold RELATIVE: a candidate registered when its piece's magnitude
+    // exceeds EPS x the step's content (the largest candidate piece of the same call: the stripped rows at this step); unset: the absolute
+    // ANNOUNCE_MIN (1e-15) as before.  Each position whose relative decision differs from the absolute one is logged ([announce-rel])
+    const double AREL = std::getenv("MK_ANNOUNCE_REL") ? std::atof(std::getenv("MK_ANNOUNCE_REL")) : 0.0;
+    int AREL_DIFF = 0;
     // research round 1065 (spec section 34): an operator root is REAL when |imag| < 1e-6 x its distance to the nearest other root (a complex
     // pair fails by construction, a simple root's round-off passes); in replay a root the decisions file names keeps its realness, its
     // imaginary part logged (N2A_REAL_RULE=pre1065: |imag| < 1e-9)
@@ -1709,7 +1714,7 @@ inline void Engine::run() {
                 std::vector<Key> add;
                 if (c_.offl_auto) {
                     std::vector<fm::Ann> ann;
-                    if (AFP.empty()) fm::announce_register(k_.c, cand, ann, add);
+                    if (AFP.empty() && AREL <= 0) fm::announce_register(k_.c, cand, ann, add);
                     else {
                         // research round 1118: the announcement frozen per export (MK_ANNOUNCE_FREEZE) -- per distinct position (fm's rounding)
                         const std::string site = std::to_string(ps) + "|" + std::to_string(AF_STEP);
@@ -1718,11 +1723,22 @@ inline void Engine::run() {
                             double r = std::nearbyint(cm.first * 1e9) / 1e9;
                             a_[r] = std::max(a_.count(r) ? a_[r] : 0.0, cm.second);
                         }
-                        const bool rec_ = !AF && !AF_SITES.count(site);   // (decide: the site's first call; its Newton repeats see the same rows)
+                        double cmax_ = 0.0;
+                        for (auto& kv : a_) cmax_ = std::max(cmax_, kv.second);
+                        const double thr_ = AREL > 0 ? AREL * cmax_ : fm::ANNOUNCE_MIN;   // (round 1119: the relative threshold, when set)
+                        if (AREL > 0)
+                            for (auto& kv : a_)
+                                if ((kv.second > thr_) != (kv.second > fm::ANNOUNCE_MIN)) {
+                                    AREL_DIFF++;
+                                    std::printf("    [announce-rel] site %s %s (%.9f): magnitude %.3g, step content %.3g: relative %s, absolute %s\n", site.c_str(),
+                                                pole_label(kv.first).c_str(), kv.first, kv.second, cmax_, kv.second > thr_ ? "registered" : "not registered",
+                                                kv.second > fm::ANNOUNCE_MIN ? "registered" : "not registered");
+                                }
+                        const bool rec_ = !AFP.empty() && !AF && !AF_SITES.count(site);   // (decide: the site's first call; its Newton repeats see the same rows)
                         const std::vector<AfRec>* rs_ = AF && AF_SITES.count(site) ? &AF_SITES[site] : nullptr;
                         std::map<double, int> fdec;                     // per position: 2 x the frozen decision + the point's own
                         for (auto& kv : a_) {
-                            const int own = kv.second > fm::ANNOUNCE_MIN ? 1 : 0;
+                            const int own = kv.second > thr_ ? 1 : 0;
                             const std::string lb = pole_label(kv.first);
                             int d = own;
                             if (rec_) {
@@ -1755,7 +1771,7 @@ inline void Engine::run() {
                             const double r = std::nearbyint(cm.first * 1e9) / 1e9;
                             const int fo = fdec[r];
                             if (fo == 3 || fo == 0) {                      // frozen = own: the engine's own per-entry rule
-                                if (cm.second > fm::ANNOUNCE_MIN) add.push_back(k_.c.reg(cm.first));
+                                if (cm.second > thr_) add.push_back(k_.c.reg(cm.first));
                             } else if (fo == 2 && !done_.count(r)) {        // frozen registered, own not: at its first entry
                                 add.push_back(k_.c.reg(cm.first));
                                 done_.insert(r);
@@ -2377,6 +2393,10 @@ inline void Engine::run() {
     J_.close(']');
     tan_finish(C);                                                  // (research round 1093: MK_TAN_OUT / MK_SERIES_OUT, before the gauge flow)
     J_.kv("families", families_json);
+    if (AREL > 0) {
+        std::printf("  [announce-rel] relative threshold %.3g x the step's content: %d position decisions differ from the absolute 1e-15\n", AREL, AREL_DIFF);
+        J_.kv("announce_rel", "{\"eps\":" + Json::num(AREL) + ",\"differ\":" + std::to_string(AREL_DIFF) + "}");
+    }
     if (!AFP.empty()) {
         // research round 1118: the announcement decisions (MK_ANNOUNCE_FREEZE) -- written by the deciding run, a summary from a replaying one
         if (!AF) {

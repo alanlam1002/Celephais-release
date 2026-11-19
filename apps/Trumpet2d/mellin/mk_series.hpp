@@ -68,6 +68,7 @@ struct Ctx {
     // xk: a table of exponents, not centres); the algebra never merges, re-expands or registers; reg() is the recursion's registration (the
     // families, their towers, the announced centres); the merge at readout (mk_operator.hpp piece_at).  Off: the round-1028 merge (canon).
     bool exact = false;
+    double xmerge = 0.0;                        // research round 1136 (MK_EXPLICIT): the algebra's merge scale for exact exponents (0: none)
     // stage (ii) port, item 1 (spec section 26, n2a_nl N2A_GAUGE_REG; on with the clusters): the gauge roots registered at their own exact
     // exponents; reg() then merges only near-coincidences (< reg_tol, N2A_REG_TOL 1e-3) instead of everything within R_m
     bool gauge_reg = false;
@@ -206,6 +207,17 @@ struct Ctx {
     std::pair<Key, double> canon(double g) {
         double gi = pyround(g);
         if (std::abs(g - gi) < 1e-9 || (Rm > 0 && std::abs(g - gi) < Rm && !exact)) return {Key{gi, true}, g - gi};
+        if (exact && xmerge > 0) {
+            // research round 1136 (MK_EXPLICIT): an exponent within xmerge (the coalescence scale eps_s) of an integer or of an interned
+            // exponent is re-expanded about it (the binomial shift into its log moments) -- the explicit members' exponents drift between
+            // passes; without this each drift adds a family of near-duplicate exponents to every product
+            if (std::abs(g - gi) < xmerge) return {Key{gi, true}, g - gi};
+            auto it = std::lower_bound(xk.begin(), xk.end(), g - xmerge);
+            double best = 0.0, bd = xmerge;
+            for (; it != xk.end() && *it < g + xmerge; ++it)
+                if (std::abs(*it - g) < bd) { bd = std::abs(*it - g); best = *it; }
+            if (bd < xmerge) return {Key{best, false}, g - best};
+        }
         if (exact) return {xkey(g), 0.0};               // stage (i): the algebra keeps the exact exponent, never registers
         if (!cent.empty()) {
             double c = cent[0];

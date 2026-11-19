@@ -294,12 +294,36 @@ class Engine {
         std::vector<Entry> o;
         std::vector<Key> ks;
         for (int j = 0; j < P_.nn; j++) ks.push_back(ckey(k_.c, g + P_.kofs[j]));
+        const auto sp = EXPL_ ? SPLIT_.find(kf(g)) : SPLIT_.end();
         for (auto& en : C) {
             const Key& t = ks[en.j];
             if (t.v >= 1 && keq(en.t, t)) continue;
+            if (sp != SPLIT_.end() && split_owned(sp->second, en)) continue;   // (round 1136: the members split off at g are g's own)
             o.push_back(en);
         }
         return o;
+    }
+    // research round 1136 (spec section 56): EXPLICIT MEMBERS at integer centres, MK_EXPLICIT=1 (default off: the production engine unchanged).
+    //  (A) the split: after an integer step whose pencil has a non-integer root inside its contour and whose stored moments are ONE member at
+    //      a real offset d besides the integer (moments m >= 1 equal to d^(m-1) m_1 to MK_EXPL_FIT, default 1e-3 -- what does not fit stays in
+    //      the moments; |d| >= the coalescence scale eps_s), that member is stored at its exact key t + d (moment 0
+    //      a_1 = m_1 / d), the integer entry keeping m_0 - a_1 and the remainder m_k - d^k a_1; the split entries are the step's own (stripped
+    //      with it, replaced at its next storage).  At 0.30 / 0.40 this is the near-resonant partner at aligned 2.
+    //  (B) the readout: at an integer centre whose step pencil has no root within the contour, a source piece the centre would read (within
+    //      R_m, nearer to it than to any other centre) at an offset |d| >= MK_EXPL_FRAC x rho (default 1/2; rho the nearest root of the pencil,
+    //      complex roots included) is registered at its exact exponent (reg_exact) and stepped there, instead of being re-expanded into the
+    //      centre's log moments.
+    //  Not built: divided differences for coalescing members (below eps_s nothing is split: the moments as before) and the local principal
+    //  part for a member at a root (the centres with a root inside their contour keep the moments).
+    const bool EXPL_ = [] { const char* e = std::getenv("MK_EXPLICIT"); return e && std::string(e) == "1"; }();
+    const double EXPL_FRAC_ = std::getenv("MK_EXPL_FRAC") ? std::atof(std::getenv("MK_EXPL_FRAC")) : 0.5;
+    const double EXPL_FIT_ = std::getenv("MK_EXPL_FIT") ? std::atof(std::getenv("MK_EXPL_FIT")) : 1e-3;
+    std::map<double, std::vector<std::pair<int, double>>> SPLIT_;    // kf(g) -> the (column, exact key) entries split off at g
+    static bool split_owned(const std::vector<std::pair<int, double>>& v, const Entry& en) {
+        if (en.t.isint) return false;
+        for (auto& p : v)
+            if (p.first == en.j && std::abs(p.second - en.t.v) < 1e-12) return true;
+        return false;
     }
     Vec galb(double g) { return project(k_.c, k_.out, g, 1, P_.gfam, P_.dE, P_.W, false); }   // K x nn of the kernel's current rows
     double maxabs(const Vec& v) {
@@ -401,6 +425,7 @@ class Engine {
     std::map<double, tn::StepState> steps_;
     std::vector<double> order_last_;
     std::vector<Entry> C_final_;
+    std::string gate_i_;                                            // research round 1136: gate (i) on the final series (JSON)
     std::vector<std::pair<std::string, Key>> fams_;
     std::vector<std::pair<std::string, Key>> gfams_;                // stage (ii) item 1: the registered gauge roots ('gauge lL')
     // stage (ii) item 4: the spurious members (storage member, label, cluster key), sorted -- their l = 0 conditions are fit equations
@@ -437,6 +462,11 @@ inline void Engine::run() {
     const double R0 = c_.R;
     const double EPS_S = c_.eps_s > 0 ? c_.eps_s
         : std::min(k_.c.Rm > 0 ? k_.c.Rm : 1.0, std::pow(1e-12 * k_.c.fact[K - 1] * K, 1.0 / K) / std::abs(std::log(c_.xmin)));
+    if (EXPL_ && k_.c.exact) {
+        k_.c.xmerge = EPS_S;                                        // research round 1136: the algebra's merge scale (mk_series canon)
+        std::printf("  [explicit] MK_EXPLICIT=1: explicit members at integer centres (fraction of rho %.2f, split fit %.1e); the algebra merges exact "
+                    "exponents within eps_s %.2e\n", EXPL_FRAC_, EXPL_FIT_, EPS_S);
+    }
     std::map<std::string, std::array<double, 3>> SPUR;            // 'spurious S' -> (root, storage member, cluster key)
     std::set<double> SPUR_SINGLE, ROUTED;                           // (kf keys)
     auto rkey = [&](double x) { double xi = std::nearbyint(x); return std::abs(x - xi) < 1e-9 ? Key{xi, true} : k_.c.xkey(x); };
@@ -1345,6 +1375,58 @@ inline void Engine::run() {
             if (rp_match) { rp_ = RpCap(); rp_.on = true; rp_.Cs = Cs; rp_.isint = isint; rp_.iscl = iscl; rp_.R = Rcur_; }
             k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " sources";
             k_.run(Cs, nullptr, c_.top);
+            if (EXPL_ && isint && !CL) {
+                // research round 1136 (B): the explicit members at this integer centre (see EXPL_ above)
+                if (!cache.count(g)) {
+                    Vec Ms0, Mc0;
+                    meff(k_, P_, Cs, g, c_.top, c_.meff_mode, c_.meff_h, c_.meff_chunk, Ms0, Mc0);
+                    cache[g] = {Ms0, Mc0};
+                    k_.run(Cs, nullptr, c_.top);                    // (meff's perturbed runs replaced the rows)
+                }
+                std::vector<int> iax;
+                {
+                    auto ac = ct::active(g, P_.kofs);
+                    for (int j = 0; j < NB; j++)
+                        if (ac[j]) iax.push_back(j);
+                }
+                Vec ev = cl::pencil_roots(cache[g].first, NB, iax, S_.rw, S_.cw);
+                double rho = 1e300;
+                for (auto& e : ev) rho = std::min(rho, std::abs(e));
+                if (rho < c_.R) {
+                    std::printf("    [explicit g %.0f] a root of the step pencil inside the contour (%.4f < R %.4f): the moments kept\n", g, rho, c_.R);
+                } else {
+                    const double rm = std::max(k_.c.Rm, 1e-9);
+                    std::map<double, double> cand;                  // exponent (rounded 1e-9) -> the largest piece magnitude
+                    for (int i = 0; i < P_.nn; i++) {
+                        const int f = P_.gfam[i];
+                        for (auto& kv : k_.out[f].d) {
+                            const double e = kv.first.v, sc = e - ROWOFF1[f] - P_.dE[i], d = sc - g;
+                            if (std::abs(d) <= 1e-9 || std::abs(d) >= rm || std::abs(d) < EXPL_FRAC_ * rho) continue;
+                            // the readout's own test (piece_at): nearer to g than to any registered centre or other integer
+                            const double Gr = ROWOFF1[f] + P_.dE[i] + g, de = e - Gr;
+                            bool near = false;
+                            for (double c0 : k_.c.cent)
+                                if (std::abs(c0 - e) < std::abs(de) - 1e-12 || std::abs(c0 - sc) < 1e-6) { near = true; break; }
+                            if (std::abs(e - Ctx::pyround(e)) < std::abs(de) - 1e-12) near = true;
+                            if (near) continue;
+                            const double r = std::nearbyint(sc * 1e9) / 1e9;
+                            cand[r] = std::max(cand.count(r) ? cand[r] : 0.0, fm::pmaxabs(kv.second));
+                        }
+                    }
+                    std::vector<Key> add;
+                    for (auto& kv : cand) {
+                        if (kv.second <= fm::ANNOUNCE_MIN) continue;
+                        Key kx = k_.c.reg_exact(kv.first);
+                        add.push_back(kx);
+                        std::printf("    [explicit g %.0f] source member at %.9f (offset %+.5f = %.3f rho, rho %.5f; magnitude %.3g): registered at %.9f\n",
+                                    g, kv.first, kv.first - g, std::abs(kv.first - g) / rho, rho, kv.second, kx.v);
+                    }
+                    if (!add.empty()) {
+                        Q.push(add);
+                        cache.erase(g);                             // (the operator re-built with the members read at their own centres)
+                    }
+                }
+            }
             Ser rows_pre[6];                                        // stage (ii): the stripped series' rows (the storage's sources, re-read)
             if (CL)
                 for (int f = 0; f < 6; f++) rows_pre[f] = k_.out[f];
@@ -2337,7 +2419,77 @@ inline void Engine::run() {
             if (rp_match && !offint_done) { rp_.Xg = Xg; rp_.Smax = Smax; step_hook(g); }
             if (!offint_done) {
                 J_.close(']');
+                if (EXPL_ && isint && !CL) {                        // research round 1136 (A): the previous split entries are replaced
+                    auto sp = SPLIT_.find(kf(g));
+                    if (sp != SPLIT_.end()) {
+                        std::vector<Entry> o;
+                        for (auto& en : C)
+                            if (!split_owned(sp->second, en)) o.push_back(en);
+                        C = std::move(o);
+                        SPLIT_.erase(sp);
+                    }
+                }
                 C = with_grade(k_.c, C, Xg, g, P_.kofs, S_.e1, Rcur_);
+                if (EXPL_ && isint && !CL) {
+                    // research round 1136 (A): one member at a real offset d in the stored moments -> stored at its exact key (see EXPL_ above)
+                    std::vector<int> at;                            // C's entries at this step's keys
+                    for (int j = 0; j < nn; j++) {
+                        Key t = ckey(k_.c, g + P_.kofs[j]);
+                        if (!(t.v >= 1)) continue;
+                        for (size_t q = 0; q < C.size(); q++)
+                            if (C[q].j == j && keq(C[q].t, t) && C[q].nb == 1) { at.push_back(int(q)); break; }
+                    }
+                    cd num = 0.0;
+                    double den = 0.0, n0 = 0.0, n1 = 0.0;
+                    for (int q : at) {
+                        const auto& m = C[q].m;
+                        n0 += std::norm(m[0]);
+                        for (int k = 1; k < K; k++) n1 += std::norm(m[k]);
+                        for (int k = 1; k + 1 < K; k++) { num += std::conj(m[k]) * m[k + 1]; den += std::norm(m[k]); }
+                    }
+                    const cd dz = den > 0 ? num / den : cd(0.0);
+                    double res = 0.0;
+                    for (int q : at) {
+                        const auto& m = C[q].m;
+                        cd p = 1.0;
+                        for (int k = 1; k < K; k++) { res += std::norm(m[k] - p * m[1]); p *= dz; }
+                    }
+                    res = n1 > 0 ? std::sqrt(res / n1) : 1.0;
+                    const double d = dz.real();
+                    // only where the step pencil has a non-integer root inside the contour (the near-resonant partner's centre): the member is
+                    // that root's, its exponent the stored moments' own (self-consistent over the passes; the pencil's root is the template's)
+                    double rin = 1e300;
+                    {
+                        std::vector<int> iax;
+                        for (int j = 0; j < NB; j++)
+                            if (act[j]) iax.push_back(j);
+                        for (auto& e : cl::pencil_roots(Ms, NB, iax, S_.rw, S_.cw))
+                            if (std::abs(e) >= EPS_S && std::abs(e) < Rcur_) rin = std::min(rin, std::abs(e));
+                    }
+                    const bool ok = K >= 3 && rin < 1e300 && n1 > 1e-20 * n0 && std::abs(dz.imag()) <= 1e-9 * std::abs(d) && res <= EXPL_FIT_ &&
+                                    std::abs(d) >= EPS_S;
+                    std::printf("    [explicit g %.0f] the stored moments as one member at %+.9f: k >= 1 fit residual %.2e (limit %.1e), |m_k>=1| / |m_0| %.2e, "
+                                "eps_s %.2e; a non-integer pencil root inside the contour %s -> %s\n", g, d, res, EXPL_FIT_, std::sqrt(n0 > 0 ? n1 / n0 : 0.0), EPS_S,
+                                rin < 1e300 ? ("at offset " + std::to_string(rin)).c_str() : "none", ok ? "split" : "kept");
+                    if (ok) {
+                        auto& rec = SPLIT_[kf(g)];
+                        const size_t n_at = at.size();
+                        for (size_t a = 0; a < n_at; a++) {
+                            const int jq = C[at[a]].j;
+                            const double tq = C[at[a]].t.v;
+                            const cd a1 = C[at[a]].m[1] / d;
+                            if (a1 == cd(0.0)) continue;
+                            std::vector<cd> mm(K, 0.0);
+                            mm[0] = a1;
+                            C[at[a]].m[0] -= a1;
+                            cd p = d;
+                            for (int k = 1; k < K; k++) { C[at[a]].m[k] -= p * a1; p *= d; }
+                            const Key tx = k_.c.canon(tq + d).first;      // (within eps_s of an interned exponent: that key)
+                            rec.emplace_back(jq, tx.v);
+                            C.push_back(Entry{jq, tx, 1, std::move(mm)});
+                        }
+                    }
+                }
                 k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " rows after";
                 k_.run(C, nullptr, c_.top);
                 Vec rb = galb(g);
@@ -2530,6 +2682,43 @@ inline void Engine::run() {
             npy_write(b + "_pieces.npy", pc.data(), "<c16", {long(ks.size()), K, k_.c.NF}, 16);
             std::ofstream(b + "_meta.txt") << (F[f].has_e ? std::to_string(F[f].e) : "None") << " " << Json::num(F[f].top) << "\n";
         }
+    }
+    // research round 1136: GATE (i) natively (n2a_nl.py 3738-3791) -- on the final series, every live gate row (glab: the stored rows at
+    // P <= edge, H_c@P0 and E_sh^th@P1 among them) at each aligned grade gdata + 1 .. gmax, moments 0 and 1, relative to moment 0 of the same
+    // rows on the series with its lattice-1 data x 1.5 (a non-solution).  Reported only (declog 'gate_i', the log, fit.json); MK_GATE_I=0 off
+    if (!(std::getenv("MK_GATE_I") && std::string(std::getenv("MK_GATE_I")) == "0") && !P_.gtfam.empty()) {
+        std::vector<Entry> Cp = C;
+        for (auto& en : Cp)
+            if (en.t.isint && en.t.v == 1.0)
+                for (auto& z : en.m) z *= 1.5;
+        const int ng = int(P_.gtfam.size());
+        std::vector<std::vector<double>> gi;
+        k_.run(C, nullptr, c_.top);
+        for (int g = c_.gdata + 1; g <= int(c_.gmax); g++) {
+            Vec Sg = project(k_.c, k_.out, double(g), 1, P_.gtfam, P_.gtdE, P_.Wg, true);
+            double a0 = 0.0, a1 = 0.0;
+            for (int q = 0; q < ng; q++)
+                if (P_.live[q]) { a0 = std::max(a0, std::abs(Sg[q])); if (K > 1) a1 = std::max(a1, std::abs(Sg[size_t(ng) + q])); }
+            gi.push_back({double(g), a0, a1});
+        }
+        k_.run(Cp, nullptr, c_.top);
+        std::string gs = "{", pl;
+        for (auto& v : gi) {
+            Vec Sp = project(k_.c, k_.out, v[0], 1, P_.gtfam, P_.gtdE, P_.Wg, true);
+            double sc = 0.0;
+            for (int q = 0; q < ng; q++)
+                if (P_.live[q]) sc = std::max(sc, std::abs(Sp[q]));
+            const double r0 = sc > 0 ? v[1] / sc : 0.0, r1 = sc > 0 ? v[2] / sc : 0.0;
+            gs += (gs.size() > 1 ? "," : "") + Json::str(std::to_string(int(v[0]))) + ":[" + Json::num(r0) + "," + Json::num(r1) + "]";
+            char b[64];
+            std::snprintf(b, sizeof b, " g%d %.0e/%.0e", int(v[0]), r0, r1);
+            pl += b;
+        }
+        gs += "}";
+        k_.run(C, nullptr, c_.top);                                 // (the rows restored)
+        gate_i_ = gs;
+        J_.kv("gate_i", gs);
+        std::printf("  gate (i) (live stored rows <= edge, moments 0 / 1, relative to the same rows on a non-solution):%s\n", pl.c_str());
     }
     J_.kv("cent_final", cent());
     J_.close('}');
@@ -3231,6 +3420,7 @@ inline void Engine::tangents(const TanOpt& T) {
         F.kv("base", Json::nums(base));
         F.kv("base_imag", Json::num(base_imag));
         F.kv("centres", Json::nums(cents));
+        if (!gate_i_.empty()) F.kv("gate_i", gate_i_);             // (research round 1136)
         F.kv("native", "true");
         F.close('}');
         std::ofstream(out_ + "/fit.json") << F.s.str();

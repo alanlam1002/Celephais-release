@@ -2720,10 +2720,45 @@ inline void Engine::run() {
         npy_write(out_ + "/series_isint.npy", isi.data(), "<i4", {long(isi.size())}, 4);
         npy_write(out_ + "/series_mom.npy", mom.data(), "<c16", {long(col.size()), K}, 16);
     }
+    // research round 1142 (H_4n): MK_ROWDUMP=1 -- reporting only: the pre-flow fields (fields_pre_<f>), and the six row series by exact key on the
+    // pre-flow series (rows_pre_<i>) and on the gauge-flowed fields (rows_gauge_<i>), each as fields_gauge_<f> is written (key, isint, pieces
+    // (key, K, NF), meta 'e top'); the row order H_c E_sigma L_K E_sh^r E_sh^th E_Q
+    const bool ROWDUMP = std::getenv("MK_ROWDUMP") && std::string(std::getenv("MK_ROWDUMP")) == "1";
+    auto dump_ser = [&](const Ser& Sx, const std::string& b) {
+        std::vector<double> ks;
+        std::vector<int> ii;
+        Vec pc;
+        for (auto& kv : Sx.d) {
+            ks.push_back(kv.first.v); ii.push_back(kv.first.isint);
+            pc.insert(pc.end(), kv.second.a.begin(), kv.second.a.begin() + size_t(K) * k_.c.NF);   // (batch copy 0)
+        }
+        npy_write(b + "_key.npy", ks.data(), "<f8", {long(ks.size())}, 8);
+        npy_write(b + "_isint.npy", ii.data(), "<i4", {long(ii.size())}, 4);
+        npy_write(b + "_pieces.npy", pc.data(), "<c16", {long(ks.size()), K, k_.c.NF}, 16);
+        std::ofstream(b + "_meta.txt") << (Sx.has_e ? std::to_string(Sx.e) : "None") << " " << Json::num(Sx.top) << "\n";
+    };
+    if (ROWDUMP) {
+        k_.run(C, nullptr, c_.top);
+        for (int f = 0; f < 6; f++) dump_ser(k_.out[f], out_ + "/rows_pre_" + std::to_string(f));
+        std::printf("  [rowdump] the rows on the pre-flow series written (rows_pre_<0..5>)\n");
+    }
     if (!c_.gauge.empty()) {
         Ser F[6];
         k_.fields(C, c_.top, F);
+        if (ROWDUMP) {
+            static const char* FNp[6] = {"psi2", "Phb", "qf", "br", "bt", "Qb"};
+            for (int f = 0; f < 6; f++) dump_ser(F[f], out_ + "/fields_pre_" + FNp[f]);
+        }
         fm::lie_flow(k_.c, F, c_.gauge, c_.J, S_.TH, c_.gauge_steps);
+        if (ROWDUMP) {
+            for (int f = 0; f < 6; f++) k_.Fin[f] = F[f];
+            k_.use_fin = true;
+            k_.run(C, nullptr, c_.top);
+            k_.use_fin = false;
+            for (int f = 0; f < 6; f++) dump_ser(k_.out[f], out_ + "/rows_gauge_" + std::to_string(f));
+            k_.run(C, nullptr, c_.top);
+            std::printf("  [rowdump] the pre-flow fields and the rows on the gauge-flowed fields written (fields_pre_<f>, rows_gauge_<0..5>)\n");
+        }
         static const char* FN[6] = {"psi2", "Phb", "qf", "br", "bt", "Qb"};
         for (int f = 0; f < 6; f++) {
             std::vector<double> ks;

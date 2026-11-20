@@ -304,9 +304,10 @@ class Engine {
         return o;
     }
     // research round 1136 (spec section 56): EXPLICIT MEMBERS at integer centres, MK_EXPLICIT=1 (default off: the production engine unchanged).
-    //  (A) the split: after an integer step whose pencil has a non-integer root inside its contour and whose stored moments are ONE member at
-    //      a real offset d besides the integer (moments m >= 1 equal to d^(m-1) m_1 to MK_EXPL_FIT, default 1e-3 -- what does not fit stays in
-    //      the moments; |d| >= the coalescence scale eps_s), that member is stored at its exact key t + d (moment 0
+    //  (A) the split (round 1138, spec section 57): the near-resonant partner at its Sturm-Liouville exponent sigma_2 (lapse_sl_sigma at l = 2
+    //      on the forward's cylinder; fixed for the forward), its towers sigma_2 + k registered at exact keys and stepped every pass; after the
+    //      integer step whose contour holds sigma_2, each column's member at d = sigma_2 - g (amplitude a_1 by least squares over the moments
+    //      k >= 1; what does not fit stays in the moments) is stored at its exact key t + d (moment 0
     //      a_1 = m_1 / d), the integer entry keeping m_0 - a_1 and the remainder m_k - d^k a_1; the split entries are the step's own (stripped
     //      with it, replaced at its next storage).  At 0.30 / 0.40 this is the near-resonant partner at aligned 2.
     //  (B) the readout: at an integer centre whose step pencil has no root within the contour, a source piece the centre would read (within
@@ -319,6 +320,8 @@ class Engine {
     const double EXPL_FRAC_ = std::getenv("MK_EXPL_FRAC") ? std::atof(std::getenv("MK_EXPL_FRAC")) : 0.5;
     const double EXPL_FIT_ = std::getenv("MK_EXPL_FIT") ? std::atof(std::getenv("MK_EXPL_FIT")) : 1e-3;
     std::map<double, std::vector<std::pair<int, double>>> SPLIT_;    // kf(g) -> the (column, exact key) entries split off at g
+    double SIGMA2_ = std::nan("");                                  // round 1138: the partner's Sturm-Liouville exponent (fixed for the forward)
+    std::vector<Key> EXPL_TOW_;                                     // round 1138: its towers sigma_2 + k (exact keys)
     static bool split_owned(const std::vector<std::pair<int, double>>& v, const Entry& en) {
         if (en.t.isint) return false;
         for (auto& p : v)
@@ -464,8 +467,30 @@ inline void Engine::run() {
         : std::min(k_.c.Rm > 0 ? k_.c.Rm : 1.0, std::pow(1e-12 * k_.c.fact[K - 1] * K, 1.0 / K) / std::abs(std::log(c_.xmin)));
     if (EXPL_ && k_.c.exact) {
         k_.c.xmerge = EPS_S;                                        // research round 1136: the algebra's merge scale (mk_series canon)
-        std::printf("  [explicit] MK_EXPLICIT=1: explicit members at integer centres (fraction of rho %.2f, split fit %.1e); the algebra merges exact "
-                    "exponents within eps_s %.2e\n", EXPL_FRAC_, EXPL_FIT_, EPS_S);
+        std::printf("  [explicit] MK_EXPLICIT=1: explicit members at integer centres (fraction of rho %.2f); the algebra merges exact "
+                    "exponents within eps_s %.2e\n", EXPL_FRAC_, EPS_S);
+        // research round 1138 (spec section 57): the partner at its Sturm-Liouville exponent on THIS cylinder (the registry's lapse_sl_sigma at
+        // l = 2; the cylinder's cos 2j theta modes from its grid values), fixed for the forward (the J step); MK_EXPL_SIGMA2 overrides
+        {
+            const int NFc = int(k_.cyl.U.size());
+            std::vector<double> u(NFc / 4, 0.0), P(NFc / 4, 0.0);      // (j < NF / 4: cos 2j theta and cos 2(NF / 2 - j) theta alias on the grid)
+            for (int j = 0; j < NFc / 4; j++)
+                for (int q = 0; q < NFc; q++) {
+                    const double w = (j ? 2.0 : 1.0) / NFc * std::cos(2.0 * j * S_.TH[q]);
+                    u[j] += w * k_.cyl.U[q];
+                    P[j] += w * k_.cyl.P[q];
+                }
+            const auto sl = fm::lapse_sl_sigma(u, P, k_.c.n, 2);
+            const double s2c = sl.count(2) ? sl.at(2) : std::nan("");
+            SIGMA2_ = std::getenv("MK_EXPL_SIGMA2") ? std::atof(std::getenv("MK_EXPL_SIGMA2")) : s2c;
+            std::printf("  [explicit] the partner's Sturm-Liouville exponent on this cylinder %.12f%s; used %.12f; its towers at exact keys:", s2c,
+                        std::getenv("MK_EXPL_SIGMA2") ? " (MK_EXPL_SIGMA2 overrides)" : "", SIGMA2_);
+            for (int k = 1; SIGMA2_ + k <= c_.gmax + 1e-9; k++) {
+                EXPL_TOW_.push_back(k_.c.reg_exact(SIGMA2_ + k));
+                std::printf(" %.9f", EXPL_TOW_.back().v);
+            }
+            std::printf("\n");
+        }
     }
     std::map<std::string, std::array<double, 3>> SPUR;            // 'spurious S' -> (root, storage member, cluster key)
     std::set<double> SPUR_SINGLE, ROUTED;                           // (kf keys)
@@ -1115,6 +1140,7 @@ inline void Engine::run() {
         for (int g = c_.gdata + 1; g <= c_.gmax; g++) lat.push_back(Key{double(g), true});
         Q.push(lat);
         Q.push(towers_all());
+        if (EXPL_) Q.push(EXPL_TOW_);                                 // (round 1138: the partner's towers, every pass)
         if (CL) {
             Q.push(fz_pending());
             PS_ = ps;
@@ -1405,9 +1431,9 @@ inline void Engine::run() {
                             // the readout's own test (piece_at): nearer to g than to any registered centre or other integer
                             const double Gr = ROWOFF1[f] + P_.dE[i] + g, de = e - Gr;
                             bool near = false;
-                            for (double c0 : k_.c.cent)
-                                if (std::abs(c0 - e) < std::abs(de) - 1e-12 || std::abs(c0 - sc) < 1e-6) { near = true; break; }
-                            if (std::abs(e - Ctx::pyround(e)) < std::abs(de) - 1e-12) near = true;
+                            for (double c0 : k_.c.cent)                     // (aligned exponents, as piece_at under the switch)
+                                if (std::abs(c0 - sc) < std::abs(de) - 1e-12 || std::abs(c0 - sc) < 1e-6) { near = true; break; }
+                            if (std::abs(sc - Ctx::pyround(sc)) < std::abs(de) - 1e-12) near = true;
                             if (near) continue;
                             const double r = std::nearbyint(sc * 1e9) / 1e9;
                             cand[r] = std::max(cand.count(r) ? cand[r] : 0.0, fm::pmaxabs(kv.second));
@@ -1510,6 +1536,38 @@ inline void Engine::run() {
                                                          std::to_string(std::abs(ev[io])) + " from it) -- the pair must be clustered (not on this route)");
                             std::printf("    [own contour %s %.6f] own root %+.2e; the nearest other root %.6f (distance %.4f) -> contour radius %.4f (was %.4f)\n",
                                         flab.c_str(), g, std::abs(ev[io]), g + dr, dn, dn / 2, Rcur_);
+                            Rcur_ = dn / 2;
+                            if (rp_match) rp_.R = Rcur_;
+                        }
+                    }
+                    // research round 1138: an explicit member (MK_EXPLICIT; an off-integer centre that is no family and no family's tower) is a
+                    // SOURCE pole, not a root -- its contour excludes every root of the step pencil (radius min(R, half the nearest root's distance)),
+                    // so its step is the particular solution M(g + d)^-1 S at its own exponent (residue rank 0).  A member within 1e-3 of a root would
+                    // need the local principal part (not built): an error
+                    bool famtow = !flab.empty();
+                    if (EXPL_ && !famtow) {
+                        for (auto* fv : {&fams, &gfams})                      // (a family's exponent shifted by an integer, below too: production's)
+                            for (auto& f : *fv)
+                                for (int k_s = -3; k_s <= 3; k_s++) famtow = famtow || std::abs(f.second.v + k_s - g) < 1e-9;
+                        for (auto& t : towers_all()) famtow = famtow || std::abs(t.v - g) < 1e-9;
+                    }
+                    if (EXPL_ && !famtow) {
+                        std::vector<int> iax;
+                        {
+                            auto ac = ct::active(g, P_.kofs);
+                            for (int j = 0; j < NB; j++)
+                                if (ac[j]) iax.push_back(j);
+                        }
+                        Vec ev = cl::pencil_roots(Ms, NB, iax, S_.rw, S_.cw);
+                        double dn = 1e300, dr = 0.0;
+                        for (auto& e : ev)
+                            if (std::abs(e) < dn) { dn = std::abs(e); dr = e.real(); }
+                        if (dn < 1e-3)
+                            throw std::runtime_error("explicit member at " + std::to_string(g) + ": a root of its pencil " + std::to_string(dn) +
+                                                     " away (real part " + std::to_string(g + dr) + ") -- the local principal part is not built");
+                        if (dn / 2 < Rcur_) {
+                            std::printf("    [explicit member %.6f] the nearest root of its pencil %.6f (distance %.4f): contour radius %.4f (was %.4f)\n",
+                                        g, g + dr, dn, dn / 2, Rcur_);
                             Rcur_ = dn / 2;
                             if (rp_match) rp_.R = Rcur_;
                         }
@@ -2447,44 +2505,43 @@ inline void Engine::run() {
                         for (int k = 1; k < K; k++) n1 += std::norm(m[k]);
                         for (int k = 1; k + 1 < K; k++) { num += std::conj(m[k]) * m[k + 1]; den += std::norm(m[k]); }
                     }
-                    const cd dz = den > 0 ? num / den : cd(0.0);
+                    const cd dz = den > 0 ? num / den : cd(0.0);        // (the moments' own offset: logged beside the fixed one)
+                    // research round 1138 (spec section 57): the member's offset is FIXED at the partner's Sturm-Liouville exponent, d = sigma_2 - g
+                    // (only at the centre whose contour holds sigma_2); each column's amplitude a_1 by least squares over the moments k >= 1
+                    const double d = SIGMA2_ - g;
+                    const bool here = std::isfinite(SIGMA2_) && std::abs(d) < Rcur_ && std::abs(d) >= EPS_S;
                     double res = 0.0;
-                    for (int q : at) {
-                        const auto& m = C[q].m;
-                        cd p = 1.0;
-                        for (int k = 1; k < K; k++) { res += std::norm(m[k] - p * m[1]); p *= dz; }
+                    std::vector<cd> a1s(at.size(), 0.0);
+                    if (here) {
+                        double dd = 0.0;
+                        for (int k = 1; k < K; k++) dd += std::pow(d, 2 * k);
+                        for (size_t a = 0; a < at.size(); a++) {
+                            const auto& m = C[at[a]].m;
+                            cd s_ = 0.0;
+                            for (int k = 1; k < K; k++) s_ += std::pow(d, k) * m[k];
+                            a1s[a] = s_ / dd;
+                            for (int k = 1; k < K; k++) res += std::norm(m[k] - std::pow(d, k) * a1s[a]);
+                        }
                     }
                     res = n1 > 0 ? std::sqrt(res / n1) : 1.0;
-                    const double d = dz.real();
-                    // only where the step pencil has a non-integer root inside the contour (the near-resonant partner's centre): the member is
-                    // that root's, its exponent the stored moments' own (self-consistent over the passes; the pencil's root is the template's)
-                    double rin = 1e300;
-                    {
-                        std::vector<int> iax;
-                        for (int j = 0; j < NB; j++)
-                            if (act[j]) iax.push_back(j);
-                        for (auto& e : cl::pencil_roots(Ms, NB, iax, S_.rw, S_.cw))
-                            if (std::abs(e) >= EPS_S && std::abs(e) < Rcur_) rin = std::min(rin, std::abs(e));
-                    }
-                    const bool ok = K >= 3 && rin < 1e300 && n1 > 1e-20 * n0 && std::abs(dz.imag()) <= 1e-9 * std::abs(d) && res <= EXPL_FIT_ &&
-                                    std::abs(d) >= EPS_S;
-                    std::printf("    [explicit g %.0f] the stored moments as one member at %+.9f: k >= 1 fit residual %.2e (limit %.1e), |m_k>=1| / |m_0| %.2e, "
-                                "eps_s %.2e; a non-integer pencil root inside the contour %s -> %s\n", g, d, res, EXPL_FIT_, std::sqrt(n0 > 0 ? n1 / n0 : 0.0), EPS_S,
-                                rin < 1e300 ? ("at offset " + std::to_string(rin)).c_str() : "none", ok ? "split" : "kept");
+                    const bool ok = K >= 3 && here && n1 > 1e-20 * n0;
+                    std::printf("    [explicit g %.0f] the stored moments' own offset %+.9f; the partner fixed at sigma_2 %.10f (offset %+.9f, %s): k >= 1 "
+                                "residual after its member %.2e, |m_k>=1| / |m_0| %.2e -> %s\n", g, dz.real(), SIGMA2_, d, here ? "inside the contour" : "not here",
+                                res, std::sqrt(n0 > 0 ? n1 / n0 : 0.0), ok ? "split" : "kept");
                     if (ok) {
                         auto& rec = SPLIT_[kf(g)];
                         const size_t n_at = at.size();
                         for (size_t a = 0; a < n_at; a++) {
                             const int jq = C[at[a]].j;
                             const double tq = C[at[a]].t.v;
-                            const cd a1 = C[at[a]].m[1] / d;
+                            const cd a1 = a1s[a];
                             if (a1 == cd(0.0)) continue;
                             std::vector<cd> mm(K, 0.0);
                             mm[0] = a1;
                             C[at[a]].m[0] -= a1;
                             cd p = d;
                             for (int k = 1; k < K; k++) { C[at[a]].m[k] -= p * a1; p *= d; }
-                            const Key tx = k_.c.canon(tq + d).first;      // (within eps_s of an interned exponent: that key)
+                            const Key tx = k_.c.xkey(tq + d);              // (the exact key sigma_2 + kofs)
                             rec.emplace_back(jq, tx.v);
                             C.push_back(Entry{jq, tx, 1, std::move(mm)});
                         }

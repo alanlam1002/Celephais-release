@@ -36,7 +36,10 @@ inline Key ckey(Ctx& c, double x) {
 // the piece of a row family at grade Gr (n2a_nl.piece_at): nullptr when absent (zeros); beyond the family's validity an error.  Exact merge
 // (stage (i)): the pieces within Rm of Gr and nearer to it than to any integer or registered centre, each re-expanded once from its exact
 // exponent, summed in the series' order (into buf)
-inline const Piece* piece_at(Ctx& c, const Ser& s, double Gr, Piece& buf) {
+// research round 1138 (MK_EXPLICIT, c.xmerge > 0): off = the row's offset (Gr - the aligned grade); the nearer-centre test then compares ALIGNED
+// exponents (e - off) with the registered (aligned) centres and the integers -- with explicit members 0.05 from an integer, the row-exponent
+// test split a member's content between the integer's readout and the member's own by the row's offset.  Off (xmerge 0): as before, bitwise
+inline const Piece* piece_at(Ctx& c, const Ser& s, double Gr, Piece& buf, double off = std::nan("")) {
     if (Gr > s.top) throw std::runtime_error("mk: grade beyond validity");
     if (!c.exact) {
         Key k = ckey(c, Gr);
@@ -49,10 +52,11 @@ inline const Piece* piece_at(Ctx& c, const Ser& s, double Gr, Piece& buf) {
         double e = kv.first.v, de = e - Gr;
         if (std::abs(de) >= rm) continue;
         bool near = false;
+        const double ea = (c.xmerge > 0 && std::isfinite(off)) ? e - off : e;   // (round 1138: aligned under the switch)
         for (double c_ : c.cent)
-            if (std::abs(c_ - e) < std::abs(de) - 1e-12) { near = true; break; }
-        double gi = Ctx::pyround(e);
-        if (std::abs(e - gi) < std::abs(de) - 1e-12) near = true;
+            if (std::abs(c_ - ea) < std::abs(de) - 1e-12) { near = true; break; }
+        double gi = Ctx::pyround(ea);
+        if (std::abs(ea - gi) < std::abs(de) - 1e-12) near = true;
         if (near) continue;
         if (!any) { buf = std::abs(de) < 1e-14 ? kv.second : c.shift(kv.second, de); any = true; }
         else buf = c.padd(buf, std::abs(de) < 1e-14 ? kv.second : c.shift(kv.second, de));
@@ -131,7 +135,7 @@ inline std::vector<cd> project(Ctx& c, const Ser rows[6], double g, int B, const
     for (int i = 0; i < nr; i++) {
         if (absent99 && lev[i] >= 99) continue;
         Piece buf_;
-        const Piece* p = piece_at(c, rows[fam[i]], ROWOFF1[fam[i]] + lev[i] + g, buf_);
+        const Piece* p = piece_at(c, rows[fam[i]], ROWOFF1[fam[i]] + lev[i] + g, buf_, double(ROWOFF1[fam[i]] + lev[i]));
         if (!p) continue;
         const cd* w = &W[size_t(i) * NF];
         for (int b = 0; b < B; b++)

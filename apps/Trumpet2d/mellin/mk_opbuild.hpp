@@ -177,7 +177,7 @@ inline Op build(Kernel& kr, int nn, const std::vector<int>& rf, const std::vecto
     const double cf[3] = {1.0, 2.0, -1.0};
     for (int f = 0; f < 3; f++) {
         Piece buf;
-        const Piece* p = piece_at(c, kr.out[f], ROWOFF1[f] + 0.0, buf);
+        const Piece* p = piece_at(c, kr.out[f], ROWOFF1[f] + 0.0, buf, double(ROWOFF1[f]));
         if (!p) continue;
         for (int q = 0; q < NF; q++) ephi[q] += cf[f] * p->a[q];
     }

@@ -57,6 +57,10 @@ inline const Piece* piece_at(Ctx& c, const Ser& s, double Gr, Piece& buf, double
             if (std::abs(c_ - ea) < std::abs(de) - 1e-12) { near = true; break; }
         double gi = Ctx::pyround(ea);
         if (std::abs(ea - gi) < std::abs(de) - 1e-12) near = true;
+        if (!near && c.tie_int && std::isfinite(off)) {             // (round 1145: ties to the integer when reading at an off-integer centre)
+            const double ga = Gr - off;
+            if (std::abs(ga - Ctx::pyround(ga)) > 1e-9 && std::abs(ea - gi) <= std::abs(de) + 1e-7) near = true;
+        }
         if (near) continue;
         if (!any) { buf = std::abs(de) < 1e-14 ? kv.second : c.shift(kv.second, de); any = true; }
         else buf = c.padd(buf, std::abs(de) < 1e-14 ? kv.second : c.shift(kv.second, de));

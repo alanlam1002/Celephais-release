@@ -300,6 +300,14 @@ class Engine {
             if (t.v >= 1 && keq(en.t, t)) continue;
             if (sp != SPLIT_.end() && split_owned(sp->second, en)) continue;   // (round 1136: the members split off at g are g's own)
             o.push_back(en);
+            if (EXPL_SPUR_ && !en.t.isint) {                        // (round 1143: a spurious root's entry without g's own contribution)
+                auto rk = ROOTKEY_.find({en.j, en.t.v});
+                if (rk != ROOTKEY_.end()) {
+                    auto& ow = ROOTX_[rk->second];
+                    auto me = ow.find(kf(g));
+                    if (me != ow.end()) o.back().m[0] -= me->second[en.j];
+                }
+            }
         }
         return o;
     }
@@ -322,6 +330,30 @@ class Engine {
     std::map<double, std::vector<std::pair<int, double>>> SPLIT_;    // kf(g) -> the (column, exact key) entries split off at g
     double SIGMA2_ = std::nan("");                                  // round 1138: the partner's Sturm-Liouville exponent (fixed for the forward)
     std::vector<Key> EXPL_TOW_;                                     // round 1138: its towers sigma_2 + k (exact keys)
+    // research round 1143 (spec section 59, F-K'''), under MK_EXPLICIT only:
+    //  MK_EXPL_NOMERGE=1 -- each partner member (a source exponent b + j delta, b an integer or a family's key shifted by an integer, delta =
+    //      sigma_2 - 2) its own centre: the announcement registers it at its exact exponent (reg_exact) instead of merging it into a
+    //      neighbouring centre within R_m (the Taylor shift that left 4 + 2 delta without a centre, round 1142); members within R_m of an
+    //      integer stay with (B).
+    //  MK_EXPL_SPUR=1 -- round 1142's clause (spec section 58): an explicit member whose step pencil has a SPURIOUS real root (a root of the
+    //      square selection; the tall operator [Ms; Mc], rows equilibrated, regular there) within MK_EXPL_COAL (default R) takes the cluster
+    //      route's local principal parts (spec section 29): its own pole's part as before (the contour excluding the root) and, at the root's
+    //      exact exponent, the Keldysh part of the step's source (-v u^H S(z_r) / u^H M'(z_r) v; S the defect-corrected source's principal
+    //      part) plus an amplitude 'spurious @<member>' (set_offl, an N3b parameter, default 0) along the root's null vector v (max |v_j| = 1,
+    //      real); stored as the step's own entries (stripped with it, replaced at its next storage); the root registered (so no other readout
+    //      re-expands it) but never stepped; its l = 0 conditions are outputs 'eq scond' (the host rule: fit equations).  The root is fixed for
+    //      the forward at its first determination; MK_EXPL_SPUR_AT='member:root,...' fixes it (the fd runs).
+    const bool EXPL_NOMERGE_ = EXPL_ && std::getenv("MK_EXPL_NOMERGE") && std::string(std::getenv("MK_EXPL_NOMERGE")) == "1";
+    const bool EXPL_SPUR_ = EXPL_ && std::getenv("MK_EXPL_SPUR") && std::string(std::getenv("MK_EXPL_SPUR")) == "1";
+    const double EXPL_COAL_ = std::getenv("MK_EXPL_COAL") ? std::atof(std::getenv("MK_EXPL_COAL")) : -1.0;
+    // research round 1145: MK_EXPL_GMAX=G -- explicit members only up to integer grade G (the readout (B), the partner's towers, the no-merge
+    // registrations and the members' own contours at aligned exponents <= G + 1/2); above it production's moments (default: every grade)
+    const double EXPL_GMAX_ = std::getenv("MK_EXPL_GMAX") ? std::atof(std::getenv("MK_EXPL_GMAX")) : 1e300;
+    std::map<double, double> SPURX_;                                // kf(member) -> its spurious root (fixed for the forward)
+    std::map<double, double> SPURX_AT_;                             // MK_EXPL_SPUR_AT
+    std::vector<std::tuple<double, std::string, double>> spurx_r_;  // (root, label, member): the 'eq scond' outputs
+    std::map<double, std::map<double, Vec>> ROOTX_;                 // root -> (kf(member) -> its contribution per column): a root's content is
+    std::map<std::pair<int, double>, double> ROOTKEY_;              // the SUM over the members whose contours reach it; (column, key) -> root
     static bool split_owned(const std::vector<std::pair<int, double>>& v, const Entry& en) {
         if (en.t.isint) return false;
         for (auto& p : v)
@@ -460,6 +492,21 @@ inline void Engine::run() {
         t.insert(t.end(), t2.begin(), t2.end());
         return t;
     };
+    auto partner_member = [&](double x) {                           // research round 1143: x = b + j delta (MK_EXPL_NOMERGE)
+        if (!std::isfinite(SIGMA2_)) return false;
+        const double dl = SIGMA2_ - 2.0;
+        if (!(dl > 1e-6)) return false;
+        for (int j = 1; j * dl < 1.0 + 1e-9; j++) {
+            const double b = x - j * dl;
+            if (std::abs(b - std::nearbyint(b)) < 1e-6) return true;
+            for (auto* fv : {&fams, &gfams})
+                for (auto& f : *fv) {
+                    const double y = b - f.second.v;
+                    if (std::abs(y - std::nearbyint(y)) < 1e-6) return true;
+                }
+        }
+        return false;
+    };
     // ---- stage (ii) port, items 2-3 (n2a_nl N2A_CLUSTER=1: spec sections 23-32) ----
     const bool CL = c_.cluster && k_.c.exact && k_.c.Rm > 0;
     const double R0 = c_.R;
@@ -485,11 +532,32 @@ inline void Engine::run() {
             SIGMA2_ = std::getenv("MK_EXPL_SIGMA2") ? std::atof(std::getenv("MK_EXPL_SIGMA2")) : s2c;
             std::printf("  [explicit] the partner's Sturm-Liouville exponent on this cylinder %.12f%s; used %.12f; its towers at exact keys:", s2c,
                         std::getenv("MK_EXPL_SIGMA2") ? " (MK_EXPL_SIGMA2 overrides)" : "", SIGMA2_);
-            for (int k = 1; SIGMA2_ + k <= c_.gmax + 1e-9; k++) {
+            for (int k = 1; SIGMA2_ + k <= std::min(double(c_.gmax), EXPL_GMAX_ + 0.5) + 1e-9; k++) {
                 EXPL_TOW_.push_back(k_.c.reg_exact(SIGMA2_ + k));
                 std::printf(" %.9f", EXPL_TOW_.back().v);
             }
             std::printf("\n");
+        }
+        if (EXPL_NOMERGE_) {
+            k_.c.tie_int = true;
+            std::printf("  [explicit] MK_EXPL_NOMERGE=1: each partner member its own centre (no merging into a neighbour); a piece equidistant from an integer "
+                        "and an off-integer centre is read by the integer\n");
+        }
+        if (EXPL_SPUR_) {
+            if (const char* e = std::getenv("MK_EXPL_SPUR_AT")) {
+                std::string t = e;
+                size_t a0 = 0;
+                while (a0 < t.size()) {
+                    size_t b = t.find(',', a0);
+                    if (b == std::string::npos) b = t.size();
+                    std::string it = t.substr(a0, b - a0);
+                    size_t q = it.find(':');
+                    if (q != std::string::npos) SPURX_AT_[kf(std::stod(it.substr(0, q)))] = std::stod(it.substr(q + 1));
+                    a0 = b + 1;
+                }
+            }
+            std::printf("  [explicit] MK_EXPL_SPUR=1: a member within %.4f of a spurious root takes the local principal parts (%d roots fixed by MK_EXPL_SPUR_AT)\n",
+                        EXPL_COAL_ > 0 ? EXPL_COAL_ : c_.R, int(SPURX_AT_.size()));
         }
     }
     std::map<std::string, std::array<double, 3>> SPUR;            // 'spurious S' -> (root, storage member, cluster key)
@@ -1153,6 +1221,11 @@ inline void Engine::run() {
             AF_STEP++;
             double g = gk.v;
             bool isint = gk.isint;
+            if (EXPL_SPUR_ && !isint) {                             // research round 1143: a spurious root stored by its member is never stepped
+                bool sr_ = false;
+                for (auto& kv : SPURX_) sr_ = sr_ || std::abs(kv.second - g) < 1e-9;
+                if (sr_) continue;
+            }
             if (k_.c.gauge_reg && !isint) {                         // spec section 26: a tower moved with its family (no longer registered)
                 bool reg_ = false;
                 for (double c_ : k_.c.cent)
@@ -1401,7 +1474,7 @@ inline void Engine::run() {
             if (rp_match) { rp_ = RpCap(); rp_.on = true; rp_.Cs = Cs; rp_.isint = isint; rp_.iscl = iscl; rp_.R = Rcur_; }
             k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " sources";
             k_.run(Cs, nullptr, c_.top);
-            if (EXPL_ && isint && !CL) {
+            if (EXPL_ && isint && !CL && g <= EXPL_GMAX_ + 1e-9) {
                 // research round 1136 (B): the explicit members at this integer centre (see EXPL_ above)
                 if (!cache.count(g)) {
                     Vec Ms0, Mc0;
@@ -1545,6 +1618,7 @@ inline void Engine::run() {
                     // so its step is the particular solution M(g + d)^-1 S at its own exponent (residue rank 0).  A member within 1e-3 of a root would
                     // need the local principal part (not built): an error
                     bool famtow = !flab.empty();
+                    if (EXPL_ && !famtow && g > EXPL_GMAX_ + 0.5) famtow = true;   // (round 1145: above MK_EXPL_GMAX production's contour)
                     if (EXPL_ && !famtow) {
                         for (auto* fv : {&fams, &gfams})                      // (a family's exponent shifted by an integer, below too: production's)
                             for (auto& f : *fv)
@@ -1562,6 +1636,64 @@ inline void Engine::run() {
                         double dn = 1e300, dr = 0.0;
                         for (auto& e : ev)
                             if (std::abs(e) < dn) { dn = std::abs(e); dr = e.real(); }
+                        if (EXPL_SPUR_ && !SPURX_.count(kf(g))) {
+                            // research round 1143 (round 1142's clause): the nearest real root within the coalescence scale -- spurious iff the
+                            // tall operator [Ms; Mc] (rows equilibrated, active columns) is regular there while the square one is not
+                            const double coal = EXPL_COAL_ > 0 ? EXPL_COAL_ : c_.R;
+                            std::vector<cd> sv_(ev.begin(), ev.end());
+                            std::sort(sv_.begin(), sv_.end(), [](cd a_, cd b_) { return std::abs(a_) < std::abs(b_); });
+                            const int na_ = int(iax.size());
+                            auto opat = [&](const Vec& A3, int nr, double z, Vec& o_) {
+                                for (int r_ = 0; r_ < nr; r_++) {
+                                    double nrm = 0.0;
+                                    for (int a_ = 0; a_ < na_; a_++) {
+                                        const size_t i_ = size_t(r_) * NB + iax[a_];
+                                        const cd v_ = A3[i_] + z * A3[size_t(nr) * NB + i_] + z * z * A3[2 * size_t(nr) * NB + i_];
+                                        o_.push_back(v_);
+                                        nrm += std::norm(v_);
+                                    }
+                                    nrm = std::sqrt(nrm);
+                                    if (nrm > 0)
+                                        for (int a_ = 0; a_ < na_; a_++) o_[o_.size() - na_ + a_] /= nrm;
+                                }
+                            };
+                            auto at_ = SPURX_AT_.find(kf(g));
+                            for (auto& e : sv_) {
+                                if (std::abs(e) >= coal) break;
+                                if (std::abs(e.imag()) > 1e-6 * std::max(1.0, std::abs(e))) continue;
+                                const double zr = at_ != SPURX_AT_.end() ? at_->second - g : e.real();
+                                Vec Aq, At;
+                                opat(Ms, NB, zr, Aq);
+                                At = Aq;
+                                opat(Mc, nc, zr, At);
+                                std::vector<double> sq_, st_;
+                                la::svd(Aq, NB, na_, sq_);
+                                la::svd(At, NB + nc, na_, st_);
+                                const double rq = sq_.back() / sq_[0], rt = st_.back() / st_[0];
+                                // genuine by IDENTITY (spec section 31): a registered family's or gauge root's key, or an integer, within 1e-3
+                                // (the equilibrated tall operator reads ~5e-8 at the genuine gauge l8 / lapse l8 roots as at the spurious
+                                // 6.1812 -- its floor, spec section 30 -- so its sigma_min is reported, not used)
+                                std::string gid_;
+                                const double ex_ = g + zr;
+                                if (std::abs(ex_ - std::nearbyint(ex_)) < 1e-3) gid_ = "integer";
+                                for (auto* fv : {&fams, &gfams})
+                                    for (auto& f : *fv)
+                                        if (std::abs(f.second.v - ex_) < 1e-3) gid_ = f.first;
+                                if (std::isfinite(SIGMA2_) && std::abs(ex_ - SIGMA2_) < 1e-2) gid_ = "the partner";   // (the single-grade pencil's 2.049911, round 1136)
+                                for (int L_ = 2; L_ <= 24; L_ += 2)             // (the gauge roots L / n, registered or not)
+                                    if (std::abs(ex_ - L_ / k_.c.n) < 1e-3) gid_ = "gauge l" + std::to_string(L_);
+                                const bool spur = gid_.empty();
+                                std::printf("    [explicit member %.6f] a real root of its pencil %.9f (distance %.4f < %.4f%s): sigma_min / sigma_max square %.2e, tall %.2e "
+                                            "-> %s\n", g, g + zr, std::abs(zr), coal, at_ != SPURX_AT_.end() ? "; MK_EXPL_SPUR_AT" : "", rq, rt,
+                                            spur ? "SPURIOUS (no registered root there): the local principal parts (the root stored, its amplitude a parameter)"
+                                                 : ("genuine (" + gid_ + "): the contour excludes it").c_str());
+                                if (spur) {
+                                    SPURX_[kf(g)] = g + zr;
+                                    k_.c.reg_exact(g + zr);                 // (registered: no other readout re-expands it; never stepped)
+                                }
+                                break;
+                            }
+                        }
                         if (dn < 1e-3)
                             throw std::runtime_error("explicit member at " + std::to_string(g) + ": a root of its pencil " + std::to_string(dn) +
                                                      " away (real part " + std::to_string(g + dr) + ") -- the local principal part is not built");
@@ -1570,6 +1702,36 @@ inline void Engine::run() {
                                         g, g + dr, dn, dn / 2, Rcur_);
                             Rcur_ = dn / 2;
                             if (rp_match) rp_.R = Rcur_;
+                        }
+                        // research round 1145 (REVIEW_2 F1): the source pieces this member's readout takes (within R_m, no registered centre
+                        // nearer, aligned exponents) at an offset at or beyond its contour radius -- their Laurent moments about g do not converge
+                        // on the nodes.  Logged; with MK_EXPL_NOMERGE each such piece is registered at its own exponent (stepped from the next pass)
+                        {
+                            const double rm = std::max(k_.c.Rm, 1e-9);
+                            std::map<double, double> outside;
+                            for (int i = 0; i < P_.nn; i++) {
+                                const int f = P_.gfam[i];
+                                for (auto& kv : k_.out[f].d) {
+                                    const double sc = kv.first.v - ROWOFF1[f] - P_.dE[i], dd = sc - g;
+                                    if (std::abs(dd) <= 1e-9 || std::abs(dd) >= rm || std::abs(dd) < Rcur_) continue;
+                                    bool near = false;
+                                    for (double c0 : k_.c.cent)
+                                        if (std::abs(c0 - g) > 1e-9 && std::abs(c0 - sc) < std::abs(dd) - 1e-12) { near = true; break; }
+                                    if (std::abs(sc - Ctx::pyround(sc)) < std::abs(dd) - 1e-12) near = true;
+                                    if (k_.c.tie_int && std::abs(sc - Ctx::pyround(sc)) <= std::abs(dd) + 1e-7) near = true;   // (the readout's tie rule)
+                                    if (near) continue;
+                                    const double r_ = std::nearbyint(sc * 1e9) / 1e9;
+                                    outside[r_] = std::max(outside.count(r_) ? outside[r_] : 0.0, fm::pmaxabs(kv.second));
+                                }
+                            }
+                            for (auto& kv : outside) {
+                                if (kv.second <= fm::ANNOUNCE_MIN) continue;
+                                std::printf("    [explicit member %.6f] READS a source piece at %.9f (offset %+.5f) OUTSIDE its contour radius %.4f (magnitude %.3g)%s\n",
+                                            g, kv.first, kv.first - g, Rcur_, kv.second, EXPL_NOMERGE_ ? ": registered at its own exponent" : "");
+                                bool own_ = false;                       // (never the partner's exponent or its towers: centre 2's split owns them)
+                                for (int k_s = 0; k_s <= 8; k_s++) own_ = own_ || std::abs(kv.first - SIGMA2_ - k_s) < 1e-6;
+                                if (EXPL_NOMERGE_ && !own_ && kv.first <= EXPL_GMAX_ + 0.5) Q.push(std::vector<Key>{k_.c.reg_exact(kv.first)});
+                            }
                         }
                     }
                 }
@@ -1854,8 +2016,21 @@ inline void Engine::run() {
                 std::vector<Key> add;
                 if (c_.offl_auto) {
                     std::vector<fm::Ann> ann;
-                    if (AFP.empty() && AREL <= 0) fm::announce_register(k_.c, cand, ann, add);
-                    else {
+                    if (AFP.empty() && AREL <= 0) {
+                        fm::announce_register(k_.c, cand, ann, add);
+                        if (EXPL_NOMERGE_)                          // research round 1143: each partner member its own centre
+                            for (auto& cm : cand) {
+                                if (cm.second <= fm::ANNOUNCE_MIN) continue;
+                                const double x = cm.first;
+                                if (std::abs(x - std::nearbyint(x)) < std::max(k_.c.Rm, 1e-9) || !partner_member(x) || x > EXPL_GMAX_ + 0.5) continue;
+                                bool have = false;
+                                for (double c0 : k_.c.cent) have = have || std::abs(c0 - x) < k_.c.reg_tol;
+                                if (have) continue;
+                                Key kx = k_.c.reg_exact(x);
+                                add.push_back(kx);
+                                std::printf("    [explicit nomerge g %.6f] partner member %.9f registered at its own exponent (magnitude %.3g)\n", g, kx.v, cm.second);
+                            }
+                    } else {
                         // research round 1118: the announcement frozen per export (MK_ANNOUNCE_FREEZE) -- per distinct position (fm's rounding)
                         const std::string site = std::to_string(ps) + "|" + std::to_string(AF_STEP);
                         std::map<double, double> a_;
@@ -2341,6 +2516,94 @@ inline void Engine::run() {
                     st::DefectOut d;
                     st::defect_off(Xs, o.Minv, Wn, K, NB, S_.e1, Rcur_, std::max(c_.defect, 4), c_.robust, rowsfn(Cs, g), d);
                     C = with_grade(k_.c, C, d.X, g, P_.kofs, S_.e1, Rcur_);
+                    if (EXPL_SPUR_ && SPURX_.count(Engine::kf(g))) {
+                        // research round 1143 (round 1142's clause): the spurious root's local principal part -- the Keldysh part of the step's
+                        // (defect-corrected) source plus the amplitude parameter along the root's null vector, at the root's exact exponent
+                        const double er = SPURX_[Engine::kf(g)], zr = er - g;
+                        std::vector<int> ia_;
+                        for (int j = 0; j < NB; j++)
+                            if (act[j]) ia_.push_back(j);
+                        const int na_ = int(ia_.size());
+                        Vec Mr(size_t(NB) * na_), Mp(size_t(NB) * na_);
+                        for (int r_ = 0; r_ < NB; r_++)
+                            for (int a_ = 0; a_ < na_; a_++) {
+                                const size_t i_ = size_t(r_) * NB + ia_[a_];
+                                Mr[size_t(r_) * na_ + a_] = Ms[i_] + zr * Ms[nm + i_] + zr * zr * Ms[2 * nm + i_];
+                                Mp[size_t(r_) * na_ + a_] = Ms[nm + i_] + 2.0 * zr * Ms[2 * nm + i_];
+                            }
+                        std::vector<double> s_;
+                        Vec U_, Vh_;
+                        la::svd(Mr, NB, na_, s_, &U_, &Vh_);
+                        const int kk_ = int(s_.size()) - 1;
+                        Vec v(na_), u(NB);
+                        for (int a_ = 0; a_ < na_; a_++) v[a_] = std::conj(Vh_[size_t(kk_) * na_ + a_]);
+                        for (int r_ = 0; r_ < NB; r_++) u[r_] = U_[size_t(r_) * NB + kk_];
+                        int im_ = 0;
+                        for (int a_ = 1; a_ < na_; a_++)
+                            if (std::abs(v[a_]) > std::abs(v[im_])) im_ = a_;
+                        const cd ph_ = std::conj(v[im_]) / (std::abs(v[im_]) * std::abs(v[im_]));
+                        for (auto& z_ : v) z_ *= ph_;                // (max |v_j| = 1, real positive)
+                        // the source's principal part: S(z) = -M(z) X(z) at the nodes, its moments, at z_r
+                        const int N_ = int(S_.e1.size());
+                        Vec Yn(size_t(N_) * NB);
+                        for (int q_ = 0; q_ < N_; q_++) {
+                            const cd zz = Rcur_ * S_.e1[q_];
+                            for (int r_ = 0; r_ < NB; r_++) {
+                                cd acc = 0.0;
+                                for (int j = 0; j < NB; j++) {
+                                    const size_t i_ = size_t(r_) * NB + j;
+                                    acc += (Ms[i_] + zz * Ms[nm + i_] + zz * zz * Ms[2 * nm + i_]) * d.X[size_t(q_) * NB + j];
+                                }
+                                Yn[size_t(q_) * NB + r_] = -acc;
+                            }
+                        }
+                        Vec Ym = ct::moments_of(Yn, K, NB, S_.e1, Rcur_);
+                        cd num = 0.0, den = 0.0;
+                        for (int r_ = 0; r_ < NB; r_++) {
+                            cd sz = 0.0;
+                            for (int m = 0; m < K; m++) sz += Ym[size_t(m) * NB + r_] / std::pow(cd(zr), m + 1);
+                            cd mv = 0.0;
+                            for (int a_ = 0; a_ < na_; a_++) mv += Mp[size_t(r_) * na_ + a_] * v[a_];
+                            num += std::conj(u[r_]) * sz;
+                            den += std::conj(u[r_]) * mv;
+                        }
+                        const cd kel = -num / den;
+                        char lb_[64];
+                        std::snprintf(lb_, sizeof lb_, "spurious @%.6f", g);
+                        const std::string lab = lb_;
+                        const double cpar = offl_set.count(lab) ? offl_set[lab] : 0.0;
+                        const cd amp = kel + cpar;
+                        // this member's contribution replaced; the root's entries rebuilt as the sum over its members
+                        Vec mine(NB, cd(0.0));
+                        for (int a_ = 0; a_ < na_; a_++) mine[ia_[a_]] = amp * v[a_];
+                        auto& ow = ROOTX_[er];
+                        ow[Engine::kf(g)] = mine;
+                        {
+                            std::vector<Entry> o_;
+                            for (auto& en : C) {
+                                auto rk = ROOTKEY_.find({en.j, en.t.v});
+                                if (en.t.isint || rk == ROOTKEY_.end() || std::abs(rk->second - er) > 1e-12) o_.push_back(en);
+                            }
+                            C = std::move(o_);
+                        }
+                        for (int j = 0; j < NB; j++) {
+                            const Key t = k_.c.xkey(er + P_.kofs[j]);
+                            if (!(t.v >= 1)) continue;
+                            cd sum = 0.0;
+                            for (auto& kv : ow) sum += kv.second[j];
+                            if (sum == cd(0.0)) continue;
+                            std::vector<cd> mm(K, 0.0);
+                            mm[0] = sum;
+                            ROOTKEY_[{j, t.v}] = er;
+                            C.push_back(Entry{j, t, 1, std::move(mm)});
+                        }
+                        bool have = false;
+                        for (auto& t : spurx_r_) have = have || std::get<1>(t) == lab;
+                        if (!have) spurx_r_.emplace_back(er, lab, g);
+                        std::printf("    [explicit member %.6f] spurious root %.9f (sigma_min %.2e of %.2e): Keldysh part %+.4e%+.4ei, '%s' %+.4e -> amplitude %+.4e%+.4ei "
+                                    "along v (max |v_j| = 1), stored at its exact exponent\n", g, er, s_.back(), s_[0], kel.real(), kel.imag(), lab.c_str(), cpar,
+                                    amp.real(), amp.imag());
+                    }
                     if (rp_match) { rp_.offint = true; rp_.lab = lab; rp_.datum = datum; rp_.Xg = d.X; rp_.nits = 1; if (tn_.on) tan_step(g); }
                     stc.Wq = Wn;
                     stc.X = d.X;
@@ -2704,6 +2967,7 @@ inline void Engine::run() {
     spur_ = SPUR;
     spur_r_.clear();
     for (auto& sp : SPUR) spur_r_.emplace_back(sp.second[1], sp.first, sp.second[2]);
+    for (auto& t : spurx_r_) spur_r_.push_back(t);                   // research round 1143: the members' spurious roots (the host rule)
     std::sort(spur_r_.begin(), spur_r_.end());
     J_.kv("passes_run", std::to_string(std::min(ps, c_.passes)));
     // the final series and the gauge families' Lie flow of it

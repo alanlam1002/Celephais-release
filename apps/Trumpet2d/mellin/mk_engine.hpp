@@ -361,6 +361,8 @@ class Engine {
     std::map<double, std::vector<double>> GROUPS_;                  // kf(integer) -> the group's poles (members and the root, absolute, sorted)
     std::map<double, double> GROUP_ROOT_;                           // kf(integer) -> its spurious root
     std::set<double> GROUP_DONE_;                                   // the groups stepped this pass
+    std::map<double, double> GROUP_INT_;                            // kf(root) -> the integer whose operator the group uses
+    bool GROUPS_BUILT_ = false;
     std::map<double, double> SPURX_;                                // kf(member) -> its spurious root (fixed for the forward)
     std::map<double, double> SPURX_AT_;                             // MK_EXPL_SPUR_AT
     std::vector<std::tuple<double, std::string, double>> spurx_r_;  // (root, label, member): the 'eq scond' outputs
@@ -544,7 +546,10 @@ inline void Engine::run() {
             SIGMA2_ = std::getenv("MK_EXPL_SIGMA2") ? std::atof(std::getenv("MK_EXPL_SIGMA2")) : s2c;
             std::printf("  [explicit] the partner's Sturm-Liouville exponent on this cylinder %.12f%s; used %.12f; its towers at exact keys:", s2c,
                         std::getenv("MK_EXPL_SIGMA2") ? " (MK_EXPL_SIGMA2 overrides)" : "", SIGMA2_);
-            for (int k = 1; SIGMA2_ + k <= std::min(double(c_.gmax), EXPL_GMAX_ + 0.5) + 1e-9; k++) {
+            // (round 1147: with MK_EXPL_NOMERGE the partner's towers up to the top integer's reach, gmax + R_m -- sigma_2 + 5 = 7.0476 at
+            // 0.40: without it the top grade's +delta content sat in integer 7's moments and fed back into centre 6, the g / g + 1 coupling)
+            const double tow_top = EXPL_NOMERGE_ ? double(c_.gmax) + std::max(k_.c.Rm, 0.0) : double(c_.gmax);
+            for (int k = 1; SIGMA2_ + k <= std::min(tow_top, EXPL_GMAX_ + 0.5) + 1e-9; k++) {
                 EXPL_TOW_.push_back(k_.c.reg_exact(SIGMA2_ + k));
                 std::printf(" %.9f", EXPL_TOW_.back().v);
             }
@@ -1240,36 +1245,38 @@ inline void Engine::run() {
                 if (sr_) continue;
             }
             if (EXPL_GROUP_ && ps >= 1) {
-                // research round 1146: the group holding g (formed at its integer's first visit from the second pass on)
-                if (isint && !GROUPS_.count(kf(g))) {
-                    double sr = std::nan("");
-                    for (auto& kv : SPURX_)
-                        if (kv.second > g && kv.second - g < EXPL_GROUP_MAXOFF_ && (std::isnan(sr) || kv.second < sr)) sr = kv.second;
-                    if (std::isfinite(sr) && std::isfinite(SIGMA2_)) {
-                        const double dl = SIGMA2_ - 2.0;
-                        std::vector<double> poles{g};
+                // research round 1147 (spec section 62): a group around ANY square-subset root within the coalescence scale (R) of an explicit
+                // member, whatever its offset from the integer: the root and every explicit member (an integer or a partner member, no family key)
+                // within R of it; formed once, at the second pass's start
+                if (!GROUPS_BUILT_) {
+                    GROUPS_BUILT_ = true;
+                    std::set<double> roots_;
+                    for (auto& kv : SPURX_) roots_.insert(std::nearbyint(kv.second * 1e9) / 1e9);
+                    for (double sr0 : roots_) {
+                        double sr = sr0;
+                        for (auto& kv : SPURX_)
+                            if (std::abs(kv.second - sr0) < 1e-8) sr = kv.second;
+                        std::vector<double> poles;
                         bool fam_in = false;
                         for (double c0 : k_.c.cent) {
-                            if (c0 <= g + 1e-9 || c0 >= sr + dl) continue;
+                            if (std::abs(c0 - sr) >= c_.R || std::abs(c0 - sr) < 1e-9) continue;
                             bool isfam = false;
                             for (auto* fv : {&fams, &gfams})
                                 for (auto& f : *fv)
                                     for (int k_s = -3; k_s <= 3; k_s++) isfam = isfam || std::abs(f.second.v + k_s - c0) < 1e-9;
                             if (isfam) { fam_in = true; continue; }
-                            if (std::abs(c0 - sr) < 1e-9) continue;
-                            if (partner_member(c0)) poles.push_back(c0);
+                            if (std::abs(c0 - std::nearbyint(c0)) < 1e-9 || partner_member(c0)) poles.push_back(c0);
                         }
+                        if (poles.empty()) continue;
                         poles.push_back(sr);
                         std::sort(poles.begin(), poles.end());
-                        if (fam_in)
-                            std::printf("    [group %.0f] a family key between %.6f and %.6f: no group (the routes must not be mixed)\n", g, g, sr + dl);
-                        else {
-                            GROUPS_[kf(g)] = poles;
-                            GROUP_ROOT_[kf(g)] = sr;
-                            std::printf("    [group %.0f] the spurious root %.9f and the explicit members", g, sr);
-                            for (double p_ : poles) std::printf(" %.6f", p_);
-                            std::printf(": one step by local principal parts from this pass on\n");
-                        }
+                        const double gi = std::floor(poles.front() + 1e-9);
+                        GROUPS_[kf(sr)] = poles;
+                        GROUP_ROOT_[kf(sr)] = sr;
+                        GROUP_INT_[kf(sr)] = gi;
+                        std::printf("    [group %.6f] the spurious root and the explicit members within R %.3f:", sr, c_.R);
+                        for (double p_ : poles) std::printf(" %.6f", p_);
+                        std::printf("%s; the operator from integer %.0f\n", fam_in ? " (a family centre within R left out)" : "", gi);
                     }
                 }
                 double gkey = std::nan("");
@@ -1281,7 +1288,7 @@ inline void Engine::run() {
                     GROUP_DONE_.insert(gkey);
                     const auto tg0_ = std::chrono::steady_clock::now();
                     const std::vector<double> poles = GROUPS_[gkey];
-                    const double gi = gkey, sr = GROUP_ROOT_[gkey];
+                    const double gi = GROUP_INT_[gkey], sr = GROUP_ROOT_[gkey];
                     const int L = int(poles.size());
                     std::vector<double> dm;
                     int ir = 0;
@@ -1350,8 +1357,8 @@ inline void Engine::run() {
                             for (int j = 0; j < NB; j++) XL[size_t(ir * K + m) * NB + j] += f * v[j];
                         }
                         Vec Rr = stacked(cl::with_grade_mom(k_.c, Cst, XL, gi, dm, P_.kofs));
-                        std::printf("    [group %.0f pass %d] the root's null component %+.3e%+.3ei removed (round 1049), the held amplitude %g the whole of it; rows after %.1e\n",
-                                    gi, ps, c0r.real(), c0r.imag(), amp0, maxabs(Rr));
+                        std::printf("    [group %.6f pass %d] the root's null component %+.3e%+.3ei removed (round 1049), the held amplitude %g the whole of it; rows after %.1e\n",
+                                    sr, ps, c0r.real(), c0r.imag(), amp0, maxabs(Rr));
                     }
                     C = cl::with_grade_mom(k_.c, Cst, XL, gi, dm, P_.kofs);
                     cd ra = 0.0;
@@ -1363,9 +1370,9 @@ inline void Engine::run() {
                         ra /= std::sqrt(std::max(vn, 1e-300));
                     }
                     const double hostl8 = offl_set.count("lapse l8") ? offl_set["lapse l8"] : 0.0;
-                    std::printf("    [group %.0f pass %d] local principal parts: %d poles (%d singular: %s); the root %.6f's content along its null direction "
+                    std::printf("    [group %.6f pass %d] local principal parts: %d poles (%d singular: %s); the root %.6f's content along its null direction "
                                 "%+.3e%+.3ei (its amplitude held at %g; the host rule: lapse l8 %.2e against a^8 %.2e); rows",
-                                gi, ps, L, int(info.singular.size()), info.vhat.count(ir) ? "the root" : "NOT the root", sr, ra.real(), ra.imag(), amp0,
+                                sr, ps, L, int(info.singular.size()), info.vhat.count(ir) ? "the root" : "NOT the root", sr, ra.real(), ra.imag(), amp0,
                                 hostl8, std::pow(std::abs(c_.J), 8));
                     for (double h : hist) std::printf(" %.1e", h);
                     std::printf("; %.1f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - tg0_).count());
@@ -1622,6 +1629,32 @@ inline void Engine::run() {
             if (rp_match) { rp_ = RpCap(); rp_.on = true; rp_.Cs = Cs; rp_.isint = isint; rp_.iscl = iscl; rp_.R = Rcur_; }
             k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " sources";
             k_.run(Cs, nullptr, c_.top);
+            if (EXPL_ && isint && std::getenv("MK_READ_DEBUG") && std::abs(std::atof(std::getenv("MK_READ_DEBUG")) - g) < 1e-9) {
+                // research round 1147 (the trace): every source piece this integer centre's readout takes off its own key (as piece_at decides,
+                // aligned exponents, ties to the integer), by row family and level: offset, magnitude, the nearest other centre
+                const double rm = std::max(k_.c.Rm, 1e-9);
+                std::map<std::pair<double, int>, double> rd;
+                for (int i = 0; i < P_.nn; i++) {
+                    const int f = P_.gfam[i];
+                    for (auto& kv : k_.out[f].d) {
+                        const double sc = kv.first.v - ROWOFF1[f] - P_.dE[i], d = sc - g;
+                        if (std::abs(d) <= 1e-12 || std::abs(d) >= rm) continue;
+                        bool near = false;
+                        for (double c0 : k_.c.cent)
+                            if (std::abs(c0 - sc) < std::abs(d) - 1e-12) { near = true; break; }
+                        if (std::abs(sc - Ctx::pyround(sc)) < std::abs(d) - 1e-12) near = true;
+                        if (near) continue;
+                        auto key_ = std::make_pair(std::nearbyint(d * 1e9) / 1e9, f);
+                        rd[key_] = std::max(rd.count(key_) ? rd[key_] : 0.0, fm::pmaxabs(kv.second));
+                    }
+                }
+                std::printf("    [read-debug g %.0f pass %d] %d off-key pieces read:", g, ps, int(rd.size()));
+                for (auto& kv : rd) std::printf(" (%+.9f f%d %.2e)", kv.first.first, kv.first.second, kv.second);
+                std::printf("\n    [read-debug g %.0f pass %d] registered centres within R_m:", g, ps);
+                for (double c0 : k_.c.cent)
+                    if (std::abs(c0 - g) < rm) std::printf(" %.9f", c0);
+                std::printf("\n");
+            }
             if (EXPL_ && isint && !CL && g <= EXPL_GMAX_ + 1e-9) {
                 // research round 1136 (B): the explicit members at this integer centre (see EXPL_ above)
                 if (!cache.count(g)) {
@@ -1842,7 +1875,9 @@ inline void Engine::run() {
                                 break;
                             }
                         }
-                        if (dn < 1e-3)
+                        if (dn < 1e-3 && EXPL_GROUP_ && SPURX_.count(kf(g)))
+                            std::printf("    [explicit member %.6f] %.1e from its spurious root: stepped alone in this pass, by its group from the next\n", g, dn);
+                        else if (dn < 1e-3)
                             throw std::runtime_error("explicit member at " + std::to_string(g) + ": a root of its pencil " + std::to_string(dn) +
                                                      " away (real part " + std::to_string(g + dr) + ") -- the local principal part is not built");
                         if (dn / 2 < Rcur_) {

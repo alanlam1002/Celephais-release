@@ -349,6 +349,18 @@ class Engine {
     // research round 1145: MK_EXPL_GMAX=G -- explicit members only up to integer grade G (the readout (B), the partner's towers, the no-merge
     // registrations and the members' own contours at aligned exponents <= G + 1/2); above it production's moments (default: every grade)
     const double EXPL_GMAX_ = std::getenv("MK_EXPL_GMAX") ? std::atof(std::getenv("MK_EXPL_GMAX")) : 1e300;
+    // research round 1146 (spec section 61): MK_EXPL_GROUP=1 -- a GROUP of explicit members within reach of a spurious root of the step pencil
+    // (found as MK_EXPL_SPUR finds it, by identity) is stepped JOINTLY from the second pass on by the cluster route's local principal parts
+    // (mk_cluster local_pp, spec section 29): the integer below the root and every partner member from it up to the root + delta (no family keys
+    // in the span; the root within MK_EXPL_GROUP_MAXOFF, default 0.5, of the integer), the root a pole of its own; one source (the series with
+    // every pole's entries stripped, read at each pole), one operator (meff at the integer), each pole's principal part from M^-1's local Laurent
+    // coefficients, the root's the Keldysh part of the whole group's source plus its amplitude 'spurious @<root>' (set_offl; default 0 -- held,
+    // its conditions monitored, the host rule), the defect correction pole by pole; stored at every pole's exact exponent
+    const bool EXPL_GROUP_ = EXPL_ && std::getenv("MK_EXPL_GROUP") && std::string(std::getenv("MK_EXPL_GROUP")) == "1";
+    const double EXPL_GROUP_MAXOFF_ = std::getenv("MK_EXPL_GROUP_MAXOFF") ? std::atof(std::getenv("MK_EXPL_GROUP_MAXOFF")) : 0.5;
+    std::map<double, std::vector<double>> GROUPS_;                  // kf(integer) -> the group's poles (members and the root, absolute, sorted)
+    std::map<double, double> GROUP_ROOT_;                           // kf(integer) -> its spurious root
+    std::set<double> GROUP_DONE_;                                   // the groups stepped this pass
     std::map<double, double> SPURX_;                                // kf(member) -> its spurious root (fixed for the forward)
     std::map<double, double> SPURX_AT_;                             // MK_EXPL_SPUR_AT
     std::vector<std::tuple<double, std::string, double>> spurx_r_;  // (root, label, member): the 'eq scond' outputs
@@ -543,7 +555,7 @@ inline void Engine::run() {
             std::printf("  [explicit] MK_EXPL_NOMERGE=1: each partner member its own centre (no merging into a neighbour); a piece equidistant from an integer "
                         "and an off-integer centre is read by the integer\n");
         }
-        if (EXPL_SPUR_) {
+        if (EXPL_SPUR_ || EXPL_GROUP_) {
             if (const char* e = std::getenv("MK_EXPL_SPUR_AT")) {
                 std::string t = e;
                 size_t a0 = 0;
@@ -1215,16 +1227,152 @@ inline void Engine::run() {
             FZD_steps.clear(); FZD_clusters.clear(); FZD_spur.clear(); FZD_storage.clear();   // (the routings cumulative)
         }
         std::vector<double> order;
+        GROUP_DONE_.clear();
         Key gk;
         AF_STEP = 0;                                                // (round 1118: the announcement sites' index)
         while (Q.pop(gk)) {
             AF_STEP++;
             double g = gk.v;
             bool isint = gk.isint;
-            if (EXPL_SPUR_ && !isint) {                             // research round 1143: a spurious root stored by its member is never stepped
+            if ((EXPL_SPUR_ || EXPL_GROUP_) && !isint) {            // research round 1143: a spurious root stored by its member is never stepped
                 bool sr_ = false;
                 for (auto& kv : SPURX_) sr_ = sr_ || std::abs(kv.second - g) < 1e-9;
                 if (sr_) continue;
+            }
+            if (EXPL_GROUP_ && ps >= 1) {
+                // research round 1146: the group holding g (formed at its integer's first visit from the second pass on)
+                if (isint && !GROUPS_.count(kf(g))) {
+                    double sr = std::nan("");
+                    for (auto& kv : SPURX_)
+                        if (kv.second > g && kv.second - g < EXPL_GROUP_MAXOFF_ && (std::isnan(sr) || kv.second < sr)) sr = kv.second;
+                    if (std::isfinite(sr) && std::isfinite(SIGMA2_)) {
+                        const double dl = SIGMA2_ - 2.0;
+                        std::vector<double> poles{g};
+                        bool fam_in = false;
+                        for (double c0 : k_.c.cent) {
+                            if (c0 <= g + 1e-9 || c0 >= sr + dl) continue;
+                            bool isfam = false;
+                            for (auto* fv : {&fams, &gfams})
+                                for (auto& f : *fv)
+                                    for (int k_s = -3; k_s <= 3; k_s++) isfam = isfam || std::abs(f.second.v + k_s - c0) < 1e-9;
+                            if (isfam) { fam_in = true; continue; }
+                            if (std::abs(c0 - sr) < 1e-9) continue;
+                            if (partner_member(c0)) poles.push_back(c0);
+                        }
+                        poles.push_back(sr);
+                        std::sort(poles.begin(), poles.end());
+                        if (fam_in)
+                            std::printf("    [group %.0f] a family key between %.6f and %.6f: no group (the routes must not be mixed)\n", g, g, sr + dl);
+                        else {
+                            GROUPS_[kf(g)] = poles;
+                            GROUP_ROOT_[kf(g)] = sr;
+                            std::printf("    [group %.0f] the spurious root %.9f and the explicit members", g, sr);
+                            for (double p_ : poles) std::printf(" %.6f", p_);
+                            std::printf(": one step by local principal parts from this pass on\n");
+                        }
+                    }
+                }
+                double gkey = std::nan("");
+                for (auto& kv : GROUPS_)
+                    for (double p_ : kv.second)
+                        if (std::abs(p_ - g) < 1e-9) gkey = kv.first;
+                if (std::isfinite(gkey)) {
+                    if (GROUP_DONE_.count(gkey)) continue;
+                    GROUP_DONE_.insert(gkey);
+                    const auto tg0_ = std::chrono::steady_clock::now();
+                    const std::vector<double> poles = GROUPS_[gkey];
+                    const double gi = gkey, sr = GROUP_ROOT_[gkey];
+                    const int L = int(poles.size());
+                    std::vector<double> dm;
+                    int ir = 0;
+                    for (int i = 0; i < L; i++) {
+                        dm.push_back(poles[i] - gi);
+                        if (std::abs(poles[i] - sr) < 1e-9) ir = i;
+                    }
+                    // the source: every pole's own entries stripped, the rows read at each pole
+                    std::vector<std::vector<Key>> pk(nn);
+                    for (int j = 0; j < nn; j++)
+                        for (double p_ : poles) pk[j].push_back(ckey(k_.c, p_ + P_.kofs[j]));
+                    std::vector<Entry> Cst;
+                    for (auto& en : C) {
+                        bool own = false;
+                        for (auto& t : pk[en.j]) own = own || (t.v >= 1 && keq(en.t, t));
+                        if (!own) Cst.push_back(en);
+                    }
+                    Vec Msg, Mcg;
+                    meff(k_, P_, Cst, gi, c_.top, c_.meff_mode, c_.meff_h, c_.meff_chunk, Msg, Mcg);
+                    std::vector<int> iax;
+                    {
+                        auto ac = ct::active(gi, P_.kofs);
+                        for (int j = 0; j < NB; j++)
+                            if (ac[j]) iax.push_back(j);
+                    }
+                    auto stacked = [&](const std::vector<Entry>& Cx) {
+                        k_.run(Cx, nullptr, c_.top);
+                        Vec F(size_t(L) * K * NB, 0.0);
+                        for (int i = 0; i < L; i++) {
+                            Vec Sp = project(k_.c, k_.out, poles[i], 1, P_.gfam, P_.dE, P_.W, false);
+                            for (int m = 0; m < K; m++)
+                                for (int j = 0; j < NB; j++) F[size_t(i * K + m) * NB + j] = -Sp[size_t(m) * NB + j];
+                        }
+                        return F;
+                    };
+                    Vec F = stacked(Cst);
+                    char lb_[64];
+                    std::snprintf(lb_, sizeof lb_, "spurious @%.6f", sr);
+                    const double amp0 = offl_set.count(lb_) ? offl_set[lb_] : 0.0;
+                    std::map<int, cd> ampL{{ir, cd(amp0, 0.0)}};
+                    cl::LocalInfo info;
+                    const std::vector<std::pair<int, int>> bordl;
+                    Vec XL = cl::local_pp(Msg, NB, nn, K, iax, bordl, dm, F, 2 * R0, EPS_S, S_.rw, S_.cw, &ampL, &info);
+                    std::vector<double> hist;
+                    for (int it = 0; it < std::max(c_.defect, 4) + 4; it++) {
+                        Vec Rr = stacked(cl::with_grade_mom(k_.c, Cst, XL, gi, dm, P_.kofs));
+                        hist.push_back(maxabs(Rr));
+                        const size_t h = hist.size();
+                        if (hist.back() < 1e-14 || (h > 2 && hist[h - 1] > 0.5 * hist[h - 2] && hist[h - 2] > 0.5 * hist[h - 3])) break;
+                        Vec dX = cl::local_pp(Msg, NB, nn, K, iax, bordl, dm, Rr, 2 * R0, EPS_S, S_.rw, S_.cw, nullptr, nullptr);
+                        for (size_t i = 0; i < XL.size(); i++) XL[i] += dX[i];
+                    }
+                    // the cluster route's rule (round 1049, c_.spur_orth): the particular solution's component along the spurious root's null
+                    // direction removed, the amplitude parameter the whole of it (held: zero)
+                    cd c0r = 0.0;
+                    if (c_.spur_orth && !std::getenv("MK_GROUP_KELDYSH") && info.vhat.count(ir)) {   // (MK_GROUP_KELDYSH=1: kept, a variant)
+                        Vec v = info.vhat.at(ir);
+                        double vn = 0.0;
+                        for (auto& z : v) vn += std::norm(z);
+                        vn = std::sqrt(std::max(vn, 1e-300));
+                        for (auto& z : v) z /= vn;
+                        for (int j = 0; j < NB; j++) c0r += std::conj(v[j]) * XL[size_t(ir * K) * NB + j];
+                        const cd dl0 = info.dl.count(ir) ? info.dl.at(ir) : cd(0.0, 0.0);
+                        for (int m = 0; m < K; m++) {
+                            const cd f = (cd(amp0, 0.0) - c0r) * std::pow(dl0, m);
+                            for (int j = 0; j < NB; j++) XL[size_t(ir * K + m) * NB + j] += f * v[j];
+                        }
+                        Vec Rr = stacked(cl::with_grade_mom(k_.c, Cst, XL, gi, dm, P_.kofs));
+                        std::printf("    [group %.0f pass %d] the root's null component %+.3e%+.3ei removed (round 1049), the held amplitude %g the whole of it; rows after %.1e\n",
+                                    gi, ps, c0r.real(), c0r.imag(), amp0, maxabs(Rr));
+                    }
+                    C = cl::with_grade_mom(k_.c, Cst, XL, gi, dm, P_.kofs);
+                    cd ra = 0.0;
+                    if (info.vhat.count(ir)) {
+                        const Vec& v = info.vhat.at(ir);
+                        double vn = 0.0;
+                        for (auto& z : v) vn += std::norm(z);
+                        for (int j = 0; j < NB; j++) ra += std::conj(v[j]) * XL[size_t(ir * K) * NB + j];
+                        ra /= std::sqrt(std::max(vn, 1e-300));
+                    }
+                    const double hostl8 = offl_set.count("lapse l8") ? offl_set["lapse l8"] : 0.0;
+                    std::printf("    [group %.0f pass %d] local principal parts: %d poles (%d singular: %s); the root %.6f's content along its null direction "
+                                "%+.3e%+.3ei (its amplitude held at %g; the host rule: lapse l8 %.2e against a^8 %.2e); rows",
+                                gi, ps, L, int(info.singular.size()), info.vhat.count(ir) ? "the root" : "NOT the root", sr, ra.real(), ra.imag(), amp0,
+                                hostl8, std::pow(std::abs(c_.J), 8));
+                    for (double h : hist) std::printf(" %.1e", h);
+                    std::printf("; %.1f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - tg0_).count());
+                    std::fflush(stdout);
+                    for (double p_ : poles) order.push_back(p_);
+                    continue;
+                }
             }
             if (k_.c.gauge_reg && !isint) {                         // spec section 26: a tower moved with its family (no longer registered)
                 bool reg_ = false;
@@ -1636,7 +1784,7 @@ inline void Engine::run() {
                         double dn = 1e300, dr = 0.0;
                         for (auto& e : ev)
                             if (std::abs(e) < dn) { dn = std::abs(e); dr = e.real(); }
-                        if (EXPL_SPUR_ && !SPURX_.count(kf(g))) {
+                        if ((EXPL_SPUR_ || EXPL_GROUP_) && !SPURX_.count(kf(g))) {
                             // research round 1143 (round 1142's clause): the nearest real root within the coalescence scale -- spurious iff the
                             // tall operator [Ms; Mc] (rows equilibrated, active columns) is regular there while the square one is not
                             const double coal = EXPL_COAL_ > 0 ? EXPL_COAL_ : c_.R;

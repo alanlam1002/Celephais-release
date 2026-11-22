@@ -363,6 +363,13 @@ class Engine {
     std::set<double> GROUP_DONE_;                                   // the groups stepped this pass
     std::map<double, double> GROUP_INT_;                            // kf(root) -> the integer whose operator the group uses
     bool GROUPS_BUILT_ = false;
+    bool SEED_ON_ = false;                                          // research round 1166: MK_SEED (the seeded unit test), default off
+    double SEED_G_ = 2.0;
+    std::vector<double> SEED_STEP_;                                 // research round 1167: MK_SEED_STEP (the only centres stepped)
+    bool SEED_DUMP_ = false;                                        // research round 1167: MK_SEED_DUMP (the sources before the solve)
+    bool SEED_RESTORE_ = false;                                     // research round 1167: MK_SEED_RESTORE (every centre runs, each reads the seed)
+    std::vector<Entry> SEED_C_;                                     // the seed as read
+    std::vector<double> SEED_DONE_;                                 // the target centres already stepped (their own unknowns kept)
     std::map<double, double> SPURX_;                                // kf(member) -> its spurious root (fixed for the forward)
     std::map<double, double> SPURX_AT_;                             // MK_EXPL_SPUR_AT
     std::vector<std::tuple<double, std::string, double>> spurx_r_;  // (root, label, member): the 'eq scond' outputs
@@ -488,6 +495,50 @@ inline void Engine::run() {
     int nn = P_.nn, K = k_.c.K, N = c_.N, NB = nn, nc = P_.nc;
     size_t nm = size_t(NB) * NB, nmc = size_t(nc) * NB;
     std::vector<Entry> C = S_.C0;
+    // research round 1166 (the seeded unit test; MK_SEED=DIR, default off -- unset, production is unchanged): Kerr's exact content at every entry
+    // the aligned steps g <= MK_SEED_G (default 2) own -- column j at keys 1 <= t <= G + kofs[j], the cluster's members t + j delta up to 0.2 above
+    // (A5: Engine::strip) -- read from DIR/seed_{col,key,isint,mom}.npy (mom: n x K complex, the log moments), replaces C's there (every such entry
+    // of C dropped first); the centres g <= G are then never stepped (the seed is held), every other step exactly as in production.
+    if (const char* sd = std::getenv("MK_SEED")) {
+        SEED_G_ = std::getenv("MK_SEED_G") ? std::atof(std::getenv("MK_SEED_G")) : 2.0;
+        const std::string d(sd);
+        auto sc = npy_as<int>(npy_read(d + "/seed_col.npy"));
+        auto sk = npy_as<double>(npy_read(d + "/seed_key.npy"));
+        auto si = npy_as<int>(npy_read(d + "/seed_isint.npy"));
+        auto sm = npy_cplx(npy_read(d + "/seed_mom.npy"));
+        if (sm.size() != sc.size() * size_t(K) || sk.size() != sc.size() || si.size() != sc.size())
+            throw std::runtime_error("mk: MK_SEED: seed arrays inconsistent (mom must be n x K)");
+        std::vector<Entry> o;
+        int dropped = 0;
+        // research round 1167 (REVIEW_6, the fixed-point form): MK_SEED_ALL=1 -- the seed IS the series (every key KC-40 holds, and the content
+        // above 3.5 as the seed gives it: zero or another forward's); MK_SEED_STEP=g1,g2,... -- only those centres are stepped (each once: the
+        // bundle's passes 1), every other centre held; MK_SEED_DUMP=1 -- each stepped centre's sources (the rows of the stripped series, before
+        // the solve) written to OUT/src_g<g>_f<f>_{key,pc}.npy
+        const bool all_ = std::getenv("MK_SEED_ALL") && std::atoi(std::getenv("MK_SEED_ALL")) != 0;
+        if (const char* st = std::getenv("MK_SEED_STEP")) {
+            std::stringstream ss_(st);
+            std::string tok_;
+            while (std::getline(ss_, tok_, ',')) if (!tok_.empty()) SEED_STEP_.push_back(std::atof(tok_.c_str()));
+        }
+        SEED_DUMP_ = std::getenv("MK_SEED_DUMP") && std::atoi(std::getenv("MK_SEED_DUMP")) != 0;
+        for (auto& en : C) {
+            if (all_ || (en.t.v >= 1 - 1e-9 && en.t.v <= SEED_G_ + P_.kofs[en.j] + 0.2)) { dropped++; continue; }
+            o.push_back(en);
+        }
+        for (size_t e = 0; e < sc.size(); e++) {
+            std::vector<cd> m(sm.begin() + long(e) * K, sm.begin() + long(e + 1) * K);
+            Key t = si[e] ? Key{std::nearbyint(sk[e]), true} : ckey(k_.c, sk[e]);
+            o.push_back(Entry{sc[e], t, 1, m});
+        }
+        C = o;
+        SEED_C_ = o;
+        SEED_RESTORE_ = std::getenv("MK_SEED_RESTORE") && std::atoi(std::getenv("MK_SEED_RESTORE")) != 0;
+        SEED_ON_ = true;
+        std::printf("  [seed] MK_SEED %s: %d entries of C dropped (%s), %d seeded; stepped: %s (rounds 1166-1167)\n", sd, dropped,
+                    all_ ? "all: the seed is the series" : "the steps g <= MK_SEED_G", int(sc.size()),
+                    SEED_STEP_.empty() ? "the centres above MK_SEED_G" : std::getenv("MK_SEED_STEP"));
+        std::fflush(stdout);
+    }
     tan_init(C);                                                    // (research round 1093: MK_TAN, the whole forward on duals)
     std::map<double, std::pair<Vec, Vec>> cache;                    // meff_cache: the converged operator per integer centre
     std::map<double, double> nfloor;                                // --newton-floor-memo: per centre, the floor a futile Newton step found
@@ -1239,6 +1290,31 @@ inline void Engine::run() {
             AF_STEP++;
             double g = gk.v;
             bool isint = gk.isint;
+            if (SEED_ON_ && SEED_RESTORE_) {                         // research round 1167: MK_SEED_RESTORE -- every centre runs (the families
+                // are announced and registered as in production), but each step reads the SEED: the series is reset to it here, except the target
+                // centres' own unknowns (column j at t + kofs[j], t in MK_SEED_STEP) once stepped; entries the seed does not hold are dropped
+                std::vector<Entry> o_;
+                for (auto& en : C) {
+                    bool tgt_ = false;
+                    for (double x_ : SEED_DONE_) tgt_ = tgt_ || keq(en.t, ckey(k_.c, x_ + P_.kofs[en.j]));
+                    if (tgt_) o_.push_back(en);
+                }
+                for (auto& en : SEED_C_) {
+                    bool tgt_ = false;
+                    for (double x_ : SEED_DONE_) tgt_ = tgt_ || keq(en.t, ckey(k_.c, x_ + P_.kofs[en.j]));
+                    if (!tgt_) o_.push_back(en);
+                }
+                C = o_;
+                bool st_ = false;
+                for (double x_ : SEED_STEP_) st_ = st_ || std::abs(x_ - g) < 1e-6;
+                if (st_) SEED_DONE_.push_back(g);
+            } else if (SEED_ON_) {                                  // research rounds 1166-1167: the seeded steps held (MK_SEED)
+                if (!SEED_STEP_.empty()) {
+                    bool st_ = false;
+                    for (double x_ : SEED_STEP_) st_ = st_ || std::abs(x_ - g) < 1e-6;
+                    if (!st_) continue;
+                } else if (g <= SEED_G_ + 0.2) continue;
+            }
             if ((EXPL_SPUR_ || EXPL_GROUP_) && !isint) {            // research round 1143: a spurious root stored by its member is never stepped
                 bool sr_ = false;
                 for (auto& kv : SPURX_) sr_ = sr_ || std::abs(kv.second - g) < 1e-9;
@@ -1629,6 +1705,25 @@ inline void Engine::run() {
             if (rp_match) { rp_ = RpCap(); rp_.on = true; rp_.Cs = Cs; rp_.isint = isint; rp_.iscl = iscl; rp_.R = Rcur_; }
             k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " sources";
             k_.run(Cs, nullptr, c_.top);
+            if (SEED_ON_ && SEED_DUMP_) {                           // research round 1167: the step's sources before the solve
+                for (int f = 0; f < 6; f++) {
+                    std::vector<double> ks_;
+                    std::vector<cd> pc_;
+                    long B_ = 0;
+                    for (auto& kv : k_.out[f].d) {
+                        if (std::abs(kv.first.v - g) > 1.6) continue;
+                        ks_.push_back(kv.first.v);
+                        if (!B_) B_ = long(kv.second.a.size());
+                        if (long(kv.second.a.size()) != B_) continue;
+                        pc_.insert(pc_.end(), kv.second.a.begin(), kv.second.a.end());
+                    }
+                    if (ks_.empty() || long(pc_.size()) != long(ks_.size()) * B_) continue;
+                    char nm_[256];
+                    std::snprintf(nm_, sizeof nm_, "%s/src_g%.6f_f%d", out_.c_str(), g, f);
+                    npy_write(std::string(nm_) + "_key.npy", ks_.data(), "<f8", {long(ks_.size())}, 8);
+                    npy_write(std::string(nm_) + "_pc.npy", pc_.data(), "<c16", {long(ks_.size()), B_}, 16);
+                }
+            }
             if (EXPL_ && isint && std::getenv("MK_READ_DEBUG") && std::abs(std::atof(std::getenv("MK_READ_DEBUG")) - g) < 1e-9) {
                 // research round 1147 (the trace): every source piece this integer centre's readout takes off its own key (as piece_at decides,
                 // aligned exponents, ties to the integer), by row family and level: offset, magnitude, the nearest other centre

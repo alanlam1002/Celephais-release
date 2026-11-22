@@ -370,6 +370,7 @@ class Engine {
     bool SEED_RESTORE_ = false;                                     // research round 1167: MK_SEED_RESTORE (every centre runs, each reads the seed)
     std::vector<Entry> SEED_C_;                                     // the seed as read
     std::vector<double> SEED_DONE_;                                 // the target centres already stepped (their own unknowns kept)
+    bool SEED_PREREG_ = false;                                      // research round 1171: MK_SEED_PREREG (families pre-registered, no RESTORE)
     std::map<double, double> SPURX_;                                // kf(member) -> its spurious root (fixed for the forward)
     std::map<double, double> SPURX_AT_;                             // MK_EXPL_SPUR_AT
     std::vector<std::tuple<double, std::string, double>> spurx_r_;  // (root, label, member): the 'eq scond' outputs
@@ -519,7 +520,10 @@ inline void Engine::run() {
             std::stringstream ss_(st);
             std::string tok_;
             while (std::getline(ss_, tok_, ',')) if (!tok_.empty()) SEED_STEP_.push_back(std::atof(tok_.c_str()));
+            // research round 1171 (REVIEW_6 addendum): ONE target per run -- with several, a later target would read the earlier ones' outputs
+            if (SEED_STEP_.size() > 1) throw std::runtime_error("mk: MK_SEED_STEP: one target centre per run (round 1171)");
         }
+        SEED_PREREG_ = std::getenv("MK_SEED_PREREG") && std::atoi(std::getenv("MK_SEED_PREREG")) != 0;
         SEED_DUMP_ = std::getenv("MK_SEED_DUMP") && std::atoi(std::getenv("MK_SEED_DUMP")) != 0;
         for (auto& en : C) {
             if (all_ || (en.t.v >= 1 - 1e-9 && en.t.v <= SEED_G_ + P_.kofs[en.j] + 0.2)) { dropped++; continue; }
@@ -1281,6 +1285,18 @@ inline void Engine::run() {
             Q.push(fz_pending());
             PS_ = ps;
             FZD_steps.clear(); FZD_clusters.clear(); FZD_spur.clear(); FZD_storage.clear();   // (the routings cumulative)
+        }
+        if (SEED_ON_ && SEED_PREREG_ && !SEED_RESTORE_ && fams.empty()) {
+            // research round 1171 (REVIEW_6 addendum, the RESTORE side-effect test): every centre but the target skipped, the lapse families
+            // registered here as lapse_roots registers them at g = 2 without gauge_reg (AT the Sturm-Liouville exponent, l <= offl_lmax, <= gmax;
+            // c.reg), and their towers queued -- nothing else the skipped steps would leave (announced centres, caches) is reproduced
+            if (k_.c.gauge_reg) throw std::runtime_error("mk: MK_SEED_PREREG: gauge_reg families are not pre-registered");
+            for (int L = 4; L <= c_.offl_lmax; L += 2)
+                if (k_.c.lapse_sl.count(L) && k_.c.lapse_sl.at(L) <= c_.gmax) fams.emplace_back("lapse l" + std::to_string(L), k_.c.reg(k_.c.lapse_sl.at(L)));
+            Q.push(towers_all());
+            std::printf("  [seed] MK_SEED_PREREG: %zu lapse families pre-registered:", fams.size());
+            for (auto& f : fams) std::printf(" %s %.9f", f.first.c_str(), f.second.v);
+            std::printf("\n");
         }
         std::vector<double> order;
         GROUP_DONE_.clear();

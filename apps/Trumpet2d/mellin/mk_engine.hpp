@@ -349,6 +349,17 @@ class Engine {
     // research round 1145: MK_EXPL_GMAX=G -- explicit members only up to integer grade G (the readout (B), the partner's towers, the no-merge
     // registrations and the members' own contours at aligned exponents <= G + 1/2); above it production's moments (default: every grade)
     const double EXPL_GMAX_ = std::getenv("MK_EXPL_GMAX") ? std::atof(std::getenv("MK_EXPL_GMAX")) : 1e300;
+    // research round 1187 (S2b, REVIEW_7 Q1 gate step 2), MK_S2B=1 (default off: unset, the production engine unchanged): the l = 2 partner
+    // PINNED at centre 2 and the recursion BARE above it.  After the integer step whose aligned keys hold sigma_2 (the centre 2; sigma_2 =
+    // lapse_sl_sigma at l = 2 on the forward's cylinder, d = sigma_2 - g), each of its columns' j = 1 member is read from the cluster's
+    // well-conditioned (A, B) form -- A = moment 0 (the total), B = moment 1, the member's amplitude a_1 = B / d (REVIEW_4 F3) -- and REMOVED from the
+    // moments (m_k -= d^k a_1, k = 0 .. K - 1: the j = 0 member and anything else in them kept), never stored: every later centre steps on the
+    // partner-free series, and the partner's content at every grade is the slicing flow's (applied to the output; S2b part B); d is the moments'
+    // own offset (the step's pencil root; see the pin below).  The amplitudes
+    // per column (and a least-squares a_1 over k >= 1 beside them, with the k >= 2 residual: the two-member check) are written to OUT/s2b_partner.json.
+    const bool S2B_ = [] { const char* e = std::getenv("MK_S2B"); return e && std::string(e) == "1"; }();
+    struct S2bRec { int ps, j; double g, t, d; cd a1, a1_lsq; double res_k2, scale; };
+    std::vector<S2bRec> S2B_REC_;
     // research round 1146 (spec section 61): MK_EXPL_GROUP=1 -- a GROUP of explicit members within reach of a spurious root of the step pencil
     // (found as MK_EXPL_SPUR finds it, by identity) is stepped JOINTLY from the second pass on by the cluster route's local principal parts
     // (mk_cluster local_pp, spec section 29): the integer below the root and every partner member from it up to the root + delta (no family keys
@@ -494,6 +505,8 @@ class Engine {
 inline void Engine::run() {
     if (const char* t = std::getenv("MK_TRACE_CANON")) k_.c.trace_above = std::atof(t);
     int nn = P_.nn, K = k_.c.K, N = c_.N, NB = nn, nc = P_.nc;
+    // research round 1187: the steps' operator reads log moments 0, 1, 2 (meff) -- a bundle with K < 3 is refused before any step
+    if (K < 3) throw std::runtime_error("mk: the bundle has K = " + std::to_string(K) + " log moments; the engine needs K >= 3 (round 1187)");
     size_t nm = size_t(NB) * NB, nmc = size_t(nc) * NB;
     std::vector<Entry> C = S_.C0;
     // research round 1166 (the seeded unit test; MK_SEED=DIR, default off -- unset, production is unchanged): Kerr's exact content at every entry
@@ -581,6 +594,24 @@ inline void Engine::run() {
     const double R0 = c_.R;
     const double EPS_S = c_.eps_s > 0 ? c_.eps_s
         : std::min(k_.c.Rm > 0 ? k_.c.Rm : 1.0, std::pow(1e-12 * k_.c.fact[K - 1] * K, 1.0 / K) / std::abs(std::log(c_.xmin)));
+    if (S2B_) {
+        if (EXPL_) throw std::runtime_error("mk: MK_S2B and MK_EXPLICIT are exclusive (round 1187)");
+        if (CL) throw std::runtime_error("mk: MK_S2B is built for the non-cluster route (round 1187)");
+        const int NFc = int(k_.cyl.U.size());                        // (as MK_EXPLICIT's round-1138 block: the cylinder's cos 2j theta modes)
+        std::vector<double> u(NFc / 4, 0.0), P(NFc / 4, 0.0);
+        for (int j = 0; j < NFc / 4; j++)
+            for (int q = 0; q < NFc; q++) {
+                const double w = (j ? 2.0 : 1.0) / NFc * std::cos(2.0 * j * S_.TH[q]);
+                u[j] += w * k_.cyl.U[q];
+                P[j] += w * k_.cyl.P[q];
+            }
+        const auto sl = fm::lapse_sl_sigma(u, P, k_.c.n, 2);
+        SIGMA2_ = sl.count(2) ? sl.at(2) : std::nan("");
+        if (const char* e = std::getenv("MK_S2B_SIGMA2")) SIGMA2_ = std::atof(e);
+        if (!std::isfinite(SIGMA2_)) throw std::runtime_error("mk: MK_S2B: no l = 2 Sturm-Liouville exponent on this cylinder");
+        std::printf("  [s2b] MK_S2B=1: the l = 2 partner pinned at centre 2 (sigma_2 %.12f%s, delta %.9f), the recursion bare above it\n", SIGMA2_,
+                    std::getenv("MK_S2B_SIGMA2") ? ", MK_S2B_SIGMA2" : "", SIGMA2_ - 2.0);
+    }
     if (EXPL_ && k_.c.exact) {
         k_.c.xmerge = EPS_S;                                        // research round 1136: the algebra's merge scale (mk_series canon)
         std::printf("  [explicit] MK_EXPLICIT=1: explicit members at integer centres (fraction of rho %.2f); the algebra merges exact "
@@ -1905,6 +1936,32 @@ inline void Engine::run() {
                             if (rp_match) rp_.R = Rcur_;
                         }
                     }
+                    // research round 1187 (DIAGNOSTIC, MK_TOWER_CONTOUR=1, default off): the own-contour rule extended to a lapse family's TOWERS
+                    // (sigma + k, k >= 1: no own root) -- radius min(R, half the distance to the step pencil's nearest root), so that a root
+                    // near the tower (0.40: the gauge-l6 root 6/n = 4.3838, 0.032 from the l4 tower 4.4157) is not inside its contour
+                    if (flab.empty() && std::getenv("MK_TOWER_CONTOUR") && std::string(std::getenv("MK_TOWER_CONTOUR")) == "1") {
+                        std::string tlab;
+                        for (auto& f : fams)
+                            if (f.first.rfind("lapse", 0) == 0) {
+                                const double y = g - f.second.v;
+                                if (y > 0.5 && std::abs(y - std::nearbyint(y)) < 1e-9) { tlab = f.first + " tower +" + std::to_string(int(std::nearbyint(y))); break; }
+                            }
+                        if (!tlab.empty()) {
+                            std::vector<int> iax;
+                            {
+                                auto ac = ct::active(g, P_.kofs);
+                                for (int j = 0; j < NB; j++)
+                                    if (ac[j]) iax.push_back(j);
+                            }
+                            Vec ev = cl::pencil_roots(Ms, NB, iax, S_.rw, S_.cw);
+                            double dn = 1e300, dr = 0.0;
+                            for (auto& z : ev)
+                                if (std::abs(z) < dn) { dn = std::abs(z); dr = z.real(); }
+                            std::printf("    [tower contour %s %.6f] the nearest root %.6f (distance %.4f) -> contour radius %.4f (was %.4f)\n", tlab.c_str(), g,
+                                        g + dr, dn, std::min(Rcur_, dn / 2), Rcur_);
+                            Rcur_ = std::min(Rcur_, dn / 2);
+                        }
+                    }
                     // research round 1138: an explicit member (MK_EXPLICIT; an off-integer centre that is no family and no family's tower) is a
                     // SOURCE pole, not a root -- its contour excludes every root of the step pencil (radius min(R, half the nearest root's distance)),
                     // so its step is the particular solution M(g + d)^-1 S at its own exponent (residue rank 0).  A member within 1e-3 of a root would
@@ -3104,6 +3161,56 @@ inline void Engine::run() {
                         }
                     }
                 }
+                if (S2B_ && isint && std::abs(SIGMA2_ - g) < 0.5) {
+                    // round 1187 (S2b): the partner's member read from (A, B) and removed (see S2B_ above).  Its offset is the STEP'S OWN: the
+                    // centre's square operator carries the partner at its pencil root (2.0499 at 0.40, not sigma_2 2.0476: the true mode's
+                    // BR0 component sits at key 2, centre 3's unknown), so the member removed is the step's homogeneous mode, at the offset
+                    // the stored moments themselves carry (least squares over every column, sum m_k* m_(k+1) / sum |m_k|^2, k = 1 .. K - 2;
+                    // MK_S2B_OFFSET=sigma uses sigma_2 - g instead).  PH2's amplitude a_1 = B / d is then A minus the bare datum -- the
+                    // partner's column amplitude -- and the flow (part B) generates the partner at sigma_2 from it.
+                    cd numd = 0.0;
+                    double dend = 0.0;
+                    for (int j = 0; j < nn; j++) {
+                        Key t = ckey(k_.c, g + P_.kofs[j]);
+                        if (!(t.v >= 1)) continue;
+                        for (size_t q = 0; q < C.size(); q++)
+                            if (C[q].j == j && keq(C[q].t, t) && C[q].nb == 1) {
+                                for (int k = 1; k + 1 < K; k++) { numd += std::conj(C[q].m[k]) * C[q].m[k + 1]; dend += std::norm(C[q].m[k]); }
+                                break;
+                            }
+                    }
+                    const bool use_sig = std::getenv("MK_S2B_OFFSET") && std::string(std::getenv("MK_S2B_OFFSET")) == "sigma";
+                    const double d_own = dend > 0 ? (numd / dend).real() : SIGMA2_ - g;
+                    const double d = use_sig ? SIGMA2_ - g : d_own;
+                    std::printf("    [s2b g %.0f pass %d] the moments' own offset %+.9f (imaginary part %.1e), sigma_2 - g %+.9f: removed at %+.9f\n", g, ps, d_own,
+                                dend > 0 ? (numd / dend).imag() : 0.0, SIGMA2_ - g, d);
+                    cd aPH = 0.0;
+                    double rmax = 0.0;
+                    int nrm = 0;
+                    for (int j = 0; j < nn; j++) {
+                        Key t = ckey(k_.c, g + P_.kofs[j]);
+                        if (!(t.v >= 1)) continue;
+                        for (size_t q = 0; q < C.size(); q++) {
+                            if (!(C[q].j == j && keq(C[q].t, t) && C[q].nb == 1)) continue;
+                            auto& m = C[q].m;
+                            const cd a1 = m[1] / d;
+                            cd s_ = 0.0;
+                            double dd = 0.0, rk2 = 0.0, sc = 0.0;
+                            for (int k = 1; k < K; k++) { s_ += std::pow(d, k) * m[k]; dd += std::pow(d, 2 * k); }
+                            for (int k = 2; k < K; k++) rk2 = std::max(rk2, std::abs(m[k] - std::pow(d, k) * a1));
+                            for (int k = 0; k < K; k++) sc = std::max(sc, std::abs(m[k]));
+                            S2B_REC_.push_back(S2bRec{ps, j, g, t.v, d, a1, s_ / dd, rk2, sc});
+                            cd p = 1.0;
+                            for (int k = 0; k < K; k++) { m[k] -= p * a1; p *= d; }
+                            if (S_.collab[j] == "PH2") aPH = a1;
+                            if (a1 != cd(0.0)) nrm++;
+                            rmax = std::max(rmax, rk2 / std::max(std::abs(a1), 1e-300));
+                            break;
+                        }
+                    }
+                    std::printf("    [s2b g %.0f pass %d] the partner pinned: %d columns' j = 1 members (offset %+.9f) removed; PH2's a_1 %+.12e; the "
+                                "two-member check max_k>=2 |m_k - d^k a_1| / |a_1| %.2e\n", g, ps, nrm, d, aPH.real(), rmax);
+                }
                 k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " rows after";
                 k_.run(C, nullptr, c_.top);
                 Vec rb = galb(g);
@@ -3277,6 +3384,17 @@ inline void Engine::run() {
         npy_write(out_ + "/series_key.npy", key.data(), "<f8", {long(key.size())}, 8);
         npy_write(out_ + "/series_isint.npy", isi.data(), "<i4", {long(isi.size())}, 4);
         npy_write(out_ + "/series_mom.npy", mom.data(), "<c16", {long(col.size()), K}, 16);
+    }
+    if (S2B_) {                                                     // round 1187 (S2b): the partner's amplitudes per pass and column
+        std::string d = "{\"sigma2\":" + Json::num(SIGMA2_) + ",\"delta\":" + Json::num(SIGMA2_ - 2.0) + ",\"K\":" + std::to_string(K) + ",\"members\":[";
+        for (size_t q = 0; q < S2B_REC_.size(); q++) {
+            const auto& r = S2B_REC_[q];
+            d += (q ? "," : "") + std::string("{\"pass\":") + std::to_string(r.ps) + ",\"col\":" + std::to_string(r.j) + ",\"label\":" +
+                 Json::str(S_.collab[r.j]) + ",\"g\":" + Json::num(r.g) + ",\"key\":" + Json::num(r.t) + ",\"d\":" + Json::num(r.d) +
+                 ",\"a1\":[" + Json::num(r.a1.real()) + "," + Json::num(r.a1.imag()) + "],\"a1_lsq\":[" + Json::num(r.a1_lsq.real()) + "," +
+                 Json::num(r.a1_lsq.imag()) + "],\"res_k2\":" + Json::num(r.res_k2) + ",\"scale\":" + Json::num(r.scale) + "}";
+        }
+        std::ofstream(out_ + "/s2b_partner.json") << d << "]}\n";
     }
     // research round 1142 (H_4n): MK_ROWDUMP=1 -- reporting only: the pre-flow fields (fields_pre_<f>), and the six row series by exact key on the
     // pre-flow series (rows_pre_<i>) and on the gauge-flowed fields (rows_gauge_<i>), each as fields_gauge_<f> is written (key, isint, pieces

@@ -34,6 +34,7 @@ inline void meff_dual(Kernel& kr, const Proj& P, const std::vector<Entry>& Cx, c
                       std::vector<cd>& dMs, const Kernel::DCyl* dcy = nullptr) {
     Ctx& c = kr.c;
     int K = c.K, nn = P.nn, NB = P.nb * nn;
+    if (K < 3) throw std::runtime_error("mk: K = " + std::to_string(K) + " log moments: the step's operator needs K >= 3 (round 1187)");
     dMs.assign(size_t(3) * NB * NB, 0.0);
     std::vector<std::pair<int, Key>> colsb;
     for (int j = 0; j < nn; j++) colsb.emplace_back(j, ckey(c, g + P.kofs[j]));

@@ -161,6 +161,9 @@ inline void meff(Kernel& kr, const Proj& P, const std::vector<Entry>& Cx, double
     Kernel::RunTimer tm_{g_meff_secs, g_meff_calls};
     Ctx& c = kr.c;
     int K = c.K, nn = P.nn, nc = P.nc, NB = P.nb * nn;
+    // research round 1187: the operator is the quadratic in (sigma - g) read from log moments 0, 1, 2 (the +-h at moment 2 below): K < 3 indexed
+    // past the rows' buffers (heap corruption at K = 1, garbage at K = 2; round 1185's backtrace) -- refused
+    if (K < 3) throw std::runtime_error("mk: K = " + std::to_string(K) + " log moments: the step's operator needs K >= 3 (moments 0, 1, 2)");
     if (P.nb != 1) throw std::runtime_error("mk: the block recursion (nb = 2) is not ported");
     Ms.assign(size_t(3) * NB * NB, 0.0);
     Mc.assign(size_t(3) * nc * NB, 0.0);

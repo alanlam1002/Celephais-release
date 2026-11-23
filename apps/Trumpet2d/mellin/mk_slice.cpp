@@ -54,7 +54,7 @@ void flow_apply(Kernel& k_, Ser F[6], const FlowIn& in) {
             u[j] += w * k_.cyl.U[q];
             P[j] += w * k_.cyl.P[q];
         }
-    {                                                               // the bare (gauge-flowed, truncated) fields: OUT/fields_bare_<f>
+    if (!in.quiet) {                                                // the bare (gauge-flowed, truncated) fields: OUT/fields_bare_<f>
         static const char* FN[6] = {"psi2", "Phb", "qf", "br", "bt", "Qb"};
         for (int f = 0; f < 6; f++) {
             std::vector<double> ks;
@@ -136,12 +136,14 @@ void flow_apply(Kernel& k_, Ser F[6], const FlowIn& in) {
     } else
         addF(F1, DG, 0.5 * a * a, F);
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::printf("  [s2b flow] sigma_2 %.12f; G at top %g (h: %d keys, residual %.1e; zeta residual %.1e); a = %+.13e (PH2 a_1 %+.13e / G_PH2 %+.13e); "
-                "DG.G at eps %.1e; order %d (third-order term's largest piece x a^3 / 6: %.1e); %.1f s\n", rep.sigma, T, rep.h_iters, rep.h_res, rep.zeta_res, a,
-                a1.real(), gco[jph].real(), eps, order, d3max, secs);
-    std::ofstream(in.out + "/s2b_flow.json") << "{\"sigma2\":" << jnum(rep.sigma) << ",\"top\":" << jnum(T) << ",\"a\":" << jnum(a)
-                                          << ",\"a1_PH2\":" << jnum(a1.real()) << ",\"G_PH2\":" << jnum(gco[jph].real()) << ",\"eps\":" << jnum(eps)
-                                          << ",\"order\":" << order << ",\"third_max\":" << jnum(d3max) << ",\"h_residual\":" << jnum(rep.h_res) << ",\"zeta_residual\":" << jnum(rep.zeta_res) << "}\n";
+    if (!in.quiet) {
+        std::printf("  [s2b flow] sigma_2 %.12f; G at top %g (h: %d keys, residual %.1e; zeta residual %.1e); a = %+.13e (PH2 a_1 %+.13e / G_PH2 %+.13e); "
+                    "DG.G at eps %.1e; order %d (third-order term's largest piece x a^3 / 6: %.1e); %.1f s\n", rep.sigma, T, rep.h_iters, rep.h_res, rep.zeta_res, a,
+                    a1.real(), gco[jph].real(), eps, order, d3max, secs);
+        std::ofstream(in.out + "/s2b_flow.json") << "{\"sigma2\":" << jnum(rep.sigma) << ",\"top\":" << jnum(T) << ",\"a\":" << jnum(a)
+                                              << ",\"a1_PH2\":" << jnum(a1.real()) << ",\"G_PH2\":" << jnum(gco[jph].real()) << ",\"eps\":" << jnum(eps)
+                                              << ",\"order\":" << order << ",\"third_max\":" << jnum(d3max) << ",\"h_residual\":" << jnum(rep.h_res) << ",\"zeta_residual\":" << jnum(rep.zeta_res) << "}\n";
+    }
 }
 
 }  // namespace sl

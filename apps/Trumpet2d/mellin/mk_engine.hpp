@@ -258,7 +258,8 @@ class Engine {
     void run();
     void tangents(const TanOpt& T);
     // n2a_nl fit_out's fvec: the fit's equations and outputs on a series (the gauge families' amplitudes given)
-    std::vector<cd> fvec(Kernel& kc, const std::vector<Entry>& Cx, const std::vector<std::pair<int, double>>& gauge, const std::vector<double>& cents);
+    std::vector<cd> fvec(Kernel& kc, const std::vector<Entry>& Cx, const std::vector<std::pair<int, double>>& gauge, const std::vector<double>& cents,
+                         const cd* s2b_a1 = nullptr);
     // G3 (i) (spinning_trumpet NOTES_M4_DESIGN.md section 19): the matching keys' own n-dependence at a FIXED series -- d mk / dn through the
     // gauge Lie flow (its generator's keys l / n move: a log-moment shift at the same key) and the evaluation at r_m (x_m = r_m^n)
     std::vector<double> mkey_dn(Kernel& kc, const std::vector<Entry>& Cx, const std::vector<std::pair<int, double>>& gauge);
@@ -361,6 +362,11 @@ class Engine {
     const bool S2B_ = [] { const char* e = std::getenv("MK_S2B"); return e && std::string(e) == "1"; }();
     struct S2bRec { int ps, j; double g, t, d; cd a1, a1_lsq; double res_k2, scale; };
     std::vector<S2bRec> S2B_REC_;
+    // round 1190: the pin's last values -- PH2's amplitude a_1 (the flow's datum), its PH column, the offset d and the centre -- for the fit's fvec
+    // (the matching outputs through the flow) and the tangents (the pin applied to the series tangent, d frozen as the forward's decisions are)
+    cd S2B_A1_ = 0.0;
+    int S2B_JPH_ = -1;
+    double S2B_DPIN_ = 0.0, S2B_GPIN_ = -1.0;
     // round 1189 (S2b part B): the flow F = F0 + a G[F0] + (a^2 / 2) DG[F0].G[F0] on the gauge-flowed bare fields (mk_slice.hpp, the port of
     // slice_s1.build and scripts/s2b_flow.py): G at top MK_S2B_TOP (default min(fields' top, 8)), a = PH2's pinned amplitude / G's PH2 coefficient at sigma_2,
     // DG.G by central differences along G at MK_S2B_EPS (default 5e-4, relative to a); the third order when the top reaches 3 sigma_2; OUT/s2b_flow.json
@@ -3215,12 +3221,14 @@ inline void Engine::run() {
                             S2B_REC_.push_back(S2bRec{ps, j, g, t.v, d, a1, s_ / dd, rk2, sc});
                             cd p = 1.0;
                             for (int k = 0; k < K; k++) { m[k] -= p * a1; p *= d; }
-                            if (S_.collab[j] == "PH2") aPH = a1;
+                            if (S_.collab[j] == "PH2") { aPH = a1; S2B_A1_ = a1; S2B_JPH_ = k_.colidx[j]; }
                             if (a1 != cd(0.0)) nrm++;
                             rmax = std::max(rmax, rk2 / std::max(std::abs(a1), 1e-300));
                             break;
                         }
                     }
+                    S2B_DPIN_ = d;
+                    S2B_GPIN_ = g;
                     std::printf("    [s2b g %.0f pass %d] the partner pinned: %d columns' j = 1 members (offset %+.9f) removed; PH2's a_1 %+.12e; the "
                                 "two-member check max_k>=2 |m_k - d^k a_1| / |a_1| %.2e\n", g, ps, nrm, d, aPH.real(), rmax);
                 }
@@ -3700,7 +3708,7 @@ inline void Engine::mk_dn_check(double h) {
 }
 
 inline std::vector<cd> Engine::fvec(Kernel& kc, const std::vector<Entry>& Cx, const std::vector<std::pair<int, double>>& gauge,
-                                    const std::vector<double>& cents) {
+                                    const std::vector<double>& cents, const cd* s2b_a1) {
     int nn = P_.nn, nc = P_.nc, K = kc.c.K, NF = kc.c.NF;
     if (!S_.eval_r.empty()) throw std::runtime_error("mk: --eval-r (the outputs at radii) is not ported");
     kc.run(Cx, nullptr, c_.top);
@@ -3743,6 +3751,16 @@ inline std::vector<cd> Engine::fvec(Kernel& kc, const std::vector<Entry>& Cx, co
         Ser F[6];
         kc.fields(Cx, c_.gmax + 1, F);
         if (!gauge.empty()) fm::lie_flow(kc.c, F, gauge, c_.J, S_.TH, c_.gauge_steps);
+        if (S2B_) {                                                 // round 1190: the matching outputs through the l = 2 slicing flow
+            sl::FlowIn in;
+            in.TH = &S_.TH;
+            in.J = c_.J;
+            in.out = out_;
+            in.a1 = s2b_a1 ? *s2b_a1 : S2B_A1_;
+            in.jph = S2B_JPH_;
+            in.quiet = true;
+            sl::flow_apply(kc, F, in);
+        }
         double r = S_.md_rm, n = kc.c.n;
         // n3_throat_eval.ms_at: r^e sum_t x^t sum_m c_m (ln x)^m / m!, x = r^n (None for an empty series)
         auto ms_at = [&](const Ser& ms, std::vector<cd>& tot) {
@@ -3926,6 +3944,7 @@ inline void Engine::tangents(const TanOpt& T) {
         double dv_imag = 0.0;
         std::vector<double> ph, step_max, step_last, step_last_abs;
         double secs = 0.0;
+        cd da1 = 0.0;                                               // round 1190: the pinned PH2 amplitude's derivative (MK_S2B)
         std::string err;
     };
     std::vector<Res> res(dirs.size());
@@ -4086,6 +4105,21 @@ inline void Engine::tangents(const TanOpt& T) {
                     r.step_last.push_back(so.hh.empty() ? 0.0 : so.hh.back());
                     r.step_last_abs.push_back(so.hha.empty() ? 0.0 : so.hha.back());
                     dC = with_grade(kc.c, dC, so.dX, g, kofs, S_.e1, c_.R);
+                    if (S2B_ && std::abs(g - S2B_GPIN_) < 1e-9) {     // round 1190: the pin, linear in the moments (d frozen)
+                        const double d = S2B_DPIN_;
+                        for (int j = 0; j < NB; j++) {
+                            Key t = ckey(kc.c, g + kofs[j]);
+                            if (!(t.v >= 1)) continue;
+                            for (auto& en : dC)
+                                if (en.j == j && keq(en.t, t) && en.nb == 1) {
+                                    const cd da = en.m[1] / d;
+                                    cd pw = 1.0;
+                                    for (int k = 0; k < K; k++) { en.m[k] -= pw * da; pw *= d; }
+                                    if (S_.collab[j] == "PH2") r.da1 = da;
+                                    break;
+                                }
+                        }
+                    }
                 }
                 double ch = 0.0;
                 for (auto& en : dC) {
@@ -4126,7 +4160,8 @@ inline void Engine::tangents(const TanOpt& T) {
                 }
                 std::vector<std::pair<int, double>> ga;
                 for (auto& q : gall) ga.emplace_back(q.first, q.second + e * (gc.count(q.first) ? gc[q.first] : 0.0));
-                return fvec(kc, Cx, ga, cents);
+                const cd a1e = S2B_A1_ + cd(e, 0.0) * r.da1;
+                return fvec(kc, Cx, ga, cents, &a1e);
             };
             auto v1 = f(h), v2 = f(-h), v3 = f(2 * h), v4 = f(-2 * h);
             for (size_t q = 0; q < v1.size(); q++) {
@@ -4248,15 +4283,12 @@ inline void Engine::tangents(const TanOpt& T) {
 // round 1189: the flow itself is compiled in its own translation unit (mk_slice.cpp; mk_slice_api.hpp) -- with it here, GCC's inlining of the
 // shared series operations changed and the switch-off production differed from r1171 at round-off; here only the datum is gathered
 inline void mk::en::Engine::s2b_flow(mk::Ser F[6]) {
-    int lastp = -1;
-    for (auto& r : S2B_REC_) lastp = std::max(lastp, r.ps);
     sl::FlowIn in;
     in.TH = &S_.TH;
     in.J = c_.J;
     in.out = out_;
-    in.jph = -1;
-    for (auto& r : S2B_REC_)
-        if (r.ps == lastp && S_.collab[r.j] == "PH2") { in.a1 = r.a1; in.jph = k_.colidx[r.j]; }
+    in.a1 = S2B_A1_;
+    in.jph = S2B_JPH_;
     if (in.jph < 0) throw std::runtime_error("mk: MK_S2B: no pinned PH2 amplitude");
     sl::flow_apply(k_, F, in);
 }

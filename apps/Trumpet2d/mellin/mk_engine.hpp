@@ -18,6 +18,7 @@
 #include "mk_tangent.hpp"
 #include "mk_cluster.hpp"
 #include "mk_json.hpp"
+#include "mk_slice_api.hpp"
 
 #include <array>
 #include <cstdio>
@@ -360,6 +361,10 @@ class Engine {
     const bool S2B_ = [] { const char* e = std::getenv("MK_S2B"); return e && std::string(e) == "1"; }();
     struct S2bRec { int ps, j; double g, t, d; cd a1, a1_lsq; double res_k2, scale; };
     std::vector<S2bRec> S2B_REC_;
+    // round 1189 (S2b part B): the flow F = F0 + a G[F0] + (a^2 / 2) DG[F0].G[F0] on the gauge-flowed bare fields (mk_slice.hpp, the port of
+    // slice_s1.build and scripts/s2b_flow.py): G at top MK_S2B_TOP (default min(fields' top, 8)), a = PH2's pinned amplitude / G's PH2 coefficient at sigma_2,
+    // DG.G by central differences along G at MK_S2B_EPS (default 5e-4, relative to a); the third order when the top reaches 3 sigma_2; OUT/s2b_flow.json
+    void s2b_flow(Ser F[6]);
     // research round 1146 (spec section 61): MK_EXPL_GROUP=1 -- a GROUP of explicit members within reach of a spurious root of the step pencil
     // (found as MK_EXPL_SPUR finds it, by identity) is stepped JOINTLY from the second pass on by the cluster route's local principal parts
     // (mk_cluster local_pp, spec section 29): the integer below the root and every partner member from it up to the root + delta (no family keys
@@ -1936,7 +1941,7 @@ inline void Engine::run() {
                             if (rp_match) rp_.R = Rcur_;
                         }
                     }
-                    // research round 1187 (DIAGNOSTIC, MK_TOWER_CONTOUR=1, default off): the own-contour rule extended to a lapse family's TOWERS
+                    // research round 1187 (MK_TOWER_CONTOUR=1, default off; round 1189: part of the S2b change set): the own-contour rule extended to a lapse family's TOWERS
                     // (sigma + k, k >= 1: no own root) -- radius min(R, half the distance to the step pencil's nearest root), so that a root
                     // near the tower (0.40: the gauge-l6 root 6/n = 4.3838, 0.032 from the l4 tower 4.4157) is not inside its contour
                     if (flab.empty() && std::getenv("MK_TOWER_CONTOUR") && std::string(std::getenv("MK_TOWER_CONTOUR")) == "1") {
@@ -1957,9 +1962,17 @@ inline void Engine::run() {
                             double dn = 1e300, dr = 0.0;
                             for (auto& z : ev)
                                 if (std::abs(z) < dn) { dn = std::abs(z); dr = z.real(); }
-                            std::printf("    [tower contour %s %.6f] the nearest root %.6f (distance %.4f) -> contour radius %.4f (was %.4f)\n", tlab.c_str(), g,
-                                        g + dr, dn, std::min(Rcur_, dn / 2), Rcur_);
-                            Rcur_ = std::min(Rcur_, dn / 2);
+                            // research round 1189: restricted to towers whose narrowed radius is not below the offsets merged there -- the
+                            // largest offset of an interned exact exponent (k_.c.xk) within the default radius; else the radius is kept
+                            double moff = 0.0;
+                            for (double x : k_.c.xk)
+                                if (std::abs(x - g) > 1e-9 && std::abs(x - g) < Rcur_) moff = std::max(moff, std::abs(x - g));
+                            const double rn = std::min(Rcur_, dn / 2);
+                            const bool narrow = rn >= moff;
+                            std::printf("    [tower contour %s %.6f] the nearest root %.6f (distance %.4f); merged offsets up to %.4f -> contour radius %.4f "
+                                        "(was %.4f)%s\n", tlab.c_str(), g, g + dr, dn, moff, narrow ? rn : Rcur_, Rcur_,
+                                        narrow ? "" : " NOT narrowed: below the merged offsets (round 1189)");
+                            if (narrow) Rcur_ = rn;
                         }
                     }
                     // research round 1138: an explicit member (MK_EXPLICIT; an off-integer centre that is no family and no family's tower) is a
@@ -3426,6 +3439,7 @@ inline void Engine::run() {
             for (int f = 0; f < 6; f++) dump_ser(F[f], out_ + "/fields_pre_" + FNp[f]);
         }
         fm::lie_flow(k_.c, F, c_.gauge, c_.J, S_.TH, c_.gauge_steps);
+        if (S2B_) s2b_flow(F);                                      // round 1189: the l = 2 slicing flow of the bare forward (S2b part B)
         if (ROWDUMP) {
             for (int f = 0; f < 6; f++) k_.Fin[f] = F[f];
             k_.use_fin = true;
@@ -4231,5 +4245,20 @@ inline void Engine::tangents(const TanOpt& T) {
 }  // namespace en
 }  // namespace mk
 
+// round 1189: the flow itself is compiled in its own translation unit (mk_slice.cpp; mk_slice_api.hpp) -- with it here, GCC's inlining of the
+// shared series operations changed and the switch-off production differed from r1171 at round-off; here only the datum is gathered
+inline void mk::en::Engine::s2b_flow(mk::Ser F[6]) {
+    int lastp = -1;
+    for (auto& r : S2B_REC_) lastp = std::max(lastp, r.ps);
+    sl::FlowIn in;
+    in.TH = &S_.TH;
+    in.J = c_.J;
+    in.out = out_;
+    in.jph = -1;
+    for (auto& r : S2B_REC_)
+        if (r.ps == lastp && S_.collab[r.j] == "PH2") { in.a1 = r.a1; in.jph = k_.colidx[r.j]; }
+    if (in.jph < 0) throw std::runtime_error("mk: MK_S2B: no pinned PH2 amplitude");
+    sl::flow_apply(k_, F, in);
+}
 #include "mk_replay1.hpp"
 #include "mk_replay2.hpp"

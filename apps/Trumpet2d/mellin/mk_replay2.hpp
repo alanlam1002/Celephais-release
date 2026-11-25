@@ -133,6 +133,11 @@ inline void Engine::tan_init(std::vector<Entry>& C) {
         }
         tn_.cyl = true;
         tn_.seeded = true;
+    } else if (tn_.kind == "tgt") {
+        // tangents (research round 1204, coverage 2b): a --tgt target 'NAME@tT' -- no series seed; at the integer centre whose data rule it hits
+        // (dt::targets: tg0[j] = the target's value at the column named NAME@t(g + kofs_j)), d tg0 = 1 at that slot (tan_step)
+        if (c_.tgt.find(tn_.name + "=") == std::string::npos) throw std::runtime_error("MK_TAN: tgt:" + tn_.name + " is not a --tgt target");
+        tn_.seeded = true;
     } else if (tn_.kind == "gauge") {
         // tangents (research round 1204, coverage 2a): a gauge amplitude 'lN' -- no series tangent (the gauge acts only through fvec's Lie flow;
         // the FD gauge columns are exactly zero outside the matching keys at fdjac_k8); the replay column moves the amplitude in its stencil
@@ -342,14 +347,23 @@ inline void Engine::tan_step(double g) {
                 ev.cond = [](const Vec&) { return Vec(); };
                 ev.gate = [](const Vec*, double) { return 0.0; };
                 dt::data_rule(din, ev, dout);
+                // tangents (round 1204): a target seed's d tg0 -- 1 at the slot dt::targets filled from it (weight 1, the name matching)
+                std::vector<Vec> dtg0;
+                if (tn_.kind == "tgt") {
+                    Vec d0(2 * size_t(NB), 0.0);
+                    bool hit = false;
+                    for (int j = 0; j < nn; j++)
+                        if (S_.collab[j] + "@t" + std::to_string(int(g + P_.kofs[j])) == tn_.name && din.wt[j] == 1.0) { d0[j] = 1.0; hit = true; }
+                    if (hit) { dtg0.push_back(d0); std::printf("    [tangent g %.6f] the target %s seeded in the data rule\n", g, tn_.name.c_str()); }
+                }
                 ddl::DataT td;
-                ddl::data_rule_t(din, dout, tc.dX0, tc.dWq, {}, ND, td);
+                ddl::data_rule_t(din, dout, tc.dX0, tc.dWq, dtg0, ND, td);
                 Xs = dout.Xg;
                 dXs = td.dXg[0];
                 Wn = dout.Wq;
                 dWn = td.dWn;
                 if (c_.cond_fit) {
-                    fix = [din, dout, dWn](const Vec& X, const sd::Tv& dX, sd::Tv& dO) { return ddl::data_fix_t(X, dX, din, dout, dWn, {}, 1, dO); };
+                    fix = [din, dout, dWn, dtg0](const Vec& X, const sd::Tv& dX, sd::Tv& dO) { return ddl::data_fix_t(X, dX, din, dout, dWn, dtg0, 1, dO); };
                     fixp = &fix;
                 }
             }

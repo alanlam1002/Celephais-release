@@ -179,6 +179,7 @@ inline void load_engine(const std::string& dir, Kernel& k, Proj& P, Setup& S, Cf
     }
     c.cond_full = B.geti("cond_full", 0); c.robust = B.geti("defect_stop_robust", 0); c.offl_auto = gs("offl") == "auto";
     c.meff_mode = gs("meff_mode") == "jvp" ? 1 : 0;
+    c.meff_h = B.getd("meff_h", 1e-2);                              // tangents (research round 1210, a measurement): the operator's FD step (absent: 1e-2, unchanged)
     c.tgt = gs("tgt");
     S.set_data = gs("set_data");
     S.j_br0 = B.geti("j_br0", -1);

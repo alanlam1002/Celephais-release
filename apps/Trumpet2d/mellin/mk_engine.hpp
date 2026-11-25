@@ -489,6 +489,28 @@ class Engine {
         int gauge_l = -1;                          // tangents (round 1204): MK_TAN=gauge:lN, the gauge amplitude moved in the replay column's stencil
     } tn_;
     void s2b_pin_tan(const std::vector<Entry>& C, double g, double d, bool d_fixed);
+    // tangents (round 1205, coverage 3a): a kernel's cylinder moved by e d (grid values, K's constant piece, bnorm, n), as the FD bundles move it
+    static void cyl_move(Kernel& kc, const Kernel::DCyl& d, double e) {
+        auto mv = [&](std::vector<double>& v, const std::vector<double>& dv) { for (size_t i = 0; i < v.size() && i < dv.size(); i++) v[i] += e * dv[i]; };
+        mv(kc.cyl.U, d.U); mv(kc.cyl.P, d.P); mv(kc.cyl.b, d.b); mv(kc.cyl.q, d.q); mv(kc.cyl.Qb, d.Qb); mv(kc.cyl.bt, d.bt);
+        if (d.dK != 0.0) for (auto& z : kc.cyl.v_Ph_r) z += cd(e * d.dK, 0.0);
+        kc.cyl.bnorm += e * d.dbnorm;
+        kc.c.n += e * d.dn;
+    }
+    // the size of what a cylinder seed moves, relative: min over the moved quantities of |its size| / |its direction|
+    static double cyl_scale(const Kernel& k, const Kernel::DCyl& d) {
+        double r = 1e300;
+        auto rel = [&](const std::vector<double>& v, const std::vector<double>& dv) {
+            double a = 0.0, b = 0.0;
+            for (size_t i = 0; i < v.size() && i < dv.size(); i++) { a = std::max(a, std::abs(v[i])); b = std::max(b, std::abs(dv[i])); }
+            if (b > 0) r = std::min(r, std::max(a, 1e-3) / b);
+        };
+        rel(k.cyl.U, d.U); rel(k.cyl.P, d.P); rel(k.cyl.b, d.b); rel(k.cyl.q, d.q); rel(k.cyl.Qb, d.Qb); rel(k.cyl.bt, d.bt);
+        if (d.dK != 0.0 && !k.cyl.v_Ph_r.empty()) r = std::min(r, std::abs(k.cyl.v_Ph_r[0]) / std::abs(d.dK));
+        if (d.dbnorm != 0.0) r = std::min(r, std::abs(k.cyl.bnorm) / std::abs(d.dbnorm));
+        if (d.dn != 0.0) r = std::min(r, std::abs(k.c.n) / std::abs(d.dn));
+        return r;
+    }
     void tan_init(std::vector<Entry>& C);
     void tan_step(double g);
     void tan_finish(const std::vector<Entry>& C);
@@ -3912,7 +3934,7 @@ inline void Engine::tangents(const TanOpt& T) {
         double dvi = 0.0, h = 0.0;
         if (tn_.gauge_l >= 0) mx = std::max(mx, 1.0);              // (round 1204: the gauge seed's unit coefficient, as the M3 mode's gc)
         const bool via_a1 = S2B_ && tn_.pinned && std::abs(tn_.da1) > 0;   // (round 1204: a column may reach the outputs through a_1 alone)
-        if (mx > 0 || via_a1) {
+        if (mx > 0 || via_a1 || tn_.cyl) {
             h = mx > 0 ? T.h / mx : 1e300;
             // tangents (research round 1204, item 1): the column's stencil step measured as the matching outputs see the series -- each
             // moment weighted by x_m^t |ln x_m|^k / k! (x_m = r_m^n; ms_at's evaluation at r_m), h = tan_h |C|_w / |dC|_w: a relative perturbation
@@ -3939,6 +3961,8 @@ inline void Engine::tangents(const TanOpt& T) {
             // PH2 at the pinned centre reaches the outputs only through a_1: its series tangent is ~0 after the pin)
             if (!(cs && std::string(cs) == "max") && S2B_ && tn_.pinned && std::abs(tn_.da1) > 0 && std::abs(S2B_A1_) > 0)
                 h = std::min(h, T.h * std::abs(S2B_A1_) / std::abs(tn_.da1));
+            // (round 1205, 3a: a cylinder seed also moves the cylinder by e d -- the same relative bound, tan_h of each moved quantity's own size)
+            if (tn_.cyl && !(cs && std::string(cs) == "max")) h = std::min(h, T.h * cyl_scale(k_, tn_.dcy));
             // (research round 1205: a gauge seed's column is a STENCIL OF THE LIE FLOW, not an exact tangent -- step 1e-4 in amplitude units, the
             // ruling's; MK_TAN_GAUGE_H overrides)
             if (tn_.gauge_l >= 0) h = std::getenv("MK_TAN_GAUGE_H") ? std::atof(std::getenv("MK_TAN_GAUGE_H")) : 1e-4;
@@ -3963,9 +3987,18 @@ inline void Engine::tangents(const TanOpt& T) {
                     if (!hit) ga.emplace_back(tn_.gauge_l, e);
                 }
                 // tangents stage 1 (round 1203): under MK_S2B the flow's amplitude moves with the direction (the pin's d a_1, s2b_pin_tan)
-                if (S2B_ && tn_.pinned) {
+                if (S2B_ && tn_.pinned && !tn_.cyl) {
                     const cd a1e = S2B_A1_ + cd(e, 0.0) * tn_.da1;
                     return fvec(k_, Cx, ga, cents, &a1e);
+                }
+                if (tn_.cyl) {                                        // tangents (round 1205, coverage 3a): fvec's DIRECT cylinder dependence
+                    Kernel kc = k_;
+                    cyl_move(kc, tn_.dcy, e);
+                    if (S2B_ && tn_.pinned) {
+                        const cd a1e = S2B_A1_ + cd(e, 0.0) * tn_.da1;
+                        return fvec(kc, Cx, ga, cents, &a1e);
+                    }
+                    return fvec(kc, Cx, ga, cents);
                 }
                 return fvec(k_, Cx, ga, cents);
             };
@@ -3980,7 +4013,7 @@ inline void Engine::tangents(const TanOpt& T) {
         Json R;
         R.open('{');
         R.kv("direction", Json::str(tn_.kind + ":" + tn_.name));
-        R.kv("partial", tn_.cyl ? "true" : "false");
+        R.kv("partial", "false");                                   // (round 1205: 3a supplies the cylinder's direct dependence)
         R.kv("method", Json::str(tn_.gauge_l >= 0 ? "stencil of the Lie flow" : "replay"));
         R.kv("h", Json::num(h));
         R.kv("dv_imag", Json::num(dvi));

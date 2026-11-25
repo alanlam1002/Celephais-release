@@ -1979,6 +1979,9 @@ inline void Engine::run() {
                                         "(was %.4f)%s\n", tlab.c_str(), g, g + dr, dn, moff, narrow ? rn : Rcur_, Rcur_,
                                         narrow ? "" : " NOT narrowed: below the merged offsets (round 1189)");
                             if (narrow) Rcur_ = rn;
+                            // tangents stage 1 (research round 1203): the replay's capture takes the narrowed radius, as the own-contour and
+                            // explicit-member branches already do (rp_ is read only by the replays, MK_TAN / MK_STEP_REPLAY: the forward unchanged)
+                            if (narrow && rp_match) rp_.R = Rcur_;
                         }
                     }
                     // research round 1138: an explicit member (MK_EXPLICIT; an off-integer centre that is no family and no family's tower) is a

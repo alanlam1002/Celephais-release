@@ -133,8 +133,14 @@ inline void Engine::tan_init(std::vector<Entry>& C) {
         }
         tn_.cyl = true;
         tn_.seeded = true;
+    } else if (tn_.kind == "gauge") {
+        // tangents (research round 1204, coverage 2a): a gauge amplitude 'lN' -- no series tangent (the gauge acts only through fvec's Lie flow;
+        // the FD gauge columns are exactly zero outside the matching keys at fdjac_k8); the replay column moves the amplitude in its stencil
+        if (tn_.name.size() < 2 || tn_.name[0] != 'l') throw std::runtime_error("MK_TAN: gauge:lN");
+        tn_.gauge_l = std::stoi(tn_.name.substr(1));
+        tn_.seeded = true;
     } else if (tn_.kind != "offl")
-        throw std::runtime_error("MK_TAN: data:NAME@tT, offl:FAMILY or cyl:KEY");
+        throw std::runtime_error("MK_TAN: data:NAME@tT, offl:FAMILY, cyl:KEY or gauge:lN");
     if (const char* ds = std::getenv("MK_TAN_DSIG")) {              // research round 1096: the centres' motion along the direction
         std::string t(ds);
         size_t p0 = 0;

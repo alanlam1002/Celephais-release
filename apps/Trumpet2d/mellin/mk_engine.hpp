@@ -486,6 +486,7 @@ class Engine {
         std::vector<std::pair<double, double>> dsig;   // research round 1096: the centres' motion (MK_TAN_DSIG=centre:dsigma,...): a step at n c + k moves by n dsigma
         cd da1 = 0.0;                              // tangents stage 1 (round 1203): d a_1 / dp of the pinned PH2 amplitude (MK_S2B), the last pass's
         bool pinned = false;
+        int gauge_l = -1;                          // tangents (round 1204): MK_TAN=gauge:lN, the gauge amplitude moved in the replay column's stencil
     } tn_;
     void s2b_pin_tan(const std::vector<Entry>& C, double g, double d, bool d_fixed);
     void tan_init(std::vector<Entry>& C);
@@ -3909,6 +3910,7 @@ inline void Engine::tangents(const TanOpt& T) {
             for (auto& z : d.m) mx = std::max(mx, std::abs(z));
         std::vector<double> dv;
         double dvi = 0.0, h = 0.0;
+        if (tn_.gauge_l >= 0) mx = std::max(mx, 1.0);              // (round 1204: the gauge seed's unit coefficient, as the M3 mode's gc)
         if (mx > 0) {
             h = T.h / mx;
             // (a DIAGNOSTIC, replay only: MK_TAN_COLH=FACTOR scales the step -- the round-off test; absent: unchanged)
@@ -3925,6 +3927,12 @@ inline void Engine::tangents(const TanOpt& T) {
                     else Cx.push_back(Entry{d.j, d.t, 1, m});
                 }
                 std::vector<std::pair<int, double>> ga(c_.gauge.begin(), c_.gauge.end());
+                if (tn_.gauge_l >= 0) {                              // tangents (round 1204): the gauge seed's amplitude moved by e
+                    bool hit = false;
+                    for (auto& q : ga)
+                        if (q.first == tn_.gauge_l) { q.second += e; hit = true; }
+                    if (!hit) ga.emplace_back(tn_.gauge_l, e);
+                }
                 // tangents stage 1 (round 1203): under MK_S2B the flow's amplitude moves with the direction (the pin's d a_1, s2b_pin_tan)
                 if (S2B_ && tn_.pinned) {
                     const cd a1e = S2B_A1_ + cd(e, 0.0) * tn_.da1;

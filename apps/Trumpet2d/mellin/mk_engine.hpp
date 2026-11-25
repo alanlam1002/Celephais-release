@@ -484,7 +484,10 @@ class Engine {
         bool cyl = false;                          // research round 1095: a cylinder direction (MK_TAN=cyl:KEY), the kernel's run2 response
         Kernel::DCyl dcy;
         std::vector<std::pair<double, double>> dsig;   // research round 1096: the centres' motion (MK_TAN_DSIG=centre:dsigma,...): a step at n c + k moves by n dsigma
+        cd da1 = 0.0;                              // tangents stage 1 (round 1203): d a_1 / dp of the pinned PH2 amplitude (MK_S2B), the last pass's
+        bool pinned = false;
     } tn_;
+    void s2b_pin_tan(const std::vector<Entry>& C, double g, double d, bool d_fixed);
     void tan_init(std::vector<Entry>& C);
     void tan_step(double g);
     void tan_finish(const std::vector<Entry>& C);
@@ -3204,6 +3207,7 @@ inline void Engine::run() {
                     const bool use_sig = std::getenv("MK_S2B_OFFSET") && std::string(std::getenv("MK_S2B_OFFSET")) == "sigma";
                     const double d_own = dend > 0 ? (numd / dend).real() : SIGMA2_ - g;
                     const double d = use_sig ? SIGMA2_ - g : d_own;
+                    if (tn_.on) s2b_pin_tan(C, g, d, use_sig || !(dend > 0));     // tangents stage 1 (round 1203): the pin in the replay
                     std::printf("    [s2b g %.0f pass %d] the moments' own offset %+.9f (imaginary part %.1e), sigma_2 - g %+.9f: removed at %+.9f\n", g, ps, d_own,
                                 dend > 0 ? (numd / dend).imag() : 0.0, SIGMA2_ - g, d);
                     cd aPH = 0.0;
@@ -3919,6 +3923,11 @@ inline void Engine::tangents(const TanOpt& T) {
                     else Cx.push_back(Entry{d.j, d.t, 1, m});
                 }
                 std::vector<std::pair<int, double>> ga(c_.gauge.begin(), c_.gauge.end());
+                // tangents stage 1 (round 1203): under MK_S2B the flow's amplitude moves with the direction (the pin's d a_1, s2b_pin_tan)
+                if (S2B_ && tn_.pinned) {
+                    const cd a1e = S2B_A1_ + cd(e, 0.0) * tn_.da1;
+                    return fvec(k_, Cx, ga, cents, &a1e);
+                }
                 return fvec(k_, Cx, ga, cents);
             };
             auto v1 = f(h), v2 = f(-h), v3 = f(2 * h), v4 = f(-2 * h);

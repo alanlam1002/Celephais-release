@@ -391,5 +391,66 @@ inline void Engine::tan_finish(const std::vector<Entry>& C) {
     std::printf("  [tangent] %d steps on duals; the worst replayed value against the forward's blocks %.2e\n", tn_.steps, tn_.worst_val);
 }
 
+// tangents stage 1 (research round 1203): the S2b pin in the replay.  The forward (mk_engine.hpp, MK_S2B, the integer centre whose contour holds
+// sigma_2) removes from every column j (key g + kofs_j >= 1) the member p d^k a1_j, a1_j = m1_j / d, at the offset d the stored moments carry,
+// d = Re(num / den), num = sum_j sum_{k=1}^{K-2} conj(m_k) m_(k+1), den = sum_j sum_{k=1}^{K-2} |m_k|^2 (MK_S2B_OFFSET=sigma: d = sigma_2 - g, fixed).
+// Its exact linearisation along the replay's direction, applied to the series tangent tn_.dC before the forward edits C (C here pre-pin):
+//   dd = Re(dnum / den - num dden / den^2)   (0 when d is fixed),   da1_j = dm1_j / d - m1_j dd / d^2,
+//   dm_k <- dm_k - (d^k da1_j + k d^(k-1) dd a1_j)   (k = 0 .. K - 1, the forward's loop),
+// and PH2's da1 kept (the flow's amplitude in the replay column's stencil).  Nothing decided here: which centre pins and which columns enter
+// are the forward's tests, read from C.
+inline void Engine::s2b_pin_tan(const std::vector<Entry>& C, double g, double d, bool d_fixed) {
+    const int K = k_.c.K, nn = P_.nn;
+    std::vector<int> qc(nn, -1), qd(nn, -1);
+    for (int j = 0; j < nn; j++) {
+        Key t = ckey(k_.c, g + P_.kofs[j]);
+        if (!(t.v >= 1)) continue;
+        for (size_t q = 0; q < C.size(); q++)
+            if (C[q].j == j && keq(C[q].t, t) && C[q].nb == 1) { qc[j] = int(q); break; }
+        if (qc[j] < 0) continue;
+        for (size_t q = 0; q < tn_.dC.size(); q++)
+            if (tn_.dC[q].j == j && keq(tn_.dC[q].t, t)) { qd[j] = int(q); break; }
+        if (qd[j] < 0) {                                             // (no tangent there yet: a zero entry, filled below if a1's derivative is not zero)
+            tn_.dC.push_back(Entry{j, t, 1, std::vector<cd>(K, 0.0)});
+            qd[j] = int(tn_.dC.size()) - 1;
+        }
+        if (tn_.dC[qd[j]].nb != 1) throw std::runtime_error("s2b_pin_tan: a batched tangent");
+        if (int(tn_.dC[qd[j]].m.size()) < K) tn_.dC[qd[j]].m.resize(K, 0.0);
+    }
+    double dd = 0.0;
+    if (!d_fixed) {
+        cd num = 0.0, dnum = 0.0;
+        double den = 0.0, dden = 0.0;
+        for (int j = 0; j < nn; j++) {
+            if (qc[j] < 0) continue;
+            const auto& m = C[qc[j]].m;
+            const auto& dm = tn_.dC[qd[j]].m;
+            for (int k = 1; k + 1 < K; k++) {
+                num += std::conj(m[k]) * m[k + 1];
+                dnum += std::conj(dm[k]) * m[k + 1] + std::conj(m[k]) * dm[k + 1];
+                den += std::norm(m[k]);
+                dden += 2.0 * (std::conj(m[k]) * dm[k]).real();
+            }
+        }
+        if (den > 0) dd = (dnum / den - num * dden / (den * den)).real();
+    }
+    for (int j = 0; j < nn; j++) {
+        if (qc[j] < 0) continue;
+        const auto& m = C[qc[j]].m;
+        auto& dm = tn_.dC[qd[j]].m;
+        const cd a1 = m[1] / d;
+        const cd da1 = dm[1] / d - m[1] * dd / (d * d);
+        double pk = 1.0, pk1 = 0.0;                                  // d^k, k d^(k-1)
+        for (int k = 0; k < K; k++) {
+            dm[k] -= pk * da1 + pk1 * dd * a1;
+            pk1 = (k + 1) * pk;
+            pk *= d;
+        }
+        if (S_.collab[j] == "PH2") { tn_.da1 = da1; tn_.pinned = true; }
+    }
+    std::printf("    [tangent s2b g %.0f] the pin linearised: d %+.9f, dd %+.6e%s; PH2's da1 %+.6e\n", g, d, dd, d_fixed ? " (d fixed)" : "",
+                tn_.da1.real());
+}
+
 }  // namespace en
 }  // namespace mk

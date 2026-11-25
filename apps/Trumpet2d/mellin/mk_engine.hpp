@@ -3911,6 +3911,8 @@ inline void Engine::tangents(const TanOpt& T) {
         double dvi = 0.0, h = 0.0;
         if (mx > 0) {
             h = T.h / mx;
+            // (a DIAGNOSTIC, replay only: MK_TAN_COLH=FACTOR scales the step -- the round-off test; absent: unchanged)
+            if (const char* ch = std::getenv("MK_TAN_COLH")) h *= std::atof(ch);
             auto f = [&](double e) {
                 std::vector<Entry> Cx = C_final_;
                 for (auto& d : tn_.dC) {

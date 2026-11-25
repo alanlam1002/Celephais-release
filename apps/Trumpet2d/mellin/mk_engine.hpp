@@ -3939,6 +3939,9 @@ inline void Engine::tangents(const TanOpt& T) {
             // PH2 at the pinned centre reaches the outputs only through a_1: its series tangent is ~0 after the pin)
             if (!(cs && std::string(cs) == "max") && S2B_ && tn_.pinned && std::abs(tn_.da1) > 0 && std::abs(S2B_A1_) > 0)
                 h = std::min(h, T.h * std::abs(S2B_A1_) / std::abs(tn_.da1));
+            // (research round 1205: a gauge seed's column is a STENCIL OF THE LIE FLOW, not an exact tangent -- step 1e-4 in amplitude units, the
+            // ruling's; MK_TAN_GAUGE_H overrides)
+            if (tn_.gauge_l >= 0) h = std::getenv("MK_TAN_GAUGE_H") ? std::atof(std::getenv("MK_TAN_GAUGE_H")) : 1e-4;
             // (a DIAGNOSTIC, replay only: MK_TAN_COLH=FACTOR scales the step -- the round-off test; absent: unchanged)
             if (const char* ch = std::getenv("MK_TAN_COLH")) h *= std::atof(ch);
             auto f = [&](double e) {
@@ -3978,6 +3981,7 @@ inline void Engine::tangents(const TanOpt& T) {
         R.open('{');
         R.kv("direction", Json::str(tn_.kind + ":" + tn_.name));
         R.kv("partial", tn_.cyl ? "true" : "false");
+        R.kv("method", Json::str(tn_.gauge_l >= 0 ? "stencil of the Lie flow" : "replay"));
         R.kv("h", Json::num(h));
         R.kv("dv_imag", Json::num(dvi));
         R.kv("dv", Json::nums(dv));

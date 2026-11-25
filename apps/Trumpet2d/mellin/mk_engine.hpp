@@ -3911,8 +3911,34 @@ inline void Engine::tangents(const TanOpt& T) {
         std::vector<double> dv;
         double dvi = 0.0, h = 0.0;
         if (tn_.gauge_l >= 0) mx = std::max(mx, 1.0);              // (round 1204: the gauge seed's unit coefficient, as the M3 mode's gc)
-        if (mx > 0) {
-            h = T.h / mx;
+        const bool via_a1 = S2B_ && tn_.pinned && std::abs(tn_.da1) > 0;   // (round 1204: a column may reach the outputs through a_1 alone)
+        if (mx > 0 || via_a1) {
+            h = mx > 0 ? T.h / mx : 1e300;
+            // tangents (research round 1204, item 1): the column's stencil step measured as the matching outputs see the series -- each
+            // moment weighted by x_m^t |ln x_m|^k / k! (x_m = r_m^n; ms_at's evaluation at r_m), h = tan_h |C|_w / |dC|_w: a relative perturbation
+            // tan_h of the series at r_m.  The largest raw coefficient (h = tan_h / max|dC|, MK_TAN_COLSTEP=max) is dominated by high keys the
+            // outputs barely see, and its step's round-off eps |f| / h carried the QB columns' matching-row mismatch (round 1204's measurement)
+            const char* cs = std::getenv("MK_TAN_COLSTEP");
+            if (!(cs && std::string(cs) == "max") && S_.has_md && tn_.gauge_l < 0) {
+                const double xm = std::pow(S_.md_rm, k_.c.n), lx = std::abs(std::log(xm));
+                auto wmax = [&](const std::vector<Entry>& E) {
+                    double m = 0.0;
+                    for (auto& en : E) {
+                        double w = std::pow(xm, en.t.v), f = 1.0;
+                        for (int k = 0; k < K && k < int(en.m.size()); k++) {
+                            if (k) f *= lx / k;
+                            m = std::max(m, std::abs(en.m[k]) * w * f);
+                        }
+                    }
+                    return m;
+                };
+                const double sw = wmax(C_final_), dw = wmax(tn_.dC);
+                if (sw > 0 && dw > 0) h = T.h * sw / dw;
+            }
+            // (round 1204: under MK_S2B the stencil also moves the flow's amplitude, a_1 + e da1 -- the same relative bound on it; a target on
+            // PH2 at the pinned centre reaches the outputs only through a_1: its series tangent is ~0 after the pin)
+            if (!(cs && std::string(cs) == "max") && S2B_ && tn_.pinned && std::abs(tn_.da1) > 0 && std::abs(S2B_A1_) > 0)
+                h = std::min(h, T.h * std::abs(S2B_A1_) / std::abs(tn_.da1));
             // (a DIAGNOSTIC, replay only: MK_TAN_COLH=FACTOR scales the step -- the round-off test; absent: unchanged)
             if (const char* ch = std::getenv("MK_TAN_COLH")) h *= std::atof(ch);
             auto f = [&](double e) {

@@ -622,6 +622,29 @@ inline void Engine::run() {
     std::map<double, std::pair<Vec, Vec>> cache;                    // meff_cache: the converged operator per integer centre
     std::map<double, double> nfloor;                                // --newton-floor-memo: per centre, the floor a futile Newton step found
     std::vector<double> rel_hist;                                   // --pass-stop: the pass changes relative to the series' scale
+    // tangents P1 (a) (research round 1219; MK_PASS_ACCEL=aitken, default off -- unset, production unchanged): the passes' fixed point accelerated
+    // on its dominant mode.  P0 measured a constant contraction (0.098 at 0.40, 0.090 at 0.30) from pass 3 on: one linear mode, e_p = lambda^p v.
+    // At the end of a pass whose last two contraction ratios agree (|lambda_p / lambda_(p-1) - 1| < MK_PASS_ACCEL_TOL, default 0.05) and
+    // lambda_p < 0.5, every entry present in both the pass's series and the previous one's (the same column, key and size) is extrapolated to the
+    // mode's limit, C <- C + lambda / (1 - lambda) (C - Cprev) (Aitken's delta-squared with the ratio of the change norms); the next two passes are
+    // then plain before another extrapolation.  The stopping rule is production's: a run stops only on a plain pass's own change.  Refused
+    // with the replay (MK_TAN): the tangents follow the passes as executed.
+    static const std::string PASS_ACCEL = std::getenv("MK_PASS_ACCEL") ? std::getenv("MK_PASS_ACCEL") : "";
+    static const double PASS_ACCEL_TOL = std::getenv("MK_PASS_ACCEL_TOL") ? std::atof(std::getenv("MK_PASS_ACCEL_TOL")) : 0.05;
+    // MK_PASS_ACCEL=anderson (research round 1220): Anderson mixing with a history of MK_PASS_ACCEL_M (default 2) passes, from pass
+    // MK_PASS_ACCEL_FROM (default 2): a pass maps its start Cprev to its end C = G(Cprev), residual f = C - Cprev; with the last m differences
+    // dF, dG of (f, G) the next start is G - dG gamma, gamma = argmin |f - dF gamma| (real gamma; the entries' real and imaginary parts stacked;
+    // a tiny ridge).  The history restarts whenever the set of entries (column, key, size) changes.  The stopping rule is production's (every
+    // pass's own change is the true residual |G(x) - x|).
+    static const int PASS_ACCEL_M = std::getenv("MK_PASS_ACCEL_M") ? std::atoi(std::getenv("MK_PASS_ACCEL_M")) : 2;
+    static const int PASS_ACCEL_FROM = std::getenv("MK_PASS_ACCEL_FROM") ? std::atoi(std::getenv("MK_PASS_ACCEL_FROM")) : 2;
+    if (!PASS_ACCEL.empty() && PASS_ACCEL != "aitken" && PASS_ACCEL != "anderson")
+        throw std::runtime_error("mk: MK_PASS_ACCEL=" + PASS_ACCEL + " (aitken | anderson)");
+    std::vector<std::vector<double>> and_f, and_g;                  // (P1 a, anderson) the history: residuals and images, flattened
+    std::string and_sig;                                            // (P1 a, anderson) the entries' structure the history belongs to
+    if (!PASS_ACCEL.empty() && tn_.on) throw std::runtime_error("mk: MK_PASS_ACCEL with the replay (MK_TAN): refused");
+    std::vector<double> acc_dch;                                    // (P1 a) the plain passes' changes since the last extrapolation
+    int acc_n = 0;                                                  // (P1 a) extrapolations applied
     std::map<double, int> rk_fix;
     std::map<double, Vec> c_warm;
     std::vector<std::pair<std::string, Key>> fams;                  // fams_offl, in insertion order
@@ -3350,8 +3373,99 @@ inline void Engine::run() {
             rel_hist.push_back(dch / std::max(scl > 0 ? scl : 1.0, 1e-300));
             if (ps && rel_hist.size() >= 2 && rel_hist.back() < c_.pass_stop && rel_hist[rel_hist.size() - 2] < c_.pass_stop) { ps++; break; }
         }
+        if (PASS_ACCEL == "anderson" && ps >= PASS_ACCEL_FROM) {   // tangents P1 (a), Anderson: see above
+            std::vector<const Entry*> pv(C.size(), nullptr);
+            std::string sig_;
+            bool ok_ = true;
+            for (size_t e = 0; e < C.size(); e++) {
+                for (auto& q : Cprev)
+                    if (q.j == C[e].j && keq(q.t, C[e].t)) { pv[e] = &q; break; }
+                if (!pv[e] || pv[e]->nb != C[e].nb || pv[e]->m.size() != C[e].m.size()) { ok_ = false; break; }
+                sig_ += std::to_string(C[e].j) + ":" + Json::num(C[e].t.v) + ":" + std::to_string(C[e].m.size()) + ";";
+            }
+            if (!ok_ || sig_ != and_sig) { and_f.clear(); and_g.clear(); and_sig = ok_ ? sig_ : ""; }
+            if (ok_) {
+                std::vector<double> f_, g_;
+                for (size_t e = 0; e < C.size(); e++)
+                    for (size_t i = 0; i < C[e].m.size(); i++) {
+                        const cd gv = C[e].m[i], fv = gv - pv[e]->m[i];
+                        g_.push_back(gv.real()); g_.push_back(gv.imag());
+                        f_.push_back(fv.real()); f_.push_back(fv.imag());
+                    }
+                and_f.push_back(f_); and_g.push_back(g_);
+                if (int(and_f.size()) > PASS_ACCEL_M + 1) { and_f.erase(and_f.begin()); and_g.erase(and_g.begin()); }
+                const int mk = int(and_f.size()) - 1;
+                if (mk >= 1) {
+                    const size_t n_ = f_.size();
+                    std::vector<std::vector<double>> dF(mk, std::vector<double>(n_)), dG(mk, std::vector<double>(n_));
+                    for (int a = 0; a < mk; a++)
+                        for (size_t i = 0; i < n_; i++) { dF[a][i] = and_f[a + 1][i] - and_f[a][i]; dG[a][i] = and_g[a + 1][i] - and_g[a][i]; }
+                    std::vector<double> A(size_t(mk) * mk, 0.0), b(mk, 0.0);
+                    for (int a = 0; a < mk; a++) {
+                        for (int c = 0; c < mk; c++) for (size_t i = 0; i < n_; i++) A[size_t(a) * mk + c] += dF[a][i] * dF[c][i];
+                        for (size_t i = 0; i < n_; i++) b[a] += dF[a][i] * f_[i];
+                    }
+                    double tr = 0.0;
+                    for (int a = 0; a < mk; a++) tr += A[size_t(a) * mk + a];
+                    for (int a = 0; a < mk; a++) A[size_t(a) * mk + a] += 1e-14 * std::max(tr, 1e-300);
+                    for (int c = 0; c < mk; c++) {                  // Gaussian elimination with partial pivoting (mk <= 3)
+                        int pr = c;
+                        for (int r_ = c + 1; r_ < mk; r_++) if (std::abs(A[size_t(r_) * mk + c]) > std::abs(A[size_t(pr) * mk + c])) pr = r_;
+                        for (int q = 0; q < mk; q++) std::swap(A[size_t(c) * mk + q], A[size_t(pr) * mk + q]);
+                        std::swap(b[c], b[pr]);
+                        for (int r_ = c + 1; r_ < mk; r_++) {
+                            const double fct = A[size_t(r_) * mk + c] / A[size_t(c) * mk + c];
+                            for (int q = c; q < mk; q++) A[size_t(r_) * mk + q] -= fct * A[size_t(c) * mk + q];
+                            b[r_] -= fct * b[c];
+                        }
+                    }
+                    std::vector<double> gm(mk, 0.0);
+                    for (int c = mk - 1; c >= 0; c--) {
+                        double v = b[c];
+                        for (int q = c + 1; q < mk; q++) v -= A[size_t(c) * mk + q] * gm[q];
+                        gm[c] = v / A[size_t(c) * mk + c];
+                    }
+                    size_t i = 0;
+                    for (size_t e = 0; e < C.size(); e++)
+                        for (size_t k2 = 0; k2 < C[e].m.size(); k2++, i += 2) {
+                            double re = 0.0, im = 0.0;
+                            for (int a = 0; a < mk; a++) { re += gm[a] * dG[a][i]; im += gm[a] * dG[a][i + 1]; }
+                            C[e].m[k2] -= cd(re, im);
+                        }
+                    acc_n++;
+                    std::printf("  [pass-accel] pass %d: anderson m %d, gamma", ps, mk);
+                    for (int a = 0; a < mk; a++) std::printf(" %+.6f", gm[a]);
+                    std::printf("\n");
+                }
+            }
+        }
+        if (PASS_ACCEL == "aitken" && ps >= 1) {                    // tangents P1 (a): see above
+            acc_dch.push_back(dch);
+            const size_t m_ = acc_dch.size();
+            if (m_ >= 3) {
+                const double l1 = acc_dch[m_ - 1] / acc_dch[m_ - 2], l0 = acc_dch[m_ - 2] / acc_dch[m_ - 3];
+                if (l1 > 0 && l1 < 0.5 && l0 > 0 && std::abs(l1 / l0 - 1.0) < PASS_ACCEL_TOL) {
+                    const double f = l1 / (1.0 - l1);
+                    size_t ne = 0, nskip = 0;
+                    for (auto& en : C) {
+                        const Entry* pv = nullptr;
+                        for (auto& q : Cprev)
+                            if (q.j == en.j && keq(q.t, en.t)) { pv = &q; break; }
+                        if (!pv || pv->nb != en.nb || pv->m.size() != en.m.size()) { nskip++; continue; }
+                        for (size_t i = 0; i < en.m.size(); i++) en.m[i] += f * (en.m[i] - pv->m[i]);
+                        ne++;
+                    }
+                    acc_n++;
+                    std::printf("  [pass-accel] pass %d: lambda %.6f (previous %.6f): %zu entries extrapolated by %.6f (C - Cprev), %zu skipped (new)\n", ps,
+                                l1, l0, ne, f, nskip);
+                    acc_dch.clear();
+                }
+            }
+        }
     }
+    if (!PASS_ACCEL.empty()) std::printf("  [pass-accel] %d extrapolation(s); %d passes run\n", acc_n, ps);
     J_.close(']');
+    if (!PASS_ACCEL.empty()) J_.kv("pass_accel", "{\"mode\":" + Json::str(PASS_ACCEL) + ",\"extrapolations\":" + std::to_string(acc_n) + "}");
     tan_finish(C);                                                  // (research round 1093: MK_TAN_OUT / MK_SERIES_OUT, before the gauge flow)
     J_.kv("families", families_json);
     if (AREL > 0) {

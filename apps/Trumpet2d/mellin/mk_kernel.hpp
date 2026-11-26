@@ -207,8 +207,37 @@ struct Kernel {
         double& t; long& n; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
         ~RunTimer() { t += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); n++; }
     };
+    // tangents (research round 1215, a MEASUREMENT behind MK_TAN_PROF=1; unset: nothing recorded, nothing changed): per call-site label (set by
+    // the engine's ProfLab guards) the calls, wall time and batch members of run (value / dual) and run2 -- the dual-to-value cost ratio and the
+    // per-member cost that plan (B)'s estimate needs.  Timers only: the arithmetic is untouched either way.
+    struct ProfStat { long n = 0; double t = 0.0; long members = 0; };
+    std::map<std::string, ProfStat> prof;
+    std::string prof_lab = "fwd";
+    static bool prof_on() {
+        static const bool on = std::getenv("MK_TAN_PROF") && std::string(std::getenv("MK_TAN_PROF")) == "1";
+        return on;
+    }
+    struct ProfRec {
+        Kernel* k; const char* kind; long mem; std::chrono::steady_clock::time_point t0;
+        ProfRec(Kernel* k_, const char* kind_, const std::vector<Entry>& C) : k(prof_on() ? k_ : nullptr), kind(kind_), mem(1) {
+            if (!k) return;
+            for (auto& e : C) mem = std::max(mem, long(e.nb));
+            t0 = std::chrono::steady_clock::now();
+        }
+        ~ProfRec() {
+            if (!k) return;
+            ProfStat& s = k->prof[k->prof_lab + "|" + kind];
+            s.n++; s.members += mem; s.t += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        }
+    };
+    struct ProfLab {                           // a scoped suffix of the call-site label (MK_TAN_PROF only)
+        Kernel* k; size_t n0 = 0;
+        ProfLab(Kernel& k_, const char* suf) : k(prof_on() ? &k_ : nullptr) { if (k) { n0 = k->prof_lab.size(); k->prof_lab += suf; } }
+        ~ProfLab() { if (k) k->prof_lab.resize(n0); }
+    };
     void run(const std::vector<Entry>& C, const std::vector<Entry>* dC, double top) {
         RunTimer tm_{t_run, n_run};
+        ProfRec pr_(this, dC ? "dual" : "value", C);
         Ser F[6], dF[6], U2, dU2;
         if (use_fin) {
             for (int k = 0; k < 6; k++) F[k] = Fin[k];
@@ -397,6 +426,7 @@ struct Kernel {
         return c.make(std::move(d), true, 0, BIG);
     }
     void run2(const std::vector<Entry>& C, const std::vector<Entry>& dC, const DCyl& dcy, double top) {
+        ProfRec pr_(this, "run2", C);                                  // (tangents round 1215: MK_TAN_PROF)
         Ser F[6], dF[6], U2, dU2, F2[6], F12[6];
         fields(C, top, F, &U2);
         fields(dC, top, dF, &dU2, true);

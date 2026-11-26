@@ -159,6 +159,7 @@ inline long g_meff_calls = 0;
 inline void meff(Kernel& kr, const Proj& P, const std::vector<Entry>& Cx, double g, double top, int mode, double h, int chunk,
                  std::vector<cd>& Ms, std::vector<cd>& Mc) {
     Kernel::RunTimer tm_{g_meff_secs, g_meff_calls};
+    Kernel::ProfLab pl_(kr, ":meff");                                // (tangents round 1215: MK_TAN_PROF)
     Ctx& c = kr.c;
     int K = c.K, nn = P.nn, nc = P.nc, NB = P.nb * nn;
     // research round 1187: the operator is the quadratic in (sigma - g) read from log moments 0, 1, 2 (the +-h at moment 2 below): K < 3 indexed

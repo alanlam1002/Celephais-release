@@ -513,6 +513,30 @@ class Engine {
         return r;
     }
     void tan_init(std::vector<Entry>& C);
+    // tangents (research round 1215, a MEASUREMENT behind MK_TAN_PROF=1): per forward step its defect iterations, residual (rows after / the last
+    // off-integer residual), stop threshold, whether the cap ended it, and the block's size (X's entries: nodes x NB) -- plan (B)'s J_X column
+    // count and the caps that research asks to be reported; written OUT/kprof.json with the kernel's per-label calls and times
+    std::vector<std::string> prof_steps_;
+    void prof_step(int ps, double g, bool isint, const std::vector<double>& hist, double res, double stop, bool cap, size_t nX, int NB) {
+        prof_steps_.push_back("{\"pass\":" + std::to_string(ps) + ",\"g\":" + Json::num(g) + ",\"isint\":" + (isint ? "true" : "false") +
+                              ",\"iters\":" + std::to_string(hist.size()) + ",\"hist\":" + Json::nums(hist) + ",\"res\":" + Json::num(res) +
+                              ",\"stop\":" + Json::num(stop) + ",\"cap\":" + (cap ? "true" : "false") + ",\"nX\":" + std::to_string(nX) +
+                              ",\"NB\":" + std::to_string(NB) + "}");
+    }
+    void prof_write() const {
+        if (!Kernel::prof_on()) return;
+        std::string s = "{\"kernel\":{";
+        bool first = true;
+        for (auto& kv : k_.prof) {
+            s += std::string(first ? "" : ",") + Json::str(kv.first) + ":{\"n\":" + std::to_string(kv.second.n) + ",\"secs\":" + Json::num(kv.second.t) +
+                 ",\"members\":" + std::to_string(kv.second.members) + "}";
+            first = false;
+        }
+        s += "},\"steps\":[";
+        for (size_t i = 0; i < prof_steps_.size(); i++) s += (i ? "," : "") + prof_steps_[i];
+        s += "]}";
+        std::ofstream(out_ + "/kprof.json") << s;
+    }
     void tan_step(double g);
     void tan_finish(const std::vector<Entry>& C);
     static bool step_match(double g, int ps) {
@@ -2914,7 +2938,13 @@ inline void Engine::run() {
                     cd amp(0.0, 0.0);
                     if (rk) dt::offl_start(o.X0, o.Wq, nn, NB, S_.e1, Rcur_, !lab.empty(), datum, c_.cond_fit, eval(Cs, g), Wn, Xs, hf, amp);
                     st::DefectOut d;
-                    st::defect_off(Xs, o.Minv, Wn, K, NB, S_.e1, Rcur_, std::max(c_.defect, 4), c_.robust, rowsfn(Cs, g), d);
+                    {
+                        Kernel::ProfLab pd_(k_, ":defect_off");             // (tangents round 1215: MK_TAN_PROF)
+                        st::defect_off(Xs, o.Minv, Wn, K, NB, S_.e1, Rcur_, std::max(c_.defect, 4), c_.robust, rowsfn(Cs, g), d);
+                    }
+                    if (Kernel::prof_on())                                  // the step's residual, iterations, cap, block size
+                        prof_step(ps, g, false, d.hist, d.hist.empty() ? 0.0 : d.hist.back(), st::OFF_STOP,
+                                  !d.hist.empty() && int(d.hist.size()) == std::max(c_.defect, 4) + 1 && d.hist.back() >= st::OFF_STOP, d.X.size(), NB);
                     C = with_grade(k_.c, C, d.X, g, P_.kofs, S_.e1, Rcur_);
                     if (EXPL_SPUR_ && SPURX_.count(Engine::kf(g))) {
                         // research round 1143 (round 1142's clause): the spurious root's local principal part -- the Keldysh part of the step's
@@ -3106,7 +3136,13 @@ inline void Engine::run() {
                 k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " defect";
                 st::DefectOut d;
                 if (rp_match) { rp_.X0its.push_back(Xg); rp_.Msits.push_back(Ms); }
-                st::defect_int(Xg, o.Minv, Wn, act, Smax, K, NB, S_.e1, Rcur_, c_.defect, c_.robust, dfix, rowsfn(Cs, g), d);
+                {
+                    Kernel::ProfLab pd_(k_, ":defect_int");                 // (tangents round 1215: MK_TAN_PROF)
+                    st::defect_int(Xg, o.Minv, Wn, act, Smax, K, NB, S_.e1, Rcur_, c_.defect, c_.robust, dfix, rowsfn(Cs, g), d);
+                }
+                if (Kernel::prof_on())                                      // the step's residual, iterations, cap, block size
+                    prof_step(ps, g, true, d.hist, d.rows_after, st::DC_STOP * std::max(Smax, 1e-300),
+                              int(d.hist.size()) == c_.defect && !d.hist.empty() && d.hist.back() > st::DC_STOP * std::max(Smax, 1e-300), d.X.size(), NB);
                 Xg = d.X;
                 if (rp_match) rp_.Xits.push_back(Xg);
                 if (rp_match) rp_.nits = newt + 1;
@@ -3742,6 +3778,7 @@ inline std::vector<cd> Engine::fvec(Kernel& kc, const std::vector<Entry>& Cx, co
                                     const std::vector<double>& cents, const cd* s2b_a1) {
     int nn = P_.nn, nc = P_.nc, K = kc.c.K, NF = kc.c.NF;
     if (!S_.eval_r.empty()) throw std::runtime_error("mk: --eval-r (the outputs at radii) is not ported");
+    Kernel::ProfLab pl_(kc, ":fvec");                                 // (tangents round 1215: MK_TAN_PROF)
     kc.run(Cx, nullptr, c_.top);
     std::vector<cd> v;
     auto gal = [&](double gg, bool soft) {
@@ -4328,6 +4365,7 @@ inline void Engine::tangents(const TanOpt& T) {
         F.close('}');
         std::ofstream(out_ + "/fit.json") << F.s.str();
     }
+    prof_write();                                                   // (tangents round 1215: MK_TAN_PROF only)
     J.okey("directions");
     J.open('[');
     for (size_t i = 0; i < dirs.size(); i++) {

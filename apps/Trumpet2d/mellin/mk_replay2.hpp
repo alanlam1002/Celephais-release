@@ -32,6 +32,7 @@ namespace en {
 // no second-order response is needed (the operator IS a difference).  Only dMs (the conditions' Mc is not differentiated).
 inline void meff_dual(Kernel& kr, const Proj& P, const std::vector<Entry>& Cx, const std::vector<Entry>& dCx, double g, double top, double h, int chunk,
                       std::vector<cd>& dMs, const Kernel::DCyl* dcy = nullptr) {
+    Kernel::ProfLab pl_(kr, ":meff_dual");                           // (tangents round 1215: MK_TAN_PROF)
     Ctx& c = kr.c;
     int K = c.K, nn = P.nn, NB = P.nb * nn;
     if (K < 3) throw std::runtime_error("mk: K = " + std::to_string(K) + " log moments: the step's operator needs K >= 3 (round 1187)");
@@ -163,6 +164,7 @@ inline void Engine::tan_init(std::vector<Entry>& C) {
 }
 
 inline void Engine::tan_step(double g) {
+    Kernel::ProfLab pl_(k_, "/tan");                                  // (tangents round 1215: MK_TAN_PROF -- the replay's kernel calls)
     const RpCap& r = rp_;
     if (r.iscl) throw std::runtime_error("mk tangent: a cluster step (stage 2 part 2)");
     const int ND = 1, K = k_.c.K, nn = P_.nn, NB = nn, N = int(S_.e1.size());
@@ -330,7 +332,10 @@ inline void Engine::tan_step(double g) {
                 dWn = to.dWq;
                 if (dd0 != 0.0) tn_.seeded = true;
             }
-            sd::defect_off_t(Xs, {dXs}, o.Minv, tc.dMinv, Wn, dWn, K, NB, e1, R, std::max(c_.defect, 4), c_.robust, rowsT, ND, dd);
+            {
+                Kernel::ProfLab pd_(k_, ":defect_off");               // (tangents round 1215: MK_TAN_PROF)
+                sd::defect_off_t(Xs, {dXs}, o.Minv, tc.dMinv, Wn, dWn, K, NB, e1, R, std::max(c_.defect, 4), c_.robust, rowsT, ND, dd);
+            }
         } else {
             // the data rule (--cond-fit) and the defect correction
             Vec Xs = o.X0, dXs = tc.dX0[0];
@@ -368,7 +373,10 @@ inline void Engine::tan_step(double g) {
                 }
             }
             Xs_dbg = Xs;
-            sd::defect_int_t(Xs, {dXs}, o.Minv, tc.dMinv, Wn, dWn, act, r.Smax, K, NB, e1, R, c_.defect, c_.robust, fixp, rowsT, ND, dd);
+            {
+                Kernel::ProfLab pd_(k_, ":defect_int");               // (tangents round 1215: MK_TAN_PROF)
+                sd::defect_int_t(Xs, {dXs}, o.Minv, tc.dMinv, Wn, dWn, act, r.Smax, K, NB, e1, R, c_.defect, c_.robust, fixp, rowsT, ND, dd);
+            }
         }
         Xk = dd.X;
         dXk = dd.dX[0];

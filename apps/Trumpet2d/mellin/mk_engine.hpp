@@ -3076,7 +3076,51 @@ inline void Engine::run() {
                 k_.c.trace_tag = "pass " + std::to_string(ps) + " g " + std::to_string(g) + " defect";
                 st::DefectOut d;
                 if (rp_match) { rp_.X0its.push_back(Xg); rp_.Msits.push_back(Ms); }
-                st::defect_int(Xg, o.Minv, Wn, act, Smax, K, NB, S_.e1, Rcur_, c_.defect, c_.robust, dfix, rowsfn(Cs, g), d);
+                // research round 1216 (diagnostic, default off): MK_C2_DUMP=DIR -- at the S2b centre (centre 2) each defect iteration's masked rows,
+                // raw correction, held correction and X written to DIR/c2_p<pass>_n<newton>_it<i>_{rbd,dxr,dxh,x}.npy; at the loop's start the
+                // pinned members' directions u_j (column j's member at the offset d: moments d^k, at the nodes) and their row images
+                // (rows(X0 + e u_j) - rows(X0 - e u_j)) / 2e, DIR/c2_p<pass>_n<newton>_{u,img}.npy, and the offset used.  Unset: unchanged.
+                std::function<void(int, const Vec&, const Vec&, const Vec&, const Vec&)> c2dump_;
+                const char* c2d_ = std::getenv("MK_C2_DUMP");
+                const bool c2on_ = c2d_ && S2B_ && isint && std::abs(SIGMA2_ - g) < 0.5;
+                if (c2on_) {
+                    const std::string pre_ = std::string(c2d_) + "/c2_p" + std::to_string(ps) + "_n" + std::to_string(newt);
+                    const double dof_ = S2B_DPIN_ != 0.0 ? S2B_DPIN_ : SIGMA2_ - g;
+                    auto rows_ = rowsfn(Cs, g);
+                    const size_t nx_ = Xg.size(), nr_ = size_t(K) * NB;
+                    Vec U_(size_t(NB) * nx_), IMG_(size_t(NB) * nr_);
+                    double xs_ = 0.0;
+                    for (auto& z : Xg) xs_ = std::max(xs_, std::abs(z));
+                    const double eps_ = 1e-6 * std::max(xs_, 1e-300);
+                    for (int j = 0; j < NB; j++) {
+                        Vec Mom_(nr_, 0.0);
+                        cd p_ = 1.0;
+                        for (int k = 0; k < K; k++) { Mom_[size_t(k) * NB + j] = p_; p_ *= dof_; }
+                        Vec u_ = ct::nodes_of(Mom_, K, NB, S_.e1, Rcur_);
+                        double us_ = 0.0;
+                        for (auto& z : u_) us_ = std::max(us_, std::abs(z));
+                        Vec Xp_ = Xg, Xm_ = Xg;
+                        const double h_ = eps_ / std::max(us_, 1e-300);
+                        for (size_t i = 0; i < nx_; i++) { Xp_[i] += h_ * u_[i]; Xm_[i] -= h_ * u_[i]; }
+                        Vec rp_ = rows_.gal(Xp_), rm_ = rows_.gal(Xm_);
+                        for (size_t i = 0; i < nx_; i++) U_[size_t(j) * nx_ + i] = u_[i];
+                        for (size_t i = 0; i < nr_; i++) IMG_[size_t(j) * nr_ + i] = (rp_[i] - rm_[i]) / (2 * h_);
+                    }
+                    npy_write(pre_ + "_u.npy", U_.data(), "<c16", {long(NB), long(nx_)}, 16);
+                    npy_write(pre_ + "_img.npy", IMG_.data(), "<c16", {long(NB), long(nr_)}, 16);
+                    std::ofstream(pre_ + "_meta.txt") << "g " << g << " offset " << dof_ << " K " << K << " NB " << NB << " N " << nx_ / NB << " Smax " << Smax
+                                                      << " stop " << st::DC_STOP * std::max(Smax, 1e-300) << " act";
+                    { std::ofstream a_(pre_ + "_act.txt"); for (int j = 0; j < NB; j++) a_ << int(act[j]) << " " << S_.collab[j] << "\n"; }
+                    npy_write(pre_ + "_x0.npy", Xg.data(), "<c16", {long(nx_)}, 16);
+                    c2dump_ = [pre_, nx_, nr_](int it, const Vec& r, const Vec& dr, const Vec& dh, const Vec& x) {
+                        const std::string b = pre_ + "_it" + std::to_string(it);
+                        npy_write(b + "_rbd.npy", r.data(), "<c16", {long(nr_)}, 16);
+                        npy_write(b + "_dxr.npy", dr.data(), "<c16", {long(nx_)}, 16);
+                        npy_write(b + "_dxh.npy", dh.data(), "<c16", {long(nx_)}, 16);
+                        npy_write(b + "_x.npy", x.data(), "<c16", {long(nx_)}, 16);
+                    };
+                }
+                st::defect_int(Xg, o.Minv, Wn, act, Smax, K, NB, S_.e1, Rcur_, c_.defect, c_.robust, dfix, rowsfn(Cs, g), d, c2on_ ? &c2dump_ : nullptr);
                 Xg = d.X;
                 if (rp_match) rp_.Xits.push_back(Xg);
                 if (rp_match) rp_.nits = newt + 1;

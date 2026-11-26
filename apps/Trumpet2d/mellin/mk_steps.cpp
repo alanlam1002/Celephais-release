@@ -97,7 +97,8 @@ static double absmax(const Vec& v) {
 }
 
 void defect_int(const Vec& X0, const std::vector<Vec>& Minv, const std::vector<Vec>& Wq, const std::vector<char>& act, double Smax, int K,
-                int NB, const Vec& e1, double R, int ndc, bool robust, const std::function<Vec(const Vec&)>& dfix, const Rows& rows, DefectOut& o) {
+                int NB, const Vec& e1, double R, int ndc, bool robust, const std::function<Vec(const Vec&)>& dfix, const Rows& rows, DefectOut& o,
+                const std::function<void(int, const Vec&, const Vec&, const Vec&, const Vec&)>* dump) {
     o = DefectOut();
     Vec Xg = X0;
     Vec res0 = tg_dc(Xg, NB, e1, R);
@@ -117,9 +118,12 @@ void defect_int(const Vec& X0, const std::vector<Vec>& Minv, const std::vector<V
         if (o.hist.back() <= stop) break;
         if (robust && o.hist.size() > 1 && o.hist.back() > HALVE * o.hist[o.hist.size() - 2]) break;
         Vec dX = correction(rbd, Minv, K, NB, e1, R);
+        Vec dXr;
+        if (dump) dXr = dX;
         hold(dX, Wq, NB, NB, e1, R);
         for (size_t i = 0; i < Xg.size(); i++) Xg[i] = Xg[i] + dX[i];
         if (dfix) Xg = dfix(Xg);
+        if (dump) (*dump)(itd, rbd, dXr, dX, Xg);
     }
     Vec r1 = tg_dc(Xg, NB, e1, R);
     for (int j = 0; j < NB; j++) o.drift = std::max(o.drift, cabs_(r1[j] - res0[j]));

@@ -49,7 +49,10 @@ int hold_root_K(const std::vector<Vec>& Wq, int NB, const Vec& e1, double R, int
 
 // integer centre.  Minv: N x (NB x NB); Wq: the data rule's normalised directions (rk); act: NB; dfix: --cond-fit's data fix or empty
 void defect_int(const Vec& X0, const std::vector<Vec>& Minv, const std::vector<Vec>& Wq, const std::vector<char>& act, double Smax, int K,
-                int NB, const Vec& e1, double R, int ndc, bool robust, const std::function<Vec(const Vec&)>& dfix, const Rows& rows, DefectOut& o);
+                int NB, const Vec& e1, double R, int ndc, bool robust, const std::function<Vec(const Vec&)>& dfix, const Rows& rows, DefectOut& o,
+                const std::function<void(int, const Vec&, const Vec&, const Vec&, const Vec&)>* dump = nullptr);
+// (research round 1216: dump, when given, is called each iteration with (itd, the masked rows, the raw correction, the held correction, X after
+//  the data fix) -- the MK_C2_DUMP diagnostic; null: unchanged)
 // off-integer centre (Wq: normalised and phased, M2c's offl_start); ndef = max(--defect, 4)
 void defect_off(const Vec& X0, const std::vector<Vec>& Minv, const std::vector<Vec>& Wq, int K, int NB, const Vec& e1, double R, int ndef,
                 bool robust, const Rows& rows, DefectOut& o);

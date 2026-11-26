@@ -3120,7 +3120,10 @@ inline void Engine::run() {
                         npy_write(b + "_x.npy", x.data(), "<c16", {long(nx_)}, 16);
                     };
                 }
-                st::defect_int(Xg, o.Minv, Wn, act, Smax, K, NB, S_.e1, Rcur_, c_.defect, c_.robust, dfix, rowsfn(Cs, g), d, c2on_ ? &c2dump_ : nullptr);
+                // research round 1217 item 3 (MK_C2_ROBUST=1, default off): the stagnation stop (defect_stop_robust) at the S2b centre only -- its
+                // plateau is the pinned members' component (round 1216), which no correction removes; every other step as production
+                const bool c2rob_ = S2B_ && isint && std::abs(SIGMA2_ - g) < 0.5 && std::getenv("MK_C2_ROBUST") && std::string(std::getenv("MK_C2_ROBUST")) == "1";
+                st::defect_int(Xg, o.Minv, Wn, act, Smax, K, NB, S_.e1, Rcur_, c_.defect, c_.robust || c2rob_, dfix, rowsfn(Cs, g), d, c2on_ ? &c2dump_ : nullptr);
                 Xg = d.X;
                 if (rp_match) rp_.Xits.push_back(Xg);
                 if (rp_match) rp_.nits = newt + 1;
